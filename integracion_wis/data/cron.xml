@@ -1,0 +1,57 @@
+<odoo>
+  <data noupdate="1">
+
+        <!-- Cron para ejecutar conciliación de stock semanal -->
+        <record id="cron_conciliacion_stock" model="ir.cron">
+            <field name="name">Conciliación de Stock Semanal</field>
+            <field name="model_id" ref="model_conciliacion_stock"/>
+            <field name="state">code</field>
+            <field name="code">model.cron_conciliacionStock()</field>
+            <field name="interval_number">1</field>
+            <field name="interval_type">weeks</field>
+            <field name="numbercall">-1</field>
+            <field name="doall" eval="False"/>
+            <field name="active" eval="True"/>
+        </record>
+
+    <!-- Conciliación semanal de Clientes -->
+    <record id="ir_cron_wis_conciliar_clientes" model="ir.cron">
+      <field name="name">WIS: Conciliación Clientes</field>
+      <field name="model_id" ref="model_conciliacion_maestros"/>
+      <field name="state">code</field>
+      <field name="code">model._cron_conciliar_clientes()</field>
+      <field name="interval_number">1</field>
+      <field name="interval_type">weeks</field>
+      <field name="numbercall">-1</field>
+      <field name="doall" eval="False"/>
+      <field name="active" eval="True"/>
+    </record>
+
+    <!-- Conciliación semanal de Productos -->
+    <record id="ir_cron_wis_conciliar_productos" model="ir.cron">
+      <field name="name">WIS: Conciliación Productos</field>
+      <field name="model_id" ref="model_conciliacion_maestros"/>
+      <field name="state">code</field>
+      <field name="code">model._cron_conciliar_productos()</field>
+      <field name="interval_number">1</field>
+      <field name="interval_type">weeks</field>
+      <field name="numbercall">-1</field>
+      <field name="doall" eval="False"/>
+      <field name="active" eval="True"/>
+    </record>
+
+    <!-- Conciliación semanal de Códigos de Barras -->
+    <record id="ir_cron_wis_conciliar_codigos" model="ir.cron">
+      <field name="name">WIS: Conciliación Códigos de Barras</field>
+      <field name="model_id" ref="model_conciliacion_maestros"/>
+      <field name="state">code</field>
+      <field name="code">model._cron_conciliar_codigos_barras()</field>
+      <field name="interval_number">1</field>
+      <field name="interval_type">weeks</field>
+      <field name="numbercall">-1</field>
+      <field name="doall" eval="False"/>
+      <field name="active" eval="True"/>
+    </record>
+
+  </data>
+</odoo>

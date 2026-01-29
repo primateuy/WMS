@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+        <data>
+        
+
+        <record id="view_picking_type_form_inherit_wms" model="ir.ui.view">
+            <field name="name">stock.picking.type.form.inherit.wms</field>
+            <field name="model">stock.picking.type</field>
+            <field name="inherit_id" ref="stock.view_picking_type_form"/>
+            <field name="arch" type="xml">
+                <!-- Opción 1: Agregar después del notebook -->
+                <xpath expr="//notebook" position="inside">
+                    <page string="Integración WMS" name="wms_integration">
+                        <group>
+                            <field name="integracion_wms"/>
+                            <field name="tipo_pedido_wms" invisible="not integracion_wms"/>
+                            <field name="metodo_creacion_wms" invisible="not integracion_wms"/>
+                            <field name="estado_disparo_wms" invisible="not integracion_wms"/>
+                            <field name="metodo_cancelacion_wms" invisible="not integracion_wms"/>
+                            <field name="metodo_preparacion_wms" invisible="not integracion_wms"/>
+                            <field name="emitir_factura_antes_envio" invisible="not integracion_wms"/>
+                        </group>
+                    </page>
+                </xpath>
+            </field>
+        </record>    
+    </data>
+</odoo>

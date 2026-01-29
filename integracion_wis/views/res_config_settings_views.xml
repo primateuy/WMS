@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <!-- Vista de configuración de WIS en Settings -->
+        <record id="res_config_settings_view_form_wis" model="ir.ui.view">
+            <field name="name">res.config.settings.view.form.inherit.wis</field>
+            <field name="model">res.config.settings</field>
+            <field name="priority" eval="60"/>
+            <field name="inherit_id" ref="base.res_config_settings_view_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//div[hasclass('settings')]" position="inside">
+                    <div class="app_settings_block" data-string="Integración WIS" string="Integración WIS" data-key="integracion_wis" groups="base.group_system">
+                        <h2>Integración WIS</h2>
+                        
+                        <!-- Activación General -->
+                        <div class="row mt16 o_settings_container">
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_integration_enabled"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_integration_enabled"/>
+                                    <div class="text-muted">
+                                        Activar o desactivar la integración automática con WIS
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Configuración de API -->
+                        <div class="row mt16 o_settings_container" attrs="{'invisible': [('wis_integration_enabled', '=', False)]}">
+                            <div class="col-12">
+                                <h3>Configuración de API</h3>
+                            </div>
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_client_id" required="1" attrs="{'required': [('wis_integration_enabled', '=', True)]}"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_client_id"/>
+                                    <div class="text-muted">
+                                        ID del cliente para la autenticación con WIS
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_client_secret" password="True" required="1" attrs="{'required': [('wis_integration_enabled', '=', True)]}"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_client_secret"/>
+                                    <div class="text-muted">
+                                        Secreto del cliente para autenticación
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_url_access_token" required="1" attrs="{'required': [('wis_integration_enabled', '=', True)]}"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_url_access_token"/>
+                                    <div class="text-muted">
+                                        URL para obtener el token de acceso
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_api_link" required="1" attrs="{'required': [('wis_integration_enabled', '=', True)]}"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_api_link"/>
+                                    <div class="text-muted">
+                                        URL base de la API de WIS
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_empresa_id"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_empresa_id"/>
+                                    <div class="text-muted">
+                                        ID de la empresa en el sistema WIS
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Botón de prueba de conexión -->
+                            <div class="col-12">
+                                <button name="action_test_wis_connection" type="object" string="Probar Conexión" class="btn-primary" attrs="{'invisible': [('wis_integration_enabled', '=', False)]}"/>
+                            </div>
+                        </div>
+
+                        <!-- Configuración de Sincronización -->
+                        <div class="row mt16 o_settings_container" attrs="{'invisible': [('wis_integration_enabled', '=', False)]}">
+                            <div class="col-12">
+                                <h3>Configuración de Sincronización Automática</h3>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_auto_sync_products"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_auto_sync_products"/>
+                                    <div class="text-muted">
+                                        Sincronizar productos automáticamente al crearlos o modificarlos
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_auto_sync_partners"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_auto_sync_partners"/>
+                                    <div class="text-muted">
+                                        Sincronizar clientes y proveedores automáticamente
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_auto_sync_orders"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_auto_sync_orders"/>
+                                    <div class="text-muted">
+                                        Sincronizar pedidos automáticamente al confirmarlos
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_auto_sync_pickings"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_auto_sync_pickings"/>
+                                    <div class="text-muted">
+                                        Sincronizar albaranes automáticamente
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Configuración de WebHooks -->
+                        <div class="row mt16 o_settings_container" attrs="{'invisible': [('wis_integration_enabled', '=', False)]}">
+                            <div class="col-12">
+                                <h3>Configuración de WebHooks</h3>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_webhook_enabled"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_webhook_enabled"/>
+                                    <div class="text-muted">
+                                        Activar recepción de webhooks desde WIS
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box" attrs="{'invisible': [('wis_webhook_enabled', '=', False)]}">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_webhook_secret_key" password="True"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_webhook_secret_key"/>
+                                    <div class="text-muted">
+                                        Clave secreta para autenticar webhooks
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Configuración Avanzada -->
+                        <div class="row mt16 o_settings_container" attrs="{'invisible': [('wis_integration_enabled', '=', False)]}">
+                            <div class="col-12">
+                                <h3>Configuración Avanzada</h3>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_enable_debug_logs"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_enable_debug_logs"/>
+                                    <div class="text-muted">
+                                        Activar logs detallados para debug
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_api_timeout"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_api_timeout"/>
+                                    <div class="text-muted">
+                                        Tiempo límite para llamadas a la API (segundos)
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12 col-lg-6 o_setting_box">
+                                <div class="o_setting_left_pane">
+                                    <field name="wis_max_retries"/>
+                                </div>
+                                <div class="o_setting_right_pane">
+                                    <label for="wis_max_retries"/>
+                                    <div class="text-muted">
+                                        Número máximo de reintentos en caso de fallo
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Botones de configuración avanzada -->
+                            <div class="col-12">
+                                <button name="action_open_wis_config" type="object" string="Configuración Avanzada" class="btn-secondary mr8"/>
+                                <button name="action_open_wis_webhooks" type="object" string="Gestionar WebHooks" class="btn-secondary"/>
+                            </div>
+                        </div>
+                    </div>
+                </xpath>
+            </field>
+        </record>
+    </data>
+</odoo>

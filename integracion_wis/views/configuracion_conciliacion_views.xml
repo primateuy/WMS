@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Vista Form de Configuración de Conciliación -->
+    <record id="view_configuracion_conciliacion_form" model="ir.ui.view">
+        <field name="name">configuracion.conciliacion.form</field>
+        <field name="model">configuracion.conciliacion</field>
+        <field name="arch" type="xml">
+            <form string="Configuración de Conciliación">
+                <header>
+                    <button name="ejecutar_conciliacion_manual" 
+                            string="Ejecutar Ahora" 
+                            type="object" 
+                            class="oe_highlight"
+                            invisible="not activo"/>
+                    <button name="toggle_active" 
+                            string="Activar" 
+                            type="object" 
+                            class="btn-success"
+                            invisible="activo"/>
+                    <button name="toggle_active" 
+                            string="Desactivar" 
+                            type="object" 
+                            class="btn-danger"
+                            invisible="not activo"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button type="object" 
+                                name="ver_conciliaciones" 
+                                class="oe_stat_button" 
+                                icon="fa-list">
+                            <field name="total_conciliaciones" widget="statinfo" string="Conciliaciones"/>
+                        </button>
+                        <button type="object" 
+                                name="ver_discrepancias" 
+                                class="oe_stat_button" 
+                                icon="fa-exclamation-triangle">
+                            <field name="total_discrepancias" widget="statinfo" string="Discrepancias"/>
+                        </button>
+                    </div>
+                    
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name" placeholder="Nombre de la configuración"/>
+                        </h1>
+                    </div>
+                    
+                    <group>
+                        <group>
+                            <field name="activo"/>
+                            <field name="tipo_conciliacion"/>
+                            <field name="frecuencia"/>
+                            <field name="intervalo" invisible="frecuencia == 'manual'"/>
+                        </group>
+                        <group>
+                            <field name="hora_ejecucion" invisible="frecuencia == 'manual'"/>
+                            <field name="dia_semana" invisible="frecuencia != 'semanal'"/>
+                            <field name="dia_mes" invisible="frecuencia != 'mensual'"/>
+                            <field name="proxima_ejecucion" readonly="1" invisible="frecuencia == 'manual'"/>
+                        </group>
+                    </group>
+                    
+                    <notebook>
+                        <page string="Configuraciones de Sincronización">
+                            <group>
+                                <group string="Productos">
+                                    <field name="sincronizar_productos"/>
+                                    <field name="incluir_productos_inactivos"/>
+                                    <field name="incluir_variantes"/>
+                                    <field name="campos_producto_incluir" widget="many2many_tags"/>
+                                </group>
+                                <group string="Clientes">
+                                    <field name="sincronizar_clientes"/>
+                                    <field name="incluir_clientes_inactivos"/>
+                                    <field name="campos_cliente_incluir" widget="many2many_tags"/>
+                                </group>
+                            </group>
+                            
+                            <group string="Códigos de Barras">
+                                <field name="sincronizar_codigos_barras"/>
+                                <field name="crear_codigos_faltantes"/>
+                            </group>
+                        </page>
+                        
+                        <page string="Notificaciones">
+                            <group>
+                                <group>
+                                    <field name="notificar_completado"/>
+                                    <field name="notificar_errores"/>
+                                    <field name="notificar_discrepancias"/>
+                                </group>
+                                <group>
+                                    <field name="usuarios_notificacion" widget="many2many_tags"/>
+                                    <field name="email_notificacion"/>
+                                </group>
+                            </group>
+                        </page>
+                        
+                        <page string="Configuración Avanzada">
+                            <group>
+                                <group>
+                                    <field name="timeout_segundos"/>
+                                    <field name="reintentos_maximo"/>
+                                    <field name="lote_procesamiento"/>
+                                </group>
+                                <group>
+                                    <field name="ignorar_errores_menores"/>
+                                    <field name="crear_log_detallado"/>
+                                </group>
+                            </group>
+                        </page>
+                        
+                        <page string="Historial" invisible="total_conciliaciones == 0">
+                            <field name="conciliacion_ids" readonly="1">
+                                <tree limit="20" default_order="fecha_ejecucion desc">
+                                    <field name="fecha_ejecucion"/>
+                                    <field name="estado"/>
+                                    <field name="productos_conciliados"/>
+                                    <field name="clientes_conciliados"/>
+                                    <field name="discrepancias_encontradas"/>
+                                    <field name="tiempo_ejecucion"/>
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
+                    
+                    <group string="Información del Sistema">
+                        <group>
+                            <field name="fecha_creacion" readonly="1"/>
+                            <field name="usuario_creacion" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="ultima_modificacion" readonly="1"/>
+                            <field name="ultima_ejecucion" readonly="1"/>
+                        </group>
+                    </group>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_follower_ids" widget="mail_followers"/>
+                    <field name="activity_ids" widget="mail_activity"/>
+                    <field name="message_ids" widget="mail_thread"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <!-- Vista Tree de Configuración -->
+    <record id="view_configuracion_conciliacion_tree" model="ir.ui.view">
+        <field name="name">configuracion.conciliacion.tree</field>
+        <field name="model">configuracion.conciliacion</field>
+        <field name="arch" type="xml">
+            <tree string="Configuraciones de Conciliación">
+                <field name="name"/>
+                <field name="activo"/>
+                <field name="tipo_conciliacion"/>
+                <field name="frecuencia"/>
+                <field name="proxima_ejecucion"/>
+                <field name="ultima_ejecucion"/>
+                <field name="total_conciliaciones"/>
+                <field name="total_discrepancias"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- Vista Search -->
+    <record id="view_configuracion_conciliacion_search" model="ir.ui.view">
+        <field name="name">configuracion.conciliacion.search</field>
+        <field name="model">configuracion.conciliacion</field>
+        <field name="arch" type="xml">
+            <search string="Buscar Configuraciones">
+                <field name="name"/>
+                <field name="tipo_conciliacion"/>
+                
+                <filter string="Activas" name="active" domain="[('activo', '=', True)]"/>
+                <filter string="Inactivas" name="inactive" domain="[('activo', '=', False)]"/>
+                
+                <separator/>
+                <filter string="Automáticas" name="automatic" domain="[('frecuencia', '!=', 'manual')]"/>
+                <filter string="Manuales" name="manual" domain="[('frecuencia', '=', 'manual')]"/>
+                
+                <group expand="0" string="Agrupar por">
+                    <filter string="Tipo" name="group_tipo" context="{'group_by': 'tipo_conciliacion'}"/>
+                    <filter string="Frecuencia" name="group_frecuencia" context="{'group_by': 'frecuencia'}"/>
+                    <filter string="Estado" name="group_activo" context="{'group_by': 'activo'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- Acción de Ventana -->
+    <record id="action_configuracion_conciliacion" model="ir.actions.act_window">
+        <field name="name">Configuración de Conciliación</field>
+        <field name="res_model">configuracion.conciliacion</field>
+        <field name="view_mode">tree,form</field>
+        <field name="context">{}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                ¡Configura la conciliación automática!
+            </p>
+            <p>
+                Crea configuraciones para automatizar la sincronización entre Odoo y el WMS.
+                Puedes programar conciliaciones periódicas y personalizar qué datos sincronizar.
+            </p>
+        </field>
+    </record>
+</odoo>

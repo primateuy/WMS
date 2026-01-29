@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <data>
+    
+        <record id="view_picking_form_inherit_wms" model="ir.ui.view">
+            <field name="name">stock.picking.form.inherit.wms</field>
+            <field name="model">stock.picking</field>
+            <field name="inherit_id" ref="stock.view_picking_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//field[@name='origin']" position="after">
+                    <field name="idPedidoWMS" readonly="1"/>
+                    <field name="codigo_unico" readonly="1"/>
+                </xpath>
+                
+                <!-- Agregar página de logs -->
+                <xpath expr="//notebook" position="inside">
+                    <page string="Logs WMS" name="logs_wms">
+                        <group>
+                            <group>
+                                <field name="log_count" readonly="1"/>
+                            </group>
+                        </group>
+                        <field name="log_ids" readonly="1">
+                            <tree decoration-danger="nivel == 'error'" 
+                                  decoration-warning="nivel == 'warning'" 
+                                  decoration-success="nivel == 'info' and resultado == 'exito'">
+                                <field name="fecha"/>
+                                <field name="nivel"/>
+                                <field name="resultado"/>
+                                <field name="texto"/>
+                                <field name="detalle"/>
+                            </tree>
+                        </field>
+                    </page>
+                </xpath>
+            </field>
+        </record>
+    
+    </data>
+    
+
+</odoo>

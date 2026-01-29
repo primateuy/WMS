@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <data>
+        <record id="view_wizard_stock_form" model="ir.ui.view">
+            <field name="name">wizard.stock.form</field>
+            <field name="model">integracion_wis.wizard_stock</field>
+            <field name="arch" type="xml">
+                <form string="Consultar Stock en WMS">
+                    <group>
+                        <field name="resultado_consulta"/>
+
+
+                    </group>
+                    <footer>
+                        <button string="Cerrar" class="btn-secondary" special="cancel"/>
+                    </footer>
+                </form>
+            </field>
+        </record>
+    </data>
+
+</odoo>

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Menú Principal de Conciliación WMS -->
+    <menuitem id="menu_conciliacion_wms_root" 
+              name="Conciliación WMS" 
+              sequence="50"/>
+    
+    <!-- Submenú de Conciliaciones -->
+    <menuitem id="menu_conciliaciones" 
+              name="Conciliaciones" 
+              parent="menu_conciliacion_wms_root" 
+              sequence="10"/>
+    
+    <menuitem id="menu_conciliacion_maestros" 
+              name="Historial de Conciliaciones" 
+              parent="menu_conciliaciones" 
+              action="action_conciliacion_maestros" 
+              sequence="10"/>
+    
+    <menuitem id="menu_ejecutar_conciliacion" 
+              name="Ejecutar Conciliación Manual" 
+              parent="menu_conciliaciones" 
+              action="action_wizard_ejecutar_conciliacion" 
+              sequence="20"/>
+    
+    <!-- Submenú de Discrepancias -->
+    <menuitem id="menu_discrepancias" 
+              name="Discrepancias" 
+              parent="menu_conciliacion_wms_root" 
+              sequence="20"/>
+    
+    <menuitem id="menu_discrepancia_maestros" 
+              name="Gestionar Discrepancias" 
+              parent="menu_discrepancias" 
+              action="action_discrepancia_maestros" 
+              sequence="10"/>
+    
+    <!-- Submenú de Configuración -->
+    <menuitem id="menu_configuracion_conciliacion" 
+              name="Configuración" 
+              parent="menu_conciliacion_wms_root" 
+              sequence="30"/>
+    
+    <menuitem id="menu_config_conciliacion" 
+              name="Configurar Conciliación" 
+              parent="menu_configuracion_conciliacion" 
+              action="action_configuracion_conciliacion" 
+              sequence="10"/>
+    
+    <!-- Submenú de Reportes -->
+    <menuitem id="menu_reportes_conciliacion" 
+              name="Reportes" 
+              parent="menu_conciliacion_wms_root" 
+              sequence="40"/>
+
+    <!-- Acción para Wizard de Conciliación Manual -->
+    <record id="action_wizard_ejecutar_conciliacion" model="ir.actions.act_window">
+        <field name="name">Ejecutar Conciliación Manual</field>
+        <field name="res_model">wizard.ejecutar.conciliacion</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>

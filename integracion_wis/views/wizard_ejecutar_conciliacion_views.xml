@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Vista Form del Wizard -->
+    <record id="view_wizard_ejecutar_conciliacion_form" model="ir.ui.view">
+        <field name="name">wizard.ejecutar.conciliacion.form</field>
+        <field name="model">wizard.ejecutar.conciliacion</field>
+        <field name="arch" type="xml">
+            <form string="Ejecutar Conciliación Manual">
+                <div class="alert alert-info" role="alert">
+                    <strong>Información:</strong> Este asistente le permite ejecutar una conciliación manual 
+                    entre Odoo y el WMS. Puede personalizar qué datos sincronizar y cómo manejar los resultados.
+                </div>
+                
+                <sheet>
+                    <group>
+                        <field name="tipo_conciliacion"/>
+                    </group>
+                    
+                    <notebook>
+                        <page string="Configuración de Sincronización">
+                            <group>
+                                <group string="Productos" invisible="tipo_conciliacion == 'clientes'">
+                                    <field name="sincronizar_productos" invisible="tipo_conciliacion != 'completa'"/>
+                                    <field name="incluir_productos_inactivos"/>
+                                    <field name="incluir_variantes"/>
+                                </group>
+                                <group string="Clientes" invisible="tipo_conciliacion == 'productos'">
+                                    <field name="sincronizar_clientes" invisible="tipo_conciliacion != 'completa'"/>
+                                    <field name="incluir_clientes_inactivos"/>
+                                </group>
+                            </group>
+                            
+                            <group string="Códigos de Barras" invisible="tipo_conciliacion not in ['completa', 'codigos_barras']">
+                                <field name="sincronizar_codigos_barras" invisible="tipo_conciliacion != 'completa'"/>
+                                <field name="crear_codigos_faltantes"/>
+                            </group>
+                        </page>
+                        
+                        <page string="Notificaciones">
+                            <group>
+                                <field name="notificar_completado"/>
+                                <field name="notificar_discrepancias"/>
+                            </group>
+                        </page>
+                        
+                        <page string="Configuración Avanzada">
+                            <group>
+                                <field name="ignorar_errores_menores"/>
+                                <field name="crear_log_detallado"/>
+                            </group>
+                            
+                            <div class="alert alert-warning" role="alert">
+                                <strong>Atención:</strong> 
+                                <ul>
+                                    <li><strong>Ignorar errores menores:</strong> La conciliación continuará aunque encuentre errores no críticos.</li>
+                                    <li><strong>Log detallado:</strong> Se guardará información detallada de cada operación (puede afectar el rendimiento).</li>
+                                </ul>
+                            </div>
+                        </page>
+                    </notebook>
+                </sheet>
+                
+                <footer>
+                    <button name="ejecutar_conciliacion" 
+                            string="Ejecutar Conciliación" 
+                            type="object" 
+                            class="oe_highlight"/>
+                    <button string="Cancelar" 
+                            class="btn-secondary" 
+                            special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

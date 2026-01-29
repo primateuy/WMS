@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <!-- Vista de lista para configuración de crossdocking -->
+        <record id="view_crossdocking_config_tree" model="ir.ui.view">
+            <field name="name">crossdocking.config.tree</field>
+            <field name="model">crossdocking.config</field>
+            <field name="arch" type="xml">
+                <tree>
+                    <field name="name"/>
+                    <field name="product_id"/>
+                    <field name="active"/>
+                </tree>
+            </field>
+        </record>
+
+        <!-- Vista de formulario para configuración de crossdocking -->
+        <record id="view_crossdocking_config_form" model="ir.ui.view">
+            <field name="name">crossdocking.config.form</field>
+            <field name="model">crossdocking.config</field>
+            <field name="arch" type="xml">
+                <form>
+                    <sheet>
+                        <group>
+                            <field name="name"/>
+                            <field name="product_id"/>
+                            <field name="active"/>
+                        </group>
+                        <notebook>
+                            <page string="Destinos de Distribución">
+                                <field name="destino_ids">
+                                    <tree editable="bottom">
+                                        <field name="partner_id"/>
+                                        <field name="location_id"/>
+                                        <field name="cantidad"/>
+                                        <field name="porcentaje"/>
+                                        <field name="prioridad"/>
+                                    </tree>
+                                </field>
+                            </page>
+                        </notebook>
+                    </sheet>
+                </form>
+            </field>
+        </record>
+
+        <!-- Acción para configuración de crossdocking -->
+        <record id="action_crossdocking_config" model="ir.actions.act_window">
+            <field name="name">Configuración Crossdocking</field>
+            <field name="res_model">crossdocking.config</field>
+            <field name="view_mode">tree,form</field>
+        </record>
+
+        <!-- Menú para configuración de crossdocking -->
+        <menuitem id="menu_crossdocking_config"
+                  name="Configuración Crossdocking"
+                  parent="menu_integracion_wis_root"
+                  action="action_crossdocking_config"
+                  sequence="30"/>
+
+        <!-- Vista mejorada de stock.picking para mostrar campos de crossdocking -->
+        <record id="view_picking_form_inherit_crossdocking" model="ir.ui.view">
+            <field name="name">stock.picking.form.inherit.crossdocking</field>
+            <field name="model">stock.picking</field>
+            <field name="inherit_id" ref="stock.view_picking_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//field[@name='origin']" position="after">
+                    <field name="es_crossdocking" readonly="1"/>
+                    <field name="recepcion_origen_id" readonly="1" attrs="{'invisible': [('es_crossdocking', '=', False)]}"/>
+                </xpath>
+                <xpath expr="//notebook" position="inside">
+                    <page string="Crossdocking" attrs="{'invisible': [('es_crossdocking', '=', False), ('crossdocking_destino_ids', '=', [])]}">
+                        <group>
+                            <field name="crossdocking_destino_ids" readonly="1">
+                                <tree>
+                                    <field name="name"/>
+                                    <field name="partner_id"/>
+                                    <field name="state"/>
+                                    <field name="scheduled_date"/>
+                                </tree>
+                            </field>
+                        </group>
+                    </page>
+                </xpath>
+            </field>
+        </record>
+
+        <!-- Vista de lista para stock.picking con campos de crossdocking -->
+        <record id="view_picking_tree_inherit_crossdocking" model="ir.ui.view">
+            <field name="name">stock.picking.tree.inherit.crossdocking</field>
+            <field name="model">stock.picking</field>
+            <field name="inherit_id" ref="stock.vpicktree"/>
+            <field name="arch" type="xml">
+                <xpath expr="//field[@name='name']" position="after">
+                    <field name="es_crossdocking" optional="hide"/>
+                </xpath>
+            </field>
+        </record>
+
+        <!-- Wizard para configuración masiva de crossdocking -->
+        <record id="view_crossdocking_wizard_form" model="ir.ui.view">
+            <field name="name">crossdocking.wizard.form</field>
+            <field name="model">crossdocking.wizard</field>
+            <field name="arch" type="xml">
+                <form string="Configuración Masiva de Crossdocking">
+                    <sheet>
+                        <group>
+                            <field name="product_ids" widget="many2many_tags"/>
+                            <field name="partner_id"/>
+                            <field name="location_id"/>
+                        </group>
+                        <group>
+                            <field name="usar_cantidad_fija"/>
+                            <field name="porcentaje" attrs="{'invisible': [('usar_cantidad_fija', '=', True)]}"/>
+                            <field name="cantidad_fija" attrs="{'invisible': [('usar_cantidad_fija', '=', False)]}"/>
+                        </group>
+                    </sheet>
+                    <footer>
+                        <button name="crear_configuraciones" type="object" string="Crear Configuraciones" class="btn-primary"/>
+                        <button string="Cancelar" class="btn-secondary" special="cancel"/>
+                    </footer>
+                </form>
+            </field>
+        </record>
+
+        <!-- Acción para el wizard -->
+        <record id="action_crossdocking_wizard" model="ir.actions.act_window">
+            <field name="name">Configuración Masiva de Crossdocking</field>
+            <field name="res_model">crossdocking.wizard</field>
+            <field name="view_mode">form</field>
+            <field name="target">new</field>
+        </record>
+
+        <!-- Menú para el wizard -->
+        <menuitem id="menu_crossdocking_wizard"
+                  name="Configuración Masiva"
+                  parent="menu_integracion_wis_root"
+                  action="action_crossdocking_wizard"
+                  sequence="31"/>
+    </data>
+</odoo>

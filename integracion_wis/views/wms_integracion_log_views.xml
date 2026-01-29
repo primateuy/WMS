@@ -1,0 +1,41 @@
+<odoo>
+  <record id="view_wms_integracion_log_tree" model="ir.ui.view">
+    <field name="name">wms.integracion.log.tree</field>
+    <field name="model">wms.integracion.log</field>
+    <field name="arch" type="xml">
+      <tree>
+        <field name="fecha"/>
+        <field name="picking_id"/>
+        <field name="resultado"/>
+        <field name="detalle"/>
+      </tree>
+    </field>
+  </record>
+
+  <record id="view_wms_integracion_log_form" model="ir.ui.view">
+    <field name="name">wms.integracion.log.form</field>
+    <field name="model">wms.integracion.log</field>
+    <field name="arch" type="xml">
+      <form string="Log de Integración WMS">
+        <group>
+          <field name="fecha"/>
+          <field name="picking_id"/>
+          <field name="resultado"/>
+          <field name="detalle"/>
+        </group>
+      </form>
+    </field>
+  </record>
+
+  <record id="action_wms_integracion_log" model="ir.actions.act_window">
+    <field name="name">Logs de Integración WMS</field>
+    <field name="res_model">wms.integracion.log</field>
+    <field name="view_mode">tree,form</field>
+    <field name="help" type="html">
+      <p>Visualiza los registros de integración WMS de los pickings logísticos.</p>
+    </field>
+  </record>
+
+  <menuitem id="menu_wms_integracion_log_root" name="Integración WMS" sequence="100"/>
+  <menuitem id="menu_wms_integracion_log" name="Logs de Integración WMS" parent="menu_wms_integracion_log_root" action="action_wms_integracion_log" sequence="10"/>
+</odoo>

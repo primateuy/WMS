@@ -1,0 +1,259 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Vista Tree de Discrepancias de Maestros -->
+    <record id="view_discrepancia_maestros_tree" model="ir.ui.view">
+        <field name="name">discrepancia.maestros.tree</field>
+        <field name="model">discrepancia.maestros</field>
+        <field name="arch" type="xml">
+            <tree string="Discrepancias de Maestros" 
+                  decoration-danger="prioridad == 'alta' and estado == 'pendiente'"
+                  decoration-warning="prioridad == 'media' and estado == 'pendiente'"
+                  decoration-success="estado == 'resuelto'"
+                  decoration-muted="estado == 'ignorado'">
+                <field name="fecha_deteccion"/>
+                <field name="tipo_objeto"/>
+                <field name="codigo_objeto"/>
+                <field name="nombre_objeto"/>
+                <field name="campo_discrepante"/>
+                <field name="valor_odoo"/>
+                <field name="valor_wms"/>
+                <field name="prioridad"/>
+                <field name="estado"/>
+                <field name="resuelto_por"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- Vista Form de Discrepancias -->
+    <record id="view_discrepancia_maestros_form" model="ir.ui.view">
+        <field name="name">discrepancia.maestros.form</field>
+        <field name="model">discrepancia.maestros</field>
+        <field name="arch" type="xml">
+            <form string="Discrepancia de Maestros">
+                <header>
+                    <button name="resolver_aplicar_odoo" 
+                            string="Aplicar Valor de Odoo" 
+                            type="object" 
+                            class="oe_highlight"
+                            invisible="estado != 'pendiente'"/>
+                    <button name="resolver_aplicar_wms" 
+                            string="Aplicar Valor del WMS" 
+                            type="object" 
+                            class="btn-warning"
+                            invisible="estado != 'pendiente'"/>
+                    <button name="marcar_ignorado" 
+                            string="Ignorar" 
+                            type="object" 
+                            class="btn-secondary"
+                            invisible="estado != 'pendiente'"/>
+                    <button name="reabrir_discrepancia" 
+                            string="Reabrir" 
+                            type="object"
+                            invisible="estado == 'pendiente'"/>
+                    <field name="estado" widget="statusbar" statusbar_visible="pendiente,resuelto,ignorado"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button type="object" 
+                                name="ir_a_objeto" 
+                                class="oe_stat_button" 
+                                icon="fa-external-link"
+                                string="Ver Registro"/>
+                    </div>
+                    
+                    <div class="alert alert-danger" role="alert" invisible="prioridad != 'alta'">
+                        <strong>¡Prioridad Alta!</strong> Esta discrepancia requiere atención inmediata.
+                    </div>
+                    
+                    <group>
+                        <group>
+                            <field name="fecha_deteccion"/>
+                            <field name="conciliacion_id"/>
+                            <field name="tipo_objeto"/>
+                            <field name="codigo_objeto"/>
+                            <field name="nombre_objeto"/>
+                        </group>
+                        <group>
+                            <field name="campo_discrepante"/>
+                            <field name="prioridad"/>
+                            <field name="es_critica"/>
+                            <field name="requiere_aprobacion" invisible="not es_critica"/>
+                        </group>
+                    </group>
+                    
+                    <group string="Valores en Conflicto">
+                        <group>
+                            <label for="valor_odoo" string="Valor en Odoo"/>
+                            <div class="o_field_widget">
+                                <field name="valor_odoo" readonly="1" class="text-success"/>
+                            </div>
+                        </group>
+                        <group>
+                            <label for="valor_wms" string="Valor en WMS"/>
+                            <div class="o_field_widget">
+                                <field name="valor_wms" readonly="1" class="text-info"/>
+                            </div>
+                        </group>
+                    </group>
+                    
+                    <notebook>
+                        <page string="Información de Resolución" invisible="estado == 'pendiente'">
+                            <group>
+                                <group>
+                                    <field name="fecha_resolucion"/>
+                                    <field name="resuelto_por"/>
+                                    <field name="accion_aplicada"/>
+                                </group>
+                                <group>
+                                    <field name="valor_final"/>
+                                    <field name="requiere_sincronizacion"/>
+                                </group>
+                            </group>
+                            <field name="comentarios_resolucion"/>
+                        </page>
+                        
+                        <page string="Detalles Técnicos">
+                            <group>
+                                <field name="metadatos_json" widget="ace" options="{'mode': 'json'}" readonly="1"/>
+                            </group>
+                        </page>
+                        
+                        <page string="Historial" invisible="not message_ids">
+                            <!-- El historial se mostrará en el chatter -->
+                        </page>
+                    </notebook>
+                    
+                    <field name="notas_internas" placeholder="Notas internas sobre esta discrepancia..."/>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_follower_ids" widget="mail_followers"/>
+                    <field name="activity_ids" widget="mail_activity"/>
+                    <field name="message_ids" widget="mail_thread"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <!-- Vista Kanban -->
+    <record id="view_discrepancia_maestros_kanban" model="ir.ui.view">
+        <field name="name">discrepancia.maestros.kanban</field>
+        <field name="model">discrepancia.maestros</field>
+        <field name="arch" type="xml">
+            <kanban default_group_by="estado" class="o_kanban_small_column">
+                <field name="id"/>
+                <field name="fecha_deteccion"/>
+                <field name="tipo_objeto"/>
+                <field name="codigo_objeto"/>
+                <field name="nombre_objeto"/>
+                <field name="campo_discrepante"/>
+                <field name="prioridad"/>
+                <field name="estado"/>
+                <field name="es_critica"/>
+                
+                <templates>
+                    <t t-name="kanban-box">
+                        <div t-attf-class="oe_kanban_card oe_kanban_global_click
+                                           #{record.prioridad.raw_value == 'alta' ? 'border-danger' : ''}
+                                           #{record.es_critica.raw_value ? 'o_kanban_critical' : ''}">
+                            <div class="o_kanban_content">
+                                <div class="o_kanban_record_top">
+                                    <div class="o_kanban_record_headings">
+                                        <strong class="o_kanban_record_title">
+                                            <field name="codigo_objeto"/>
+                                        </strong>
+                                    </div>
+                                    <div class="o_kanban_manage_button_section">
+                                        <a class="o_kanban_manage_toggle_button" href="#"><i class="fa fa-ellipsis-v" role="img" aria-label="Manage" title="Manage"/></a>
+                                    </div>
+                                </div>
+                                
+                                <div class="o_kanban_record_body">
+                                    <div><t t-esc="record.nombre_objeto.value"/></div>
+                                    <div><strong>Campo:</strong> <t t-esc="record.campo_discrepante.value"/></div>
+                                    <div class="text-muted">
+                                        <i class="fa fa-clock-o"/> <t t-esc="record.fecha_deteccion.value"/>
+                                    </div>
+                                </div>
+                                
+                                <div class="o_kanban_record_bottom">
+                                    <div class="oe_kanban_bottom_left">
+                                        <span t-attf-class="badge badge-pill 
+                                                           #{record.prioridad.raw_value == 'alta' ? 'badge-danger' : 
+                                                             record.prioridad.raw_value == 'media' ? 'badge-warning' : 'badge-info'}">
+                                            <t t-esc="record.prioridad.value"/>
+                                        </span>
+                                    </div>
+                                    <div class="oe_kanban_bottom_right">
+                                        <t t-if="record.es_critica.raw_value">
+                                            <i class="fa fa-exclamation-triangle text-danger" title="Crítica"/>
+                                        </t>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </t>
+                </templates>
+            </kanban>
+        </field>
+    </record>
+
+    <!-- Vista Search -->
+    <record id="view_discrepancia_maestros_search" model="ir.ui.view">
+        <field name="name">discrepancia.maestros.search</field>
+        <field name="model">discrepancia.maestros</field>
+        <field name="arch" type="xml">
+            <search string="Buscar Discrepancias">
+                <field name="codigo_objeto"/>
+                <field name="nombre_objeto"/>
+                <field name="campo_discrepante"/>
+                <field name="conciliacion_id"/>
+                
+                <filter string="Pendientes" name="pending" domain="[('estado', '=', 'pendiente')]"/>
+                <filter string="Resueltas" name="resolved" domain="[('estado', '=', 'resuelto')]"/>
+                <filter string="Ignoradas" name="ignored" domain="[('estado', '=', 'ignorado')]"/>
+                
+                <separator/>
+                <filter string="Prioridad Alta" name="high_priority" domain="[('prioridad', '=', 'alta')]"/>
+                <filter string="Críticas" name="critical" domain="[('es_critica', '=', True)]"/>
+                <filter string="Requieren Aprobación" name="approval_required" domain="[('requiere_aprobacion', '=', True)]"/>
+                
+                <separator/>
+                <filter string="Productos" name="products" domain="[('tipo_objeto', '=', 'producto')]"/>
+                <filter string="Clientes" name="clients" domain="[('tipo_objeto', '=', 'cliente')]"/>
+                <filter string="Códigos de Barras" name="barcodes" domain="[('tipo_objeto', '=', 'codigo_barras')]"/>
+                
+                <separator/>
+                <filter string="Hoy" name="today" 
+                        domain="[('fecha_deteccion', '>=', context_today().strftime('%Y-%m-%d'))]"/>
+                <filter string="Esta Semana" name="this_week" 
+                        domain="[('fecha_deteccion', '>=', (context_today() - datetime.timedelta(days=7)).strftime('%Y-%m-%d'))]"/>
+                
+                <group expand="0" string="Agrupar por">
+                    <filter string="Estado" name="group_estado" context="{'group_by': 'estado'}"/>
+                    <filter string="Tipo de Objeto" name="group_tipo" context="{'group_by': 'tipo_objeto'}"/>
+                    <filter string="Prioridad" name="group_prioridad" context="{'group_by': 'prioridad'}"/>
+                    <filter string="Campo" name="group_campo" context="{'group_by': 'campo_discrepante'}"/>
+                    <filter string="Conciliación" name="group_conciliacion" context="{'group_by': 'conciliacion_id'}"/>
+                    <filter string="Fecha" name="group_fecha" context="{'group_by': 'fecha_deteccion:day'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- Acción de Ventana -->
+    <record id="action_discrepancia_maestros" model="ir.actions.act_window">
+        <field name="name">Discrepancias de Maestros</field>
+        <field name="res_model">discrepancia.maestros</field>
+        <field name="view_mode">kanban,tree,form</field>
+        <field name="context">{'search_default_pending': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                ¡No hay discrepancias pendientes!
+            </p>
+            <p>
+                Las discrepancias aparecen aquí cuando los datos entre Odoo y el WMS no coinciden.
+                Puedes resolverlas aplicando el valor correcto o marcándolas como ignoradas.
+            </p>
+        </field>
+    </record>
+</odoo>

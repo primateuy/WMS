@@ -1,0 +1,431 @@
+<odoo>
+  <data>
+    <record id="view_integracion_wis_tree" model="ir.ui.view">
+      <field name="name">integracion_wis.tree</field>
+      <field name="model">integracion_wis.integracion_wis</field>
+      <field name="arch" type="xml">
+        <tree>
+          <field name="client_id"/>
+          <field name="client_secret"/>
+          <field name="url_access_token"/> 
+          <field name="company_id"/>
+          <field name="apiLink"/>
+          
+        </tree>
+      </field>
+    </record>
+
+    <record id="view_conciliacion_maestros_tree" model="ir.ui.view">
+      <field name="name">conciliacion_maestros.tree</field>
+      <field name="model">conciliacion.maestros</field>
+      <field name="arch" type="xml">
+        <tree>
+          <field name="name"/>
+          <field name="fecha_creacion"/>
+          <field name="estado" widget="badge"/>
+        </tree>
+      </field>
+    </record>
+
+    <record id="view_integracion_wis_form" model="ir.ui.view">
+      <field name="name">integracion_wis.form</field>
+      <field name="model">integracion_wis.integracion_wis</field>
+      <field name="arch" type="xml">
+        <form>
+          <group>
+            <field name="client_id"/>
+            <field name="client_secret"/>
+            <field name="url_access_token"/> 
+            <field name="company_id" readonly="1"/>
+            <field name="apiLink"/>
+            <field name="ubicacionSalida" string="Ubicación de Salida" widget="many2one"/>
+          <field name="ubicacionDestino" string="Ubicación de Destino" widget="many2one"/>
+          <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
+          <field name="partner" string="Partner por defecto" widget="many2one"/>
+          </group>
+        </form>
+      </field>
+    </record>
+
+    
+
+    <record id="action_integracion_wis" model="ir.actions.act_window">
+      <field name="name">Configuración WIS</field>
+      <field name="res_model">integracion_wis.integracion_wis</field>
+      <field name="view_mode">tree,form</field>
+      <field name="domain">[('company_id', 'in', context.get('allowed_company_ids', []))]</field>
+      <field name="context">{'default_company_id': context.get('allowed_company_ids', [False])[0]}</field>
+      <field name="help" type="html">
+        <p class="o_view_nocontent_smiling_face">
+          Configura la integración con WIS
+        </p>
+        <p>
+          Aquí puedes configurar los parámetros de conexión con la API de WIS.
+        </p>
+      </field>
+    </record>
+
+    <!-- WebHooks -->
+    <record id="view_integracion_wis_webhook_tree" model="ir.ui.view">
+      <field name="name">integracion_wis.webhook.tree</field>
+      <field name="model">integracion_wis.integracion_wis_webhook</field>
+      <field name="arch" type="xml">
+        <tree>
+          <field name="company_id"/>
+          <field name="claveSecreta" password="True"/>
+        </tree>
+      </field>
+    </record>
+
+    <record id="view_integracion_wis_webhook_form" model="ir.ui.view">
+      <field name="name">integracion_wis.webhook.form</field>
+      <field name="model">integracion_wis.integracion_wis_webhook</field>
+      <field name="arch" type="xml">
+        <form>
+          <group>
+            <field name="claveSecreta" password="True"/>
+          </group>
+        </form>
+      </field>
+    </record>
+
+    <record id="action_integracion_wis_webhook" model="ir.actions.act_window">
+      <field name="name">WebHook</field>
+      <field name="res_model">integracion_wis.integracion_wis_webhook</field>
+      <field name="view_mode">tree,form</field>
+      <field name="domain">[('company_id', 'in', context.get('allowed_company_ids', []))]</field>
+      <field name="context">{'default_company_id': context.get('allowed_company_ids', [False])[0]}</field>
+      <field name="help" type="html">
+        <p class="o_view_nocontent_smiling_face">
+          Configura la clave secreta para los webhooks
+        </p>
+      </field>
+    </record>
+
+    <!-- Vista Tree para Conciliación de Maestros -->
+    <record id="view_conciliacion_maestros_tree" model="ir.ui.view">
+      <field name="name">conciliacion.maestros.tree</field>
+      <field name="model">conciliacion.maestros</field>
+      <field name="arch" type="xml">
+        <tree string="Lista de Conciliaciones" 
+              decoration-success="estado == 'completado'"
+              decoration-danger="estado == 'error'" 
+              decoration-warning="estado == 'en_proceso'"
+              decoration-muted="estado == 'borrador'"
+              create="true" edit="true" delete="true">
+          
+          <field name="display_name" string="Conciliación"/>
+          <field name="fecha_creacion" string="Fecha de Creación"/>
+          <field name="estado" widget="badge" 
+                 decoration-success="estado == 'completado'"
+                 decoration-danger="estado == 'error'"
+                 decoration-warning="estado == 'en_proceso'"
+                 decoration-info="estado == 'borrador'"/>
+          
+          <!-- Opciones de conciliación -->
+          <field name="productos" string="Productos" widget="boolean_toggle"/>
+          <field name="clientes" string="Clientes" widget="boolean_toggle"/>
+          <field name="codigoBarras" string="Códigos Barras" widget="boolean_toggle"/>
+          
+        </tree>
+      </field>
+    </record>
+
+    <!-- Vista de formulario para Conciliación de Maestros -->
+    <record id="view_conciliacion_maestros_form" model="ir.ui.view">
+      <field name="name">conciliacion.maestros.form</field>
+      <field name="model">conciliacion.maestros</field>
+      <field name="arch" type="xml">
+        <form string="Conciliación de Maestros">
+          <header>
+            <!-- Botones de acción -->
+            <button name="conciliarProductos" 
+                    string="Conciliar Productos" 
+                    type="object" 
+                    class="btn-primary"
+                    invisible="not productos"/>
+            
+            <button name="conciliarClientes" 
+                    string="Conciliar Clientes" 
+                    type="object" 
+                    class="btn-primary"
+                    invisible="not clientes"/>
+            
+            <button name="conciliarCodigosBarra" 
+                    string="Conciliar Códigos de Barras" 
+                    type="object" 
+                    class="btn-primary"
+                    invisible="not codigoBarras"/>
+
+            <button name="conciliarMarcados" 
+                    string="Conciliar Seleccionados" 
+                    type="object" 
+                    class="btn-secondary"/>
+
+            <!-- Campo de estado -->
+            <field name="estado" widget="statusbar" 
+                   statusbar_visible="borrador,en_proceso,completado,error"/>
+          </header>
+          
+          <sheet>
+            <div class="oe_title">
+              <h1>
+                <field name="name" placeholder="Nombre de la conciliación..."/>
+              </h1>
+            </div>
+
+            <group>
+              <group string="Información General">
+                <field name="display_name" readonly="1"/>
+                <field name="fecha_creacion" readonly="1"/>
+              </group>
+              
+              <group string="Tipos de Conciliación a Ejecutar">
+                <field name="productos" string="Conciliar Productos"/>
+                <field name="clientes" string="Conciliar Clientes"/>
+                <field name="codigoBarras" string="Conciliar Códigos de Barras"/>
+              </group>
+            </group>
+            
+            <notebook>
+              <page string="Logs de Conciliación" name="logs_page">
+                <field name="logs" nolabel="1">
+                  <tree string="Historial de Logs" create="false" edit="false" delete="false"
+                        default_order="fecha desc"
+                        decoration-danger="nivel == 'error'"
+                        decoration-success="nivel == 'info' and 'completada' in texto.lower()"
+                        decoration-warning="nivel == 'warning'">
+                    <field name="fecha" widget="datetime" string="Fecha y Hora"/>
+                    <field name="nivel" widget="badge" 
+                           decoration-success="nivel == 'info'"
+                           decoration-warning="nivel == 'warning'"
+                           decoration-danger="nivel == 'error'"/>
+                    <field name="modelo" string="Módulo"/>
+                    <field name="texto" string="Detalle del Log"/>
+                  </tree>
+                </field>
+              </page>
+            </notebook>
+          </sheet>
+        </form>
+      </field>
+    </record>
+
+    <!-- Acción para Conciliación de Maestros -->
+    <record id="action_conciliacion_maestros" model="ir.actions.act_window">
+      <field name="name">Conciliación de Maestros</field>
+      <field name="res_model">conciliacion.maestros</field>
+      <field name="view_mode">tree,form</field>
+      <field name="view_id" ref="view_conciliacion_maestros_tree"/>
+      <field name="help" type="html">
+        <p class="o_view_nocontent_smiling_face">
+          🔄 Crear tu primera conciliación WIS
+        </p>
+        <p>
+          Las conciliaciones te permiten sincronizar productos, clientes y códigos de barras entre Odoo y WIS.
+        </p>
+        <p>
+          Haz clic en <strong>Crear</strong> para comenzar una nueva conciliación.
+        </p>
+      </field>
+    </record>
+
+        <!-- Vista Tree para Conciliación de Maestros -->
+    <record id="view_conciliacion_maestros_tree" model="ir.ui.view">
+      <field name="name">conciliacion.maestros.tree</field>
+      <field name="model">conciliacion.maestros</field>
+      <field name="arch" type="xml">
+        <tree string="Lista de Conciliaciones" 
+              decoration-success="estado == 'completado'"
+              decoration-danger="estado == 'error'" 
+              decoration-warning="estado == 'en_proceso'"
+              decoration-muted="estado == 'borrador'"
+              create="true" edit="true" delete="true">
+          
+          <field name="display_name" string="Conciliación"/>
+          <field name="fecha_creacion" string="Fecha de Creación"/>
+          <field name="estado" widget="badge" 
+                 decoration-success="estado == 'completado'"
+                 decoration-danger="estado == 'error'"
+                 decoration-warning="estado == 'en_proceso'"
+                 decoration-info="estado == 'borrador'"/>
+          
+          <!-- Opciones de conciliación -->
+          <field name="productos" string="Productos" widget="boolean_toggle"/>
+          <field name="clientes" string="Clientes" widget="boolean_toggle"/>
+          <field name="codigoBarras" string="Códigos Barras" widget="boolean_toggle"/>
+          
+        </tree>
+      </field>
+    </record>
+
+    <!-- Vista de formulario para Conciliación de Stock -->
+    <record id="view_conciliacion_stock_form" model="ir.ui.view">
+      <field name="name">conciliacion.stock.form</field>
+      <field name="model">conciliacion.stock</field>
+      <field name="arch" type="xml">
+        <form string="Conciliación de Stock">
+          <header>
+            <!-- Botones de acción -->
+            <button name="conciliarStock" 
+                    string="Conciliar Stocks" 
+                    type="object" 
+                    class="btn-primary"/>
+            
+            
+
+            <!-- Campo de estado -->
+            <field name="estado" widget="statusbar" 
+                   statusbar_visible="borrador,en_proceso,completado,error"/>
+          </header>
+          
+          <sheet>
+            <div class="oe_title">
+              <h1>
+                <field name="name" placeholder="Nombre de la conciliación..."/>
+
+              </h1>
+            </div>
+
+            <group>
+              <group string="Información General">
+                <field name="display_name" readonly="1"/>
+                <field name="fecha_creacion" readonly="1"/>
+                <field name="ubicacionSalida" string="Ubicación de Salida" widget="many2one"/>
+          <field name="ubicacionDestino" string="Ubicación de Destino" widget="many2one"/>
+          <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
+              </group>
+            </group>
+            
+            <notebook>
+              <page string="Logs de Conciliación" name="logs_page">
+                <field name="logs" nolabel="1">
+                  <tree string="Historial de Logs" create="false" edit="false" delete="false"
+                        default_order="fecha desc"
+                        decoration-danger="nivel == 'error'"
+                        decoration-success="nivel == 'info' and 'completada' in texto.lower()"
+                        decoration-warning="nivel == 'warning'">
+                    <field name="fecha" widget="datetime" string="Fecha y Hora"/>
+                    <field name="nivel" widget="badge" 
+                           decoration-success="nivel == 'info'"
+                           decoration-warning="nivel == 'warning'"
+                           decoration-danger="nivel == 'error'"/>
+                    <field name="texto" string="Detalle del Log"/>
+                  </tree>
+                </field>
+              </page>
+            </notebook>
+          </sheet>
+        </form>
+      </field>
+    </record>
+
+    <!-- Acción para Conciliación de Stock -->
+    <record id="action_conciliacion_stock" model="ir.actions.act_window">
+      <field name="name">Conciliación de Stock</field>
+      <field name="res_model">conciliacion.stock</field>
+      <field name="view_mode">tree,form</field>
+    </record>
+    <!-- Vistas para Logs de Picking -->
+<record id="view_wms_integracion_log_tree" model="ir.ui.view">
+  <field name="name">wms.integracion.log.tree</field>
+  <field name="model">wms.integracion.log</field>
+  <field name="arch" type="xml">
+    <tree string="Logs de Picking" 
+          create="false" 
+          edit="false" 
+          delete="true"
+          default_order="fecha desc"
+          decoration-danger="nivel == 'error'"
+          decoration-success="nivel == 'info'"
+          decoration-warning="nivel == 'warning'">
+      <field name="fecha" widget="datetime" string="Fecha y Hora"/>
+      <field name="nivel" widget="badge" 
+             decoration-success="nivel == 'info'"
+             decoration-warning="nivel == 'warning'"
+             decoration-danger="nivel == 'error'"/>
+      <field name="modelo" string="Módulo"/>
+      <field name="texto" string="Detalle del Log"/>
+    </tree>
+  </field>
+</record>
+
+<record id="view_wms_integracion_log_form" model="ir.ui.view">
+  <field name="name">wms.integracion.log.form</field>
+  <field name="model">wms.integracion.log</field>
+  <field name="arch" type="xml">
+    <form string="Detalle del Log" create="false" edit="false">
+      <sheet>
+        <group>
+          <field name="fecha" readonly="1"/>
+          <field name="nivel" readonly="1"/>
+          <field name="modelo" readonly="1"/>
+        </group>
+        <group>
+          <field name="texto" readonly="1" widget="text"/>
+        </group>
+      </sheet>
+    </form>
+  </field>
+</record>
+
+<!-- Acción para Logs de Picking -->
+<record id="action_wms_integracion_log" model="ir.actions.act_window">
+  <field name="name">Logs de Picking</field>
+  <field name="res_model">wms.integracion.log</field>
+  <field name="view_mode">tree,form</field>
+  <field name="help" type="html">
+    <p class="o_view_nocontent_smiling_face">
+      No hay logs registrados aún
+    </p>
+    <p>
+      Aquí se mostrarán los logs de las operaciones de picking.
+    </p>
+  </field>
+</record>
+
+
+    
+
+    <!-- Menús -->
+    <menuitem id="menu_integracion_wis_root"
+              name="Integración WIS"
+              web_icon="integracion_wis,static/description/icon.png"
+              sequence="100"/>
+              
+    <menuitem id="menu_integracion_wis_config"
+              name="API"
+              parent="menu_integracion_wis_root"
+              action="action_integracion_wis"
+              sequence="10"/>
+
+    <menuitem id="menu_integracion_wis_webhook_config"
+              name="Webhooks"
+              parent="menu_integracion_wis_root"
+              action="action_integracion_wis_webhook"
+              sequence="20"/>
+
+    <menuitem id="menu_conciliacion_maestros"
+              name="Conciliación de Maestros"
+              parent="menu_integracion_wis_root"
+              action="action_conciliacion_maestros"
+              sequence="30"/>
+
+      <menuitem id="menu_conciliacion_stock"
+      name="Conciliación de Stock"
+      parent="menu_integracion_wis_root"
+      action="action_conciliacion_stock"
+      sequence="40"/>
+
+
+
+<!-- Menú de Logs de Picking -->
+<menuitem id="menu_logs_picking"
+          name="Logs de Picking"
+          parent="menu_integracion_wis_root"
+          action="action_wms_integracion_log"
+          sequence="50"/>
+
+
+  </data>
+</odoo>
