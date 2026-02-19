@@ -193,10 +193,10 @@ class CrossdockDistributionComponent extends Component {
                 ...Array.from(allLocations.entries()).map(([locName, locInfo]) => ({
                     key: locName,
                     label: `${locName} (${locInfo.picking_name})`,
-                    picking_id: locInfo.picking_id // ← Info del picking en la columna
+                    picking_id: locInfo.picking_id
                 }))
             ],
-            locationPickings: allLocations // Info completa de locations
+            locationPickings: allLocations
         };
     }
 

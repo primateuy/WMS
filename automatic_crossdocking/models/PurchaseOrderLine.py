@@ -2,6 +2,7 @@ from odoo import api, models, fields
 from odoo.exceptions import ValidationError, UserError
 import math
 import logging;
+from markupsafe import Markup
 
 _logger = logging.getLogger(__name__)
 
@@ -19,6 +20,8 @@ class PurchaseOrderLine(models.Model):
         default=0.0
     )
 
+    mensajeEnviado = fields.Boolean(string="Mensaje Enviado", default=False)
+
 
     def _get_default_distribution_multiple(self):
         
@@ -35,23 +38,23 @@ class PurchaseOrderLine(models.Model):
         help="Ej: Si es 6, la cantidad se redondea a múltiplos de 6 (cajas)."
     )
 
-    @api.depends('qty_received_method', 'qty_received_manual')
+    @api.depends('qty_received_method', 'qty_received_manual', 'use_crossdock',
+             'move_ids.state', 'move_ids.product_uom_qty')
     def _compute_qty_received(self):
+        crossdock_lines = self.filtered('use_crossdock')
+        normal_lines = self - crossdock_lines
 
-        result = super(PurchaseOrderLine, self)._compute_qty_received();
+        if normal_lines:
+            super(PurchaseOrderLine, normal_lines)._compute_qty_received()
 
-        for line in self:
-            if line.use_crossdock:
-                if line.qty_received_method == 'manual':
-                    line.qty_received = line.qty_received_manual or 0.0
-                else:
-                    line.qty_received = line._get_qty_received_from_incoming_pickings()
-
-        return result
-        
+        for line in crossdock_lines:
+            if line.qty_received_method == 'manual':
+                line.qty_received = line.qty_received_manual or 0.0
+            else:
+                line.qty_received = line._get_qty_received_from_incoming_pickings()
 
     def _get_qty_received_from_incoming_pickings(self):
-        
+        """Calcular cantidad recibida desde el picking principal de recepción"""
         self.ensure_one()
         qty = 0.0
         
@@ -69,8 +72,26 @@ class PurchaseOrderLine(models.Model):
                 ('state', '=', 'done'),
             ])
             
+            old_qty = self.qty_received or 0.0
+            
             for move in moves_in_main_picking:
                 qty += move.product_qty
+            
+            if qty != old_qty:
+                body = Markup("""
+                    <p><b>Se actualizó la cantidad recibida.</b></p>
+                    <ul>
+                        <li>
+                            %s:<br/>
+                            Cantidad recibida: %.2f → %.2f
+                        </li>
+                    </ul>
+                """) % (self.product_id.name, old_qty, qty)
+                
+                self.order_id.message_post(
+                    body=body,
+                    subtype_xmlid='mail.mt_note',
+                )
         
         return qty
 
@@ -85,7 +106,6 @@ class PurchaseOrderLine(models.Model):
                 )
 
     def _apply_crossdock_defaults(self):
-        """Método auxiliar para aplicar configuraciones de crossdock"""
         for line in self:
             if line.order_id.crossdock_enabled:
                 line.use_crossdock = True

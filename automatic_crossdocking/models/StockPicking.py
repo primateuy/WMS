@@ -36,6 +36,7 @@ class StockPicking(models.Model):
             
             move_line.with_context(do_not_propagate=True, no_recompute=True).write({
                 'product_uom_qty': float(new_quantity),
+                'quantity': float(new_quantity),
             })
             
             purchase_line = move_line.purchase_line_id
@@ -43,10 +44,11 @@ class StockPicking(models.Model):
             
             if purchase_line and purchase_line.order_id.crossdock_enabled:
                 purchase_order = purchase_line.order_id
-                # CAMBIO: Llamar al método para actualizar el picking de sobrante
                 surplus_updated = self._update_surplus_picking_quantity(
                     purchase_order, purchase_line, -quantity_difference  # Signo contrario
                 )
+
+                self.update_transfer_picking(purchase_order, purchase_line, quantity_difference, picking)
             
             picking.write({'state': original_state})
 
@@ -67,6 +69,72 @@ class StockPicking(models.Model):
             
         except Exception as e:
             return {'error': str(e)}
+
+    def update_transfer_picking(self, purchase_order, purchase_line, quantity_difference, current_picking):
+        
+        try:
+            if not current_picking.location_id:
+                _logger.warning("El picking actual no tiene location_id")
+                return False
+
+            crossdocking_location = current_picking.location_id
+            
+          
+            transfer_pickings = purchase_order.picking_ids.filtered(
+                lambda p: (
+                    p.location_dest_id.id == crossdocking_location.id
+                )
+            )
+            
+            if transfer_pickings:
+                _logger.info(f"Encontrados {len(transfer_pickings)} pickings candidatos: {transfer_pickings.mapped('name')}")
+            else:
+                _logger.warning(f"No se encontraron pickings de transferencia que salgan desde {crossdocking_location.name}")
+                return False
+            
+            updated = False
+            
+            for transfer_picking in transfer_pickings:
+                transfer_move = transfer_picking.move_ids_without_package.filtered(
+                    lambda m: m.purchase_line_id.id == purchase_line.id
+                )
+                
+                if not transfer_move:
+                    _logger.info(f"Picking {transfer_picking.name} no contiene el producto {purchase_line.product_id.name}")
+                    continue
+                
+                if len(transfer_move) > 1:
+                    transfer_move = transfer_move[0]
+                
+                old_transfer_quantity = transfer_move.product_uom_qty
+                new_transfer_quantity = old_transfer_quantity + quantity_difference
+                
+                if new_transfer_quantity < 0:
+                    _logger.warning(f"Cantidad negativa detectada ({new_transfer_quantity}), ajustando a 0")
+                    new_transfer_quantity = 0
+                
+                original_state = transfer_picking.state
+                
+                _logger.info(f"Actualizando {transfer_picking.name}: {old_transfer_quantity} → {new_transfer_quantity}")
+                
+                transfer_move.with_context(do_not_propagate=True, no_recompute=True).write({
+                    'product_uom_qty': new_transfer_quantity,
+                    'quantity': new_transfer_quantity,
+                })
+                
+                if transfer_picking.state != original_state:
+                    transfer_picking.write({'state': original_state})
+                
+                updated = True
+                _logger.info(f"Picking {transfer_picking.name} actualizado correctamente")
+            
+            return updated
+            
+        except Exception as e:
+            _logger.error(f"Error al actualizar picking de transferencia: {str(e)}")
+            import traceback
+            _logger.error(traceback.format_exc())
+            return False
     
     def _update_surplus_picking_quantity(self, purchase_order, purchase_line, quantity_difference):
         """
@@ -111,6 +179,7 @@ class StockPicking(models.Model):
                     original_state = surplus_picking.state
                     surplus_move.with_context(do_not_propagate=True, no_recompute=True).write({
                         'product_uom_qty': new_surplus_quantity,
+                        'quantity': new_surplus_quantity,
                     })
                     
                     if surplus_picking.state != original_state:
@@ -126,13 +195,7 @@ class StockPicking(models.Model):
             return False
 
     def button_validate(self):
-        """
-        Al validar un picking, activa automáticamente los pickings dependientes.
-        
-        Flujo:
-        1. Si se valida Recepción → activa Pickings de Crossdocking
-        2. Si se valida Crossdocking → activa Pickings de Transferencia
-        """
+       
         result = super(StockPicking, self).button_validate()
         
         for picking in self:
