@@ -81,14 +81,14 @@ class StockPicking(models.Model):
     def enviarWS(self, tipo):
 
         
-        _logger.info(f"OPERACION {self.picking_type_id.name}");
-
-        _logger.info("🔄 Iniciando integración WMS para picking %s", self.picking_type_id.code);
 
         
-
+        _logger.info("Probando si el partner existe %s", self.partner_id);
+        _logger.info("EL TIPO ES => %s", tipo);
         if not self.partner_id:
             raise ValidationError("No se ha asignado un partner")
+
+
 
         if not self.partner_id.codigo_wms or not self.partner_id.codigo_unico:
             raise ValidationError("El partner no se encuentra sincronizado en WIS")
@@ -98,33 +98,25 @@ class StockPicking(models.Model):
             ('company_id', '=', self.env.company.id)
         ])
 
-        # hayCentral = False
-
-        # _logger.info("CENTRALES: %s", str(central_locations));
-
-        # for c in central_locations:
-        #     _logger.info("CENTRAL: %s", str(c.name));
-        
-        # for d in self.location_dest_id:
-        #     _logger.info("DESTINO: %s", str(d.name));
-        # for c in central_locations:
-        #     if c.id == self.location_dest_id.id:
-        #         hayCentral = True
-        #         break
-
-        # if not hayCentral and tipo == 'AL':
-        #     raise ValidationError("Debe tener origen un depósito logístico central")
-            
-        if self.state != self.picking_type_id.estado_disparo_wms:
-            _logger.info("No se ha ejecutado la integración con WIS ya que los estados no coinciden")            
-            return
-        
         datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
         if not datosAPI or not datosAPI.apiLink:
             raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
-        if self.picking_type_id.code == 'incoming' and self.partner_id.customer_rank > 0:
-            return datosAPI.insertarDevolucion(self);
+        state_actual = str(self.state or '').strip()
+        state_objetivo = str(self.picking_type_id.estado_disparo_wms or '').strip()
+        
+        _logger.info("VALIDANDO ESTADOS: Actual='%s' | Objetivo='%s'", state_actual, state_objetivo)
+
+        if state_actual != state_objetivo:
+            _logger.info("Postergando integración: El estado '%s' no coincide con el objetivo '%s'", state_actual, state_objetivo)
+            return False
+        
+        if tipo == 'OC' or (self.picking_type_id.code == 'incoming' and self.partner_id.supplier_rank > 0):
+            return datosAPI.insertarReferenciaRecepcion(self)
+
+        if self.picking_type_id.code == 'incoming':
+            if self.partner_id.customer_rank > 0:
+                return datosAPI.insertarDevolucion(self)
 
 
         pdfData = None
@@ -189,13 +181,12 @@ class StockPicking(models.Model):
         _logger.info("CREANDO UN NUEVO PICKING");
         
         if res.picking_type_id.integracion_wms:
+            _logger.info("Entrando al create")
             try:
                 tipo = 'NORM'
                 if res.picking_type_id.tipo_pedido_wms:
                     tipo = res.picking_type_id.tipo_pedido_wms;
 
-                # if self.metodo_creacion_wms is None:
-                #     raise ValidationError("No se ha definido el método de creación en WMS para este tipo de operación.")
                 response = res.enviarWS(tipo)
                 if response:
                     res.with_context(skip_wms_integration=True).write({

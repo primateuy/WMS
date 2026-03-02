@@ -6,6 +6,11 @@ _logger = logging.getLogger(__name__)
 class PurchaseOrder(models.Model):
     _inherit = 'purchase.order'
 
+    integracion_wms = fields.Boolean(
+        string='Integración con WIS',
+        default=False,
+    )
+
     numeroInterfazWMS = fields.Char(
         string="Numero interfaz Wms",
         help="Identificación WMS"
@@ -15,70 +20,33 @@ class PurchaseOrder(models.Model):
 
     enviadoWMS = fields.Boolean(string="Enviado de WMS", default=False)
 
+    def _create_picking(self):
+        res = super(PurchaseOrder, self)._create_picking()
 
-    def buttonWMS(self):
-        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
-        if not datosAPI or not datosAPI.apiLink:
-            raise ValidationError("No se encuentran todos los datos para una consulta a la API")
+        pickings = res if not isinstance(res, bool) else self.picking_ids
+
+        if pickings:
+            for picking in pickings:
+                if picking.move_ids:
+                    
+                    datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+
+                    if datosAPI and datosAPI.apiLink and picking.state == picking.picking_type_id.estado_disparo_wms:
+                        response = datosAPI.insertarReferenciaRecepcion(picking)
+                        
+                        if response and isinstance(response, dict):
+                            picking.with_context(skip_wms_integration=True).write({
+                                'idPedidoWMS': response.get('numeroInterfaz', ''),
+                                'codigo_unico': response.get('codigoUnico', '')
+                            })
+                            self.env['wms.integracion.log'].create({
+                                'fecha': fields.Datetime.now(),
+                                'nivel': 'info',
+                                'modelo': 'stock.picking',
+                                'texto': f"Integración exitosa con WIS",
+                                'picking_id': picking.id,
+                                'resultado': 'exito',
+                                'detalle': f"ID Pedido WMS: '{response.get('numeroInterfaz', '')}' | Código Único: '{response.get('codigoUnico', '')}'"
+                            })
         
-        return datosAPI.editarReferencia(self);
-
-
-    def enviarDatosWMS(self):
-        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
-        if not datosAPI or not datosAPI.apiLink:
-            raise ValidationError("No se encuentran todos los datos para una consulta a la API")
-        
-        response = datosAPI.insertarOrdenDeCompra(self)
-
-        # Verificar si la respuesta contiene los datos esperados
-        if not response or 'numeroInterfaz' not in response or 'referencia' not in response:
-            _logger.error("Error en la API: Respuesta incompleta o inválida")
-            raise ValidationError("Error al procesar la solicitud: Respuesta incompleta o inválida")
-
-        _logger.info(f"Datos enviados correctamente a WMS: {response}")
-        return response
-
-
-    def button_confirm(self):
-        res = super(PurchaseOrder, self).button_confirm()
-
-        # Enviar solo si no fue enviado y no estamos en skip_wms_integration
-        for order in self:
-                response = order.enviarDatosWMS()
-
-                _logger.info(f"RESPONSE DESDE ORDEN: {response}");
-                order.write({'enviadoWMS': True, 'referencia': response.get('referencia', ''), 'numeroInterfazWMS': response.get('numeroInterfaz', '')})
         return res
-
-    def write(self, vals):
-
-        record = super(PurchaseOrder, self).write(vals)
-
-        
-
-        return record;
-
-    @api.model
-    def create(self, vals):
-
-        record = super(PurchaseOrder, self).create(vals)
-
-        
-
-            
-
-        return record;
-
-
-    
-    
-
-
-
-
-
-
-
-
-    

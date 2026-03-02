@@ -77,6 +77,16 @@ class IntegracionWIS(models.Model):
         ('company_unique', 'unique(company_id)', '¡Solo puede existir una configuración por compañía!'),
     ]
 
+    def _get_clean_api_url(self):
+        self.ensure_one()
+        url = (self.apiLink or '').strip()
+        while url.endswith('/index.html') or url.endswith('/'):
+            if url.endswith('/index.html'):
+                url = url[:-11]
+            else:
+                url = url[:-1]
+        return url
+
     def renovarToken(self):
         if not self.url_access_token or not self.client_id or not self.client_secret:
             raise ValidationError("Datos no válidos para la renovación del token")
@@ -124,8 +134,10 @@ class IntegracionWIS(models.Model):
 
         _logger.info("Llega hasta los headers")
 
+        api_url = self._get_clean_api_url()
+
         try:
-            req = requests.request(url=self.apiLink + link, method=method, json=body, headers=headers, params=params)
+            req = requests.request(url=api_url + link, method=method, json=body, headers=headers, params=params)
             _logger.info(f"REQ: {req.text}")
 
             # Verificar el código de estado de la respuesta
@@ -280,9 +292,10 @@ class IntegracionWIS(models.Model):
 
         _logger.info("Realizando consulta de existencia de código de barras en WIS %s", params);
 
+        api_url = self._get_clean_api_url()
 
         req = requests.get(
-            url=f"{self.apiLink}/CodigoBarras/GetCodigoBarras",
+            url=f"{api_url}/CodigoBarras/GetCodigoBarras",
             headers={
                 "Authorization": f"Bearer {self.token}"
             },
@@ -613,37 +626,20 @@ class IntegracionWIS(models.Model):
 
 
     def insertarDevolucion(self, picking):
-            """
-            Inserta devolución de cliente en WMS
-            Args:
-                picking: stock.picking object (devolución de cliente)
-            """
-            _logger.info("🔄 ENTRANDO A INSERTAR DEVOLUCIÓN para picking: %s", picking.name)
-
-            detalles = []
+            moves = picking.move_ids or (hasattr(picking, 'move_ids_without_package') and picking.move_ids_without_package) or []
             
-            if not picking.move_ids:
-                raise ValidationError("No hay productos en la devolución")
+            if not moves:
+                _logger.info("No hay productos detectados en la devolución %s", picking.name)
+                return False
                 
-            for move in picking.move_ids:
-                _logger.info("📦 Procesando producto: %s - Cantidad: %s", move.product_id.name, move.product_uom_qty)
-                
-                # Usar el código que tenga el producto
+            detalles = []
+            for move in moves:
                 codigo_producto = move.product_id.codigo_unico or ''
-                
                 detalles.append({
                     'idLineaSistemaExterno': f"odoo__stock.move__{move.id}",
                     'codigoProducto': codigo_producto,
                     'cantidadReferencia': move.product_uom_qty
                 })
-
-            _logger.info(f"📋 DATOS EN DETALLES DEVOLUCIÓN => {detalles}")
-
-            # Determinar ubicación de destino
-            ubicacion_destino = "1"  # Default
-            if picking.location_dest_id:
-                ubicacion_destino = picking.location_dest_id.name
-
 
             numeroRandom = random.randint(100000, 999999);
             payload = {
@@ -661,7 +657,6 @@ class IntegracionWIS(models.Model):
                 }]
             }
 
-            
             response = self.consultarAPI(
                 link="/ReferenciaRecepcion/Create",
                 body=payload,
@@ -670,9 +665,67 @@ class IntegracionWIS(models.Model):
             )
 
             response['codigoUnico'] = f'DEV-{numeroRandom}'
-            
-
             return response
+
+    def insertarReferenciaRecepcion(self, picking):
+
+        _logger.info("PICKINGS => %s", picking);
+        
+        _logger.info("CAMPOS DEL PICKING: %s", picking._fields.keys())
+        _logger.info("VALORES CARGADOS: %s", picking.read())
+
+        moves = picking.move_ids or (hasattr(picking, 'move_ids_without_package') and picking.move_ids_without_package) or []
+        
+        if not moves:
+            _logger.info("No hay productos detectados en el movimiento %s.", picking.name)
+            self.env['wms.integracion.log'].create({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'error',
+                'modelo': 'stock.picking',
+                'texto': f"No se detectaron líneas en el picking {picking.name} (state: {picking.state})",
+                'picking_id': picking.id,
+                'resultado': 'error',
+                'detalle': 'move_ids vacío al intentar insertar referencia recepción'
+            })
+            return False
+            
+        detalles = []
+        for move in moves:
+            codigo_producto = move.product_id.codigo_unico or ''
+            
+            if not codigo_producto:
+                raise ValidationError(f"No se encontró código único WIS en el producto: {move.product_id.name}. Por favor, asegúrese de que el producto esté sincronizado con WIS antes de enviar el movimiento.")
+                
+            detalles.append({
+                'idLineaSistemaExterno': f"odoo__stock.move__{move.id}",
+                'codigoProducto': codigo_producto,
+                'cantidadReferencia': move.product_uom_qty
+            })
+
+        numeroRandom = random.randint(100000, 999999)
+        payload = {
+            'empresa': 6005,
+            'dsReferencia': f"RECEPCIÓN DESDE ODOO: {picking.name}",
+            'referencias': [{
+                'referencia': 'REC-' + str(numeroRandom),
+                'tipoReferencia': 'OC',
+                'codigoAgente': picking.partner_id.codigo_unico,
+                'tipoAgente': 'PRO' if picking.partner_id.supplier_rank > 0 or not picking.partner_id.customer_rank > 0 else 'CLI',
+                'predio': '1',
+                'fechaEstimada': picking.scheduled_date.isoformat() if picking.scheduled_date else None,
+                'detalles': detalles
+            }]
+        }
+
+        response = self.consultarAPI(
+            link="/ReferenciaRecepcion/Create",
+            body=payload,
+            params=None,
+            method="POST"
+        )
+
+        response['codigoUnico'] = f'REC-{numeroRandom}'
+        return response
 
     def consultar(self):
         _logger.info("ESTO ES SOLO UNA PRUEBA");

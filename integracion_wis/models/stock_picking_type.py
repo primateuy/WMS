@@ -35,7 +35,7 @@ class StockPickingType(models.Model):
         ('draft', 'Borrador'),
         ('waiting', 'Esperando'),
         ('confirmed', 'Confirmado'),
-        ('assigned', 'Reservado'),
+        ('assigned', 'Listo'),
         ('done', 'Hecho'),
         ('cancel', 'Cancelado')
     ], string='Estado para Disparo WMS', default='confirmed')
