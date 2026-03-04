@@ -103,7 +103,7 @@ class StockPicking(models.Model):
             raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
         state_actual = str(self.state or '').strip()
-        state_objetivo = str(self.picking_type_id.estado_disparo_wms or '').strip()
+        state_objetivo = str(self.picking_type_id.estado_disparo_wis or '').strip()
         
         _logger.info("VALIDANDO ESTADOS: Actual='%s' | Objetivo='%s'", state_actual, state_objetivo)
 
@@ -184,8 +184,8 @@ class StockPicking(models.Model):
             _logger.info("Entrando al create")
             try:
                 tipo = 'NORM'
-                if res.picking_type_id.tipo_pedido_wms:
-                    tipo = res.picking_type_id.tipo_pedido_wms;
+                if res.picking_type_id.tipo_pedido_wis:
+                    tipo = res.picking_type_id.tipo_pedido_wis;
 
                 response = res.enviarWS(tipo)
                 if response:
@@ -229,8 +229,8 @@ class StockPicking(models.Model):
             for record in self:
                 if record.picking_type_id.integracion_wms:
                     tipo = 'NORM'
-                    if record.picking_type_id.tipo_pedido_wms:
-                        tipo = record.picking_type_id.tipo_pedido_wms;
+                    if record.picking_type_id.tipo_pedido_wis:
+                        tipo = record.picking_type_id.tipo_pedido_wis;
 
                     try:
                         record_ctx = record.with_context(skip_wms_integration=True)

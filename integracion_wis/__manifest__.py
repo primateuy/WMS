@@ -21,6 +21,7 @@
     'data': [
         'security/ir.model.access.csv',
         'views/views.xml',
+        'views/wis_webhook_log_views.xml',
         'views/templates.xml',
         'views/ProductView.xml',
         'views/PartnerView.xml',

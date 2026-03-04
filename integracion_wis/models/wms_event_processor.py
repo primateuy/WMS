@@ -20,7 +20,7 @@ class WMSEventProcessor(models.TransientModel):
                 ('idPedidoWMS', '=', payload.get('idPedidoWMS'))
             ], limit=1);
 
-        boolActivado = picking.picking_type_id.metodo_preparacion_wms;
+        boolActivado = picking.picking_type_id.metodo_preparacion_wis;
 
         if not boolActivado:
             _logger.info("El metodo de preparacion de WMS no se encuentra habilitado");

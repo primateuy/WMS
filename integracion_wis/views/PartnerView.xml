@@ -9,32 +9,36 @@
                     <page string="Integración WIS" name="wis_integration">
                         <group>
                             <field name="integracion_wms"/>
-                            <field name="codigo_wms" readonly="True"/>
-                            <field name="codigo_unico" readonly="True"/>
+                            <field name="codigo_wms" readonly="True" invisible="not integracion_wms"/>
+                            <field name="codigo_unico" readonly="True" invisible="not integracion_wms"/>
                         </group>
                         <button name="enviarWS" 
                             string="Enviar a WIS" 
                             type="object" 
-                            class="btn-primary"/>
+                            class="btn-primary" invisible="not integracion_wms"/>
+                        
+                        <group invisible="not integracion_wms">
 
-                        <separator string="Historial de Operaciones WMS"/>
-                            <field name="logs" readonly="1">
-                                <tree
-                                      create="0" delete="0" edit="0">
-                                    <field name="fecha"/>
-                                    <field name="texto"/>
-                                </tree>
-                                <form create="0" delete="0" edit="0">
-                                    <group>
+                            <separator string="Historial de Operaciones WMS"/>
+                                <field name="logs" readonly="1">
+                                    <tree
+                                          create="0" delete="0" edit="0">
+                                        <field name="fecha"/>
+                                        <field name="texto"/>
+                                    </tree>
+                                    <form create="0" delete="0" edit="0">
                                         <group>
-                                            <field name="fecha" readonly="1"/>
-                                            <field name="texto" readonly="1"/>
+                                            <group>
+                                                <field name="fecha" readonly="1"/>
+                                                <field name="texto" readonly="1"/>
+                                            </group>
                                         </group>
-                                    </group>
-                                    
-                                </form>
-                            </field>
-                    
+                                        
+                                    </form>
+                                </field>
+                        
+
+                        </group>
                     </page>
 
                    

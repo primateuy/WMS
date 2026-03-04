@@ -21,7 +21,4 @@ access_conciliacion_stock_dev,conciliacion_stock_dev,model_conciliacion_stock,ba
 access_logs_conciliacion_stock,logs_conciliacion_stock,model_logs_conciliacion_stock,base.group_user,1,1,1,0
 access_logs_conciliacion_stock_dev,logs_conciliacion_stock_dev,model_logs_conciliacion_stock,base.group_no_one,1,1,1,1
 access_wms_integracion_log,wms_integracion_log,model_wms_integracion_log,base.group_user,1,0,1,1
-
-
-
-
+access_wis_webhook_log,wis_webhook_log,model_wis_webhook_log,base.group_user,1,0,1,1

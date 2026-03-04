@@ -44,6 +44,9 @@ class ResPartner(models.Model):
 
     def enviarWS(self):
 
+        if self.customer_rank == 0 and self.supplier_rank == 0:
+            raise ValidationError("El agente no es ni cliente ni proveedor, no se puede integrar con WIS")
+
         if self.integracion_wms == False:
             raise ValidationError("El agente no está marcado para integración con WIS")
 
@@ -58,49 +61,28 @@ class ResPartner(models.Model):
         })  
 
 
-        return datosAPI.insertarClienteOrSupplier(self);
+        response = datosAPI.insertarClienteOrSupplier(self);
 
-    @api.model
-    def create(self, vals):
-        _logger.info("CREANDO AGENTE");
-        res = super(ResPartner, self).create(vals)
+        _logger.info("RESPONSE ES => %s", response)
 
-        _logger.info(f"customer_rank: {res.customer_rank}, supplier_rank: {res.supplier_rank}");
+        if response and isinstance(response, dict):
+            self.write({
+                'codigo_wms': response.get('numeroInterfaz', ''),
+                'codigo_unico': response.get('codigoUnico', '')
+            })
+            self.env['logs.res.partner'].create({
+                'partner_id': self.id,
+                'fecha': fields.Datetime.now(),
+                'texto': f"Integración exitosa con WIS. Código WMS: '{response.get('codigoWMS', '')}' | Código Único: '{response.get('codigoUnico', '')}'",
+            })
+        else:
+            self.env['logs.res.partner'].create({
+                'partner_id': self.id,
+                'fecha': fields.Datetime.now(),
+                'texto': f"Error en la integración con WIS. Respuesta: {response}",
+            })
 
-        if (
-            (res.customer_rank or 0) > 0 or
-            (res.supplier_rank or 0) > 0 or
-            (vals.get('customer_rank') or 0) > 0 or
-            (vals.get('supplier_rank') or 0) > 0
-        ):
-            _logger.info("ES CLIENTE O SUPPLIER");
-            if res.integracion_wms == True or vals.get('integracion_wms') == True:
-                response = res.enviarWS()
-                _logger.info(response)
-                res.write({
-                    'codigo_wms': response.get('numeroInterfaz', ''),
-                    'codigo_unico': response.get('codigoUnico', ''),
-                })
-
-        return res
-
-
-    def write(self, vals):
-        _logger.info("EDITANDO AGENTE");
-
-        res = super(ResPartner, self).write(vals);
-        _logger.info(f"customer_rank: {self.customer_rank}, supplier_rank: {self.supplier_rank}");
-        if self.customer_rank > 0 or self.supplier_rank > 0 or (vals.get('customer_rank', 0) > 0 or vals.get('supplier_rank', 0) > 0):
-            
-            if self.integracion_wms == True or vals.get('integracion_wms') == True and (not self.codigo_wms or self.codigo_wms == '' and not vals.get('codigo_wms', '') or vals.get('codigo_wms', '') == ''):
-                _logger.info("ES CLIENTE O SUPPLIER");
-                response = self.enviarWS();
-                _logger.info(response);
-                super(ResPartner, self).write({
-                        'codigo_wms': response.get('numeroInterfaz', ''),
-                        'codigo_unico': response.get('codigoUnico', '')
-                    })
-        return res;
+    
 
 
 
