@@ -16,42 +16,39 @@ class StockPickingType(models.Model):
 
     
 
-    tipo_pedido_wms = fields.Selection(
-        selection=[
-            ('AL', 'AL'),
-            ('EC', 'EC'),
-            ('OD', 'OD'),
-            ('OC', 'OC')
-        ])
+    tipo_pedido_wis = fields.Char(
+        string='Tipo de Pedido WIS',
+        help='Tipo de pedido WIS para este tipo de entrega.',
+    )
 
-    metodo_creacion_wms = fields.Selection(
+    metodo_creacion_wis = fields.Selection(
         selection=[
             ('creacion', 'Creación'),
             ('creacion_actualizacion', 'Creación/Actualización'),
         ])
 
 
-    estado_disparo_wms = fields.Selection([
+    estado_disparo_wis = fields.Selection([
         ('draft', 'Borrador'),
         ('waiting', 'Esperando'),
         ('confirmed', 'Confirmado'),
         ('assigned', 'Listo'),
         ('done', 'Hecho'),
         ('cancel', 'Cancelado')
-    ], string='Estado para Disparo WMS', default='confirmed')
+    ], string='Estado para Disparo WIS', default='confirmed')
 
 
-    metodo_cancelacion_wms = fields.Boolean(
-        string='Método de Cancelación WMS',
+    metodo_cancelacion_wis = fields.Boolean(
+        string='Método de Cancelación WIS',
         default=False,
-        help='Habilita el método de cancelación WMS para este tipo de entrega.'
+        help='Habilita el método de cancelación WIS para este tipo de entrega.'
 
     )
 
-    metodo_preparacion_wms = fields.Boolean(
-        string='Método de Preparación WMS',
+    metodo_preparacion_wis = fields.Boolean(
+        string='Método de Preparación WIS',
         default=False,
-        help='Habilita el método de preparación WMS para este tipo de entrega.')
+        help='Habilita el método de preparación WIS para este tipo de entrega.')
 
 
     emitir_factura_antes_envio = fields.Boolean(

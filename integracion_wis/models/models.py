@@ -18,6 +18,11 @@ class IntegracionWIS(models.Model):
         required=True
     )
 
+    empresa_id = fields.Integer(
+        string="ID de Empresa en WIS",
+        required=True
+    )
+
     url_access_token = fields.Char(
         string="URL ACCESS TOKEN",
         required=True
@@ -118,9 +123,8 @@ class IntegracionWIS(models.Model):
 
 
     def consultarAPI(self, link, params, body, method='GET'):
-        _logger.info("ENTRANDO A CONSULTAR API")
 
-        if not self.apiLink or not self.client_id or not self.client_secret or not self.url_access_token:
+        if not self.apiLink or not self.client_id or not self.client_secret or not self.url_access_token or not self.empresa_id:
             raise ValidationError("Faltan datos para acceder a la API")
                 
         if not self.token or self.expiracionToken < datetime.datetime.now():
@@ -172,7 +176,7 @@ class IntegracionWIS(models.Model):
             
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "productos": [{
                     "codigoProducto": vals.codigo_unico,
                     "cantidadGenerica": vals.qty_available 
@@ -228,7 +232,7 @@ class IntegracionWIS(models.Model):
 
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "dsReferencia": f"PRODUCTO: {vals.display_name} desde Odoo",
             "productos": productos
         }
@@ -259,7 +263,7 @@ class IntegracionWIS(models.Model):
         }]
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "dsReferencia": f"CODIGO DE BARRA DE {vals.display_name} agregado desde Odoo",
             "archivo": "Archivo",
             "codigosDeBarras": codigos
@@ -284,7 +288,7 @@ class IntegracionWIS(models.Model):
             self.renovarToken();
 
         params = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "codigo": int(vals.barcode)
         }
 
@@ -322,7 +326,7 @@ class IntegracionWIS(models.Model):
         }]
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "dsReferencia": f"CODIGO DE BARRA DE {vals.display_name} agregado desde Odoo",
             "archivo": "Archivo",
             "codigosDeBarras": codigos
@@ -373,7 +377,7 @@ class IntegracionWIS(models.Model):
 
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "dsReferencia": f"Transferencia de stock: {vals.id}",
             "archivo": "Archivo",
             "transferencias": transferencias
@@ -485,7 +489,7 @@ class IntegracionWIS(models.Model):
 
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "dsReferencia": f"Creación de agente desde Odoo: {name_clean}",
             "archivo": "Archivo",
             "agentes": agentes
@@ -501,18 +505,7 @@ class IntegracionWIS(models.Model):
 
             response['codigoUnico'] = codigoAgente;
 
-            self.env['logs.res.partner'].create({
-                'partner_id': vals.id,
-                'fecha': fields.Datetime.now(),
-                'texto': 'Operación finalizada correctamente, se creó/actualizó el agente en WIS: ' + str(response),
-            })
-
         except Exception as e:
-            self.env['logs.res.partner'].create({
-                'partner_id': vals.id,
-                'fecha': fields.Datetime.now(),
-                'texto': f'Error al enviar la información a WIS: {str(e)}',
-            })
             raise ValidationError(f"Error al enviar la información a WIS: {str(e)}")
 
         
@@ -525,7 +518,7 @@ class IntegracionWIS(models.Model):
             raise ValidationError("No se ha encontrado información del pedido");
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "numero": vals.codigo_unico,
             "tipoAgente": "CLI" if vals.partner_id.customer_rank > 0 else "PRO",
             "codigoAgente": vals.partner_id.codigo_unico,
@@ -604,7 +597,7 @@ class IntegracionWIS(models.Model):
 
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "dsReferencia": f"Creación de Pedido desde Odoo: {vals.name}",
             "archivo": "Archivo",
             "pedidos": pedidos,
@@ -643,7 +636,7 @@ class IntegracionWIS(models.Model):
 
             numeroRandom = random.randint(100000, 999999);
             payload = {
-                'empresa': 6005,
+                'empresa': self.empresa_id,
                 'dsReferencia': f"DEVOLUCIÓN DE CLIENTE DESDE ODOO: {picking.name}",
                 'referencias': [{
                     'referencia': 'DEV-' + str(numeroRandom),
@@ -704,7 +697,7 @@ class IntegracionWIS(models.Model):
 
         numeroRandom = random.randint(100000, 999999)
         payload = {
-            'empresa': 6005,
+            'empresa': self.empresa_id,
             'dsReferencia': f"RECEPCIÓN DESDE ODOO: {picking.name}",
             'referencias': [{
                 'referencia': 'REC-' + str(numeroRandom),
@@ -755,7 +748,7 @@ class IntegracionWIS(models.Model):
         numeroRandom = random.randint(100000, 999999);
 
         payload = {
-            'empresa': 6005,
+            'empresa': self.empresa_id,
             'dsReferencia': "CREACION DE ORDEN DE COMPRA DESDE ODOO", 
             'referencias': [{
                 'referencia': numeroRandom,
@@ -802,7 +795,7 @@ class IntegracionWIS(models.Model):
         _logger.info(f"DATOS EN DETALLES => {detalles}");
 
         payload = {
-            'empresa': 6005,
+            'empresa': self.empresa_id,
             'dsReferencia': "CREACION DE ORDEN DE COMPRA DESDE ODOO", 
             'referencias': [{
                 'referencia': vals.referencia,
@@ -832,7 +825,7 @@ class IntegracionWIS(models.Model):
     def consultaStock(self, vals):
 
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "codigo": vals['codigo_unico']
         }
 
@@ -850,7 +843,7 @@ class IntegracionWIS(models.Model):
 
     def getProducto(self, codigo):
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "codigo": codigo
         }
 
@@ -865,7 +858,7 @@ class IntegracionWIS(models.Model):
 
     def getCliente(self, vat):
         payload = {
-            "empresa": 6005,
+            "empresa": self.empresa_id,
             "codigo": vat,
             "tipo": "CLI"
         }
@@ -1287,3 +1280,4 @@ class IntegracionWISWebHooks(models.Model):
         help="Clave secreta para autenticar las solicitudes del Webhook",
         required=True
     )
+

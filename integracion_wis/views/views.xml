@@ -5,6 +5,7 @@
       <field name="model">integracion_wis.integracion_wis</field>
       <field name="arch" type="xml">
         <tree>
+          <field name="empresa_id"/>
           <field name="client_id"/>
           <field name="client_secret"/>
           <field name="url_access_token"/> 
@@ -33,6 +34,7 @@
       <field name="arch" type="xml">
         <form>
           <group>
+            <field name="empresa_id"/>
             <field name="client_id"/>
             <field name="client_secret"/>
             <field name="url_access_token"/> 
