@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//root/reglasAbastecimiento/config/**)"
-    ],
-    "deny": [],
-    "ask": []
-  }
-}
