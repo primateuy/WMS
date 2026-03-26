@@ -1,8 +1,17 @@
 from odoo import fields, api, models
 from odoo.exceptions import ValidationError
 import logging
+import pytz
+from datetime import datetime
 
 _logger = logging.getLogger(__name__)
+
+def get_uruguay_datetime():
+    utc_now = datetime.utcnow()
+    uruguay_tz = pytz.timezone('America/Montevideo')
+    utc_now = pytz.utc.localize(utc_now)
+    uruguay_time = utc_now.astimezone(uruguay_tz)
+    return fields.Datetime.to_string(uruguay_time.replace(tzinfo=None))
 
 class ConciliacionLogs(models.Model):
     _name = 'logs.conciliacion'
@@ -10,7 +19,7 @@ class ConciliacionLogs(models.Model):
     _order = 'fecha asc'
 
     modelo = fields.Char(string='Modelo', required=True)
-    fecha = fields.Datetime(string='Fecha', required=True, default=fields.Datetime.now)
+    fecha = fields.Datetime(string='Fecha', required=True, default=lambda self: get_uruguay_datetime())
     texto = fields.Text(string='Detalle')
     nivel = fields.Selection([
         ('info', 'Información'),
@@ -35,7 +44,8 @@ class ConciliacionMaestros(models.Model):
         ('borrador', 'Borrador'),
         ('en_proceso', 'En Proceso'),
         ('completado', 'Completado'),
-        ('error', 'Con Errores')
+        ('completado_con_errores', 'Completado con Errores'),
+        ('error', 'Error Fatal')
     ], string='Estado', default='borrador')
 
     # Campo calculado para el nombre de visualización
@@ -45,8 +55,9 @@ class ConciliacionMaestros(models.Model):
     @api.model
     def _cron_conciliar_clientes(self):
         """Método para el cron que ejecuta la conciliación de clientes"""
+        uruguay_time = datetime.fromisoformat(get_uruguay_datetime())
         conciliacion = self.create({
-            'name': f'Conciliación Automática de Clientes - {fields.Datetime.now().strftime("%Y-%m-%d %H:%M")}',
+            'name': f'Conciliación Automática de Clientes - {uruguay_time.strftime("%Y-%m-%d %H:%M")}',
             'clientes': True,
             'productos': False,
             'codigoBarras': False
@@ -57,8 +68,9 @@ class ConciliacionMaestros(models.Model):
     @api.model
     def _cron_conciliar_productos(self):
         """Método para el cron que ejecuta la conciliación de productos"""
+        uruguay_time = datetime.fromisoformat(get_uruguay_datetime())
         conciliacion = self.create({
-            'name': f'Conciliación Automática de Productos - {fields.Datetime.now().strftime("%Y-%m-%d %H:%M")}',
+            'name': f'Conciliación Automática de Productos - {uruguay_time.strftime("%Y-%m-%d %H:%M")}',
             'clientes': False,
             'productos': True,
             'codigoBarras': False
@@ -69,8 +81,9 @@ class ConciliacionMaestros(models.Model):
     @api.model
     def _cron_conciliar_codigos_barras(self):
         """Método para el cron que ejecuta la conciliación de códigos de barras"""
+        uruguay_time = datetime.fromisoformat(get_uruguay_datetime())
         conciliacion = self.create({
-            'name': f'Conciliación Automática de Códigos de Barras - {fields.Datetime.now().strftime("%Y-%m-%d %H:%M")}',
+            'name': f'Conciliación Automática de Códigos de Barras - {uruguay_time.strftime("%Y-%m-%d %H:%M")}',
             'clientes': False,
             'productos': False,
             'codigoBarras': True
@@ -81,10 +94,12 @@ class ConciliacionMaestros(models.Model):
 
     @api.depends('name', 'fecha_creacion', 'estado')
     def _compute_display_name(self):
+        uruguay_tz = pytz.timezone('America/Montevideo')
         for record in self:
             if record.fecha_creacion:
-                fecha_str = record.fecha_creacion.strftime('%Y-%m-%d %H:%M')
-                
+                fecha_utc = pytz.utc.localize(record.fecha_creacion)
+                fecha_uy = fecha_utc.astimezone(uruguay_tz)
+                fecha_str = fecha_uy.strftime('%Y-%m-%d %H:%M')
                 record.display_name = f"{record.name} - {fecha_str}"
             else:
                 record.display_name = record.name or 'Nueva Conciliación'
@@ -96,7 +111,7 @@ class ConciliacionMaestros(models.Model):
             'texto': texto,
             'modelo': modelo,
             'nivel': nivel,
-            'fecha': fields.Datetime.now()
+            'fecha': get_uruguay_datetime()
         })
 
     def _actualizar_estado(self, nuevo_estado):
@@ -105,19 +120,29 @@ class ConciliacionMaestros(models.Model):
         self._agregar_log(f"Estado cambiado a: {nuevo_estado}", 'conciliacion.maestros', 'info')
 
     def _iniciar_conciliacion(self, tipo):
-        """Marca el inicio de una conciliación"""
         self._actualizar_estado('en_proceso')
         self._agregar_log(f"Iniciando conciliación de {tipo}...", f'{tipo}', 'info')
 
     def _completar_conciliacion(self, tipo):
-        """Marca la finalización exitosa de una conciliación"""
-        self._actualizar_estado('completado')
-        self._agregar_log(f"Conciliación de {tipo} completada exitosamente.", f'{tipo}', 'info')
+        errores = self.logs.filtered(lambda l: l.nivel == 'error')
+        if errores:
+            self._actualizar_estado('completado_con_errores')
+            self._agregar_log(f"Conciliación de {tipo} completada CON ERRORES ({len(errores)} errores encontrados).", f'{tipo}', 'warning')
+        else:
+            self._actualizar_estado('completado')
+            self._agregar_log(f"Conciliación de {tipo} completada exitosamente.", f'{tipo}', 'info')
 
     def _error_conciliacion(self, tipo, error_msg):
-        """Marca un error en la conciliación"""
         self._actualizar_estado('error')
-        self._agregar_log(f"Error en conciliación de {tipo}: {error_msg}", f'{tipo}', 'error')
+        self._agregar_log(f"Error fatal en conciliación de {tipo}: {error_msg}", f'{tipo}', 'error')
+
+    def _agregar_error_parcial(self, texto, modelo='', excepcion=None):
+        """Agrega un error parcial que no detiene la conciliación"""
+        error_detalle = f"{texto}"
+        if excepcion:
+            error_detalle += f" - Detalle: {str(excepcion)}"
+        self._agregar_log(error_detalle, modelo, 'error')
+        return error_detalle
 
     def conciliarCodigosBarra(self):
         try:
@@ -130,7 +155,7 @@ class ConciliacionMaestros(models.Model):
             ])
 
             if not productos:
-                self._agregar_log('⚠️ No se encontraron productos con integración WMS activa', 'product.product', 'warning')
+                self._agregar_log('No se encontraron productos con integración WMS activa', 'product.product', 'warning')
                 self._actualizar_estado('completado')
                 return True
 
@@ -141,15 +166,23 @@ class ConciliacionMaestros(models.Model):
                 raise ValidationError(error_msg)
 
             productos_procesados = 0
+            productos_con_error = 0
             for producto in productos:
                 variantes = producto.product_variant_ids.filtered(lambda v: v.active and v.codigo_unico)
-                
-                if variantes:
-                    datosAPI.consultarCodigosBarras(variantes, self.id)
-                    productos_procesados += len(variantes)
-                    self._agregar_log(f'Procesadas {len(variantes)} variantes del producto {producto.name}', 'product.product', 'info')
 
-            self._agregar_log(f'Total de variantes procesadas: {productos_procesados}', 'product.barcode', 'info')
+                if variantes:
+                    try:
+                        datosAPI.consultarCodigosBarras(variantes, self.id)
+                        productos_procesados += len(variantes)
+                        self._agregar_log(f'Procesadas {len(variantes)} variantes del producto {producto.name}', 'product.product', 'info')
+                    except Exception as e:
+                        productos_con_error += len(variantes)
+                        self._agregar_error_parcial(f'Error procesando variantes del producto {producto.name}', 'product.product', e)
+
+            if productos_con_error > 0:
+                self._agregar_log(f'📊 Resumen: {productos_procesados} variantes procesadas exitosamente, {productos_con_error} con errores', 'product.barcode', 'warning')
+            else:
+                self._agregar_log(f'Total de variantes procesadas exitosamente: {productos_procesados}', 'product.barcode', 'info')
             self._completar_conciliacion('códigos de barras')
             return True
 
@@ -191,10 +224,15 @@ class ConciliacionMaestros(models.Model):
             # Resumen final
             if conciliaciones_exitosas:
                 self._agregar_log(f'Conciliaciones exitosas: {", ".join(conciliaciones_exitosas)}', 'conciliacion.maestros', 'info')
-            
+
             if conciliaciones_fallidas:
                 self._agregar_log(f'Conciliaciones fallidas: {"; ".join(conciliaciones_fallidas)}', 'conciliacion.maestros', 'error')
+
+            errores_totales = self.logs.filtered(lambda l: l.nivel == 'error')
+            if conciliaciones_fallidas:
                 self._actualizar_estado('error')
+            elif errores_totales:
+                self._actualizar_estado('completado_con_errores')
             else:
                 self._actualizar_estado('completado')
                 
@@ -215,7 +253,7 @@ class ConciliacionMaestros(models.Model):
             ])
 
             if not clientes:
-                self._agregar_log('⚠️ No se encontraron clientes con integración WMS activa', 'res.partner', 'warning')
+                self._agregar_log('No se encontraron clientes con integración WMS activa', 'res.partner', 'warning')
                 self._actualizar_estado('completado')
                 return True
 
@@ -226,7 +264,11 @@ class ConciliacionMaestros(models.Model):
                 raise ValidationError(error_msg)
 
             self._agregar_log(f'Procesando {len(clientes)} clientes...', 'res.partner', 'info')
-            datosAPI.conciliarClientes(clientes, self.id)
+            try:
+                datosAPI.conciliarClientes(clientes, self.id)
+                self._agregar_log(f'Procesados {len(clientes)} clientes exitosamente', 'res.partner', 'info')
+            except Exception as e:
+                self._agregar_error_parcial(f'Error procesando clientes', 'res.partner', e)
 
             self._completar_conciliacion('clientes')
             return True
@@ -246,7 +288,7 @@ class ConciliacionMaestros(models.Model):
             ])
 
             if not productos:
-                self._agregar_log('⚠️ No se encontraron productos con integración WMS activa', 'product.product', 'warning')
+                self._agregar_log('No se encontraron productos con integración WMS activa', 'product.product', 'warning')
                 self._actualizar_estado('completado')
                 return True
 
@@ -257,15 +299,23 @@ class ConciliacionMaestros(models.Model):
                 raise ValidationError(error_msg)
 
             productos_procesados = 0
+            productos_con_error = 0
             for producto in productos:
                 variantes = producto.product_variant_ids.filtered(lambda v: v.active and v.codigo_unico)
-                
-                if variantes:
-                    datosAPI.consultarProductos(variantes, self.id)
-                    productos_procesados += len(variantes)
-                    self._agregar_log(f'Procesadas {len(variantes)} variantes del producto {producto.name}', 'product.product', 'info')
 
-            self._agregar_log(f'Total de variantes procesadas: {productos_procesados}', 'product.product', 'info')
+                if variantes:
+                    try:
+                        datosAPI.consultarProductos(variantes, self.id)
+                        productos_procesados += len(variantes)
+                        self._agregar_log(f'Procesadas {len(variantes)} variantes del producto {producto.name}', 'product.product', 'info')
+                    except Exception as e:
+                        productos_con_error += len(variantes)
+                        self._agregar_error_parcial(f'Error procesando variantes del producto {producto.name}', 'product.product', e)
+
+            if productos_con_error > 0:
+                self._agregar_log(f'Resumen: {productos_procesados} variantes procesadas exitosamente, {productos_con_error} con errores', 'product.product', 'warning')
+            else:
+                self._agregar_log(f'Total de variantes procesadas exitosamente: {productos_procesados}', 'product.product', 'info')
             self._completar_conciliacion('productos')
             return True
 

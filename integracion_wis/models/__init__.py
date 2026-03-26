@@ -15,3 +15,4 @@ from . import product_wms_log
 from . import conciliacionMaestros
 from . import ConciliacionStock
 from . import webhook_log
+from . import sale_order

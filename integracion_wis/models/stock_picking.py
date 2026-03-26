@@ -13,6 +13,103 @@ class StockPicking(models.Model):
 
     _inherit = 'stock.picking'
 
+    wms_estado = fields.Selection(
+        selection=[
+            ("sin_enviar", "Sin enviar a WMS"),
+            ("enviado", "Enviado a WMS"),
+            ("preparado", "Preparado por WMS"),
+            ("despachado", "Despachado por WMS"),
+            ("anulado", "Anulado por WMS"),
+        ],
+        string="Estado WMS",
+        default="sin_enviar",
+        tracking=True,
+        copy=False,
+        index=True,
+    )
+ 
+    # ------------------------------------------------------------------
+    # Campos WMS - Trazabilidad general
+    # ------------------------------------------------------------------
+ 
+    wms_referencia = fields.Char(
+        string="Referencia WMS",
+        copy=False,
+        index=True,
+        help="Identificador del pedido en el WMS externo.",
+    )
+    wms_fecha_confirmacion = fields.Datetime(
+        string="Fecha confirmación WMS",
+        copy=False,
+        readonly=True,
+    )
+ 
+    # ------------------------------------------------------------------
+    # Campos WMS - Webhook 1: confirmacionMercaderiaPreparada
+    # ------------------------------------------------------------------
+ 
+    wms_fecha_preparacion = fields.Datetime(
+        string="Fecha preparación WMS",
+        copy=False,
+        readonly=True,
+    )
+    wms_observaciones_preparacion = fields.Text(
+        string="Observaciones preparación WMS",
+        copy=False,
+        readonly=True,
+    )
+ 
+    # ------------------------------------------------------------------
+    # Campos WMS - Webhook 2: confirmacionDespacho
+    # ------------------------------------------------------------------
+ 
+    wms_fecha_despacho = fields.Datetime(
+        string="Fecha despacho WMS",
+        copy=False,
+        readonly=True,
+    )
+    wms_transportadora = fields.Char(
+        string="Transportadora WMS",
+        copy=False,
+        readonly=True,
+    )
+    wms_nro_remito = fields.Char(
+        string="Nro. Remito WMS",
+        copy=False,
+        readonly=True,
+    )
+    wms_nro_seguimiento = fields.Char(
+        string="Nro. Seguimiento / Tracking",
+        copy=False,
+        readonly=True,
+    )
+    wms_cantidad_bultos = fields.Integer(
+        string="Cantidad de bultos",
+        copy=False,
+        readonly=True,
+    )
+    wms_peso_total = fields.Float(
+        string="Peso total (kg)",
+        copy=False,
+        readonly=True,
+        digits=(10, 3),
+    )
+ 
+    # ------------------------------------------------------------------
+    # Campos WMS - Webhook 3: anulacionOperativa
+    # ------------------------------------------------------------------
+ 
+    wms_fecha_anulacion = fields.Datetime(
+        string="Fecha anulación WMS",
+        copy=False,
+        readonly=True,
+    )
+    wms_motivo_anulacion = fields.Char(
+        string="Motivo anulación WMS",
+        copy=False,
+        readonly=True,
+    )
+
 
     idPedidoWMS = fields.Char(
         string='ID Pedido WMS', help="Identificador del pedido en el sistema WMS.")
@@ -83,8 +180,6 @@ class StockPicking(models.Model):
         
 
         
-        _logger.info("Probando si el partner existe %s", self.partner_id);
-        _logger.info("EL TIPO ES => %s", tipo);
         if not self.partner_id:
             raise ValidationError("No se ha asignado un partner")
 
@@ -93,10 +188,7 @@ class StockPicking(models.Model):
         if not self.partner_id.codigo_wms or not self.partner_id.codigo_unico:
             raise ValidationError("El partner no se encuentra sincronizado en WIS")
 
-        central_locations = self.env['stock.location'].search([
-            ('usage', '=', 'internal'),
-            ('company_id', '=', self.env.company.id)
-        ])
+        
 
         datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
         if not datosAPI or not datosAPI.apiLink:
@@ -105,22 +197,24 @@ class StockPicking(models.Model):
         state_actual = str(self.state or '').strip()
         state_objetivo = str(self.picking_type_id.estado_disparo_wis or '').strip()
         
-        _logger.info("VALIDANDO ESTADOS: Actual='%s' | Objetivo='%s'", state_actual, state_objetivo)
 
-        if state_actual != state_objetivo:
+        if state_objetivo and state_actual != state_objetivo:
             _logger.info("Postergando integración: El estado '%s' no coincide con el objetivo '%s'", state_actual, state_objetivo)
             return False
+
         
-        if tipo == 'OC' or (self.picking_type_id.code == 'incoming' and self.partner_id.supplier_rank > 0):
+
+
+        # Es un movimiento que viene de una compra
+        if tipo == 'OCI' or self.sale_id:
             return datosAPI.insertarReferenciaRecepcion(self)
 
         if self.picking_type_id.code == 'incoming':
             if self.partner_id.customer_rank > 0:
+                _logger.info("Es una devolución de cliente, se enviará a la API de devoluciones");
                 return datosAPI.insertarDevolucion(self)
 
-
-        pdfData = None
-        if tipo == 'EC' and self.picking_type_id.emitir_factura_antes_envio and self.sale_id:
+        if tipo == 'EC':
             try:
                 if not self.sale_id:
                     raise ValidationError("No hay orden de venta asociada")
@@ -151,9 +245,7 @@ class StockPicking(models.Model):
                         factura = facturas[0]
                         factura.action_post()
 
-                pdfData = self.generarPDFBase64(factura);
-                _logger.info(pdfData);
-                _logger.info("PDF generado para factura: %s", factura.name)
+                
                 
             except Exception as e:
                 _logger.error("Error procesando factura para picking %s: %s", self.id, str(e))
@@ -166,7 +258,10 @@ class StockPicking(models.Model):
         
 
         try:
-            response = datosAPI.insertarPedidos(self, tipo, pdfData);
+            response = datosAPI.insertarPedidos(self, tipo);
+
+            
+            
             return response;
         
         except Exception as e:
@@ -174,97 +269,49 @@ class StockPicking(models.Model):
             raise ValidationError(f"Error en integración WMS: {str(e)}")
 
 
-    @api.model
-    def create(self, vals):
-        res = super(StockPicking, self).create(vals)
-
-        _logger.info("CREANDO UN NUEVO PICKING");
-        
-        if res.picking_type_id.integracion_wms:
-            _logger.info("Entrando al create")
-            try:
-                tipo = 'NORM'
-                if res.picking_type_id.tipo_pedido_wis:
-                    tipo = res.picking_type_id.tipo_pedido_wis;
-
-                response = res.enviarWS(tipo)
-                if response:
-                    res.with_context(skip_wms_integration=True).write({
-                        'idPedidoWMS': response.get('numeroInterfaz', ''),
-                        'codigo_unico': response.get('codigoUnico', '')
-                    })
-                    
-                    # Log de éxito
-                    self.env['wms.integracion.log'].create({
-                        'fecha': fields.Datetime.now(),
-                        'nivel': 'info',
-                        'modelo': 'stock.picking',
-                        'texto': f"Picking {res.name} creado exitosamente en WMS. NumeroInterfaz: {response.get('numeroInterfaz', '')}, CodigoUnico: {response.get('codigoUnico', '')}",
-                        'picking_id': res.id,
-                        'resultado': 'exito',
-                        'detalle': f"Tipo: {tipo}, Partner: {res.partner_id.name if res.partner_id else 'N/A'}"
-                    })
-                    
-            except Exception as e:
-                _logger.error("Error en integración WMS durante create: %s", str(e))
-                
-                # Log de error
-                self.env['wms.integracion.log'].create({
-                    'fecha': fields.Datetime.now(),
-                    'nivel': 'error',
-                    'modelo': 'stock.picking',
-                    'texto': f"Error al crear picking {res.name} en WMS: {str(e)}",
-                    'picking_id': res.id,
-                    'resultado': 'error',
-                    'detalle': f"Tipo operación: {res.picking_type_id.name if res.picking_type_id else 'N/A'}, Partner: {res.partner_id.name if res.partner_id else 'N/A'}"
-                })
-                
-                raise ValidationError(f"Error en integración WMS durante create: {str(e)}")
-        return res
 
     def write(self, vals):
         res = super(StockPicking, self).write(vals)
         
         if not self.env.context.get('skip_wms_integration'):
             for record in self:
-                if record.picking_type_id.integracion_wms:
-                    tipo = 'NORM'
-                    if record.picking_type_id.tipo_pedido_wis:
-                        tipo = record.picking_type_id.tipo_pedido_wis;
+                if not record.picking_type_id.integracion_wms:
+                    continue
+                if not record.move_ids:          
+                    continue
+                if record.wms_estado != 'sin_enviar':
+                    continue
 
-                    try:
-                        record_ctx = record.with_context(skip_wms_integration=True)
-                        response = record.enviarWS(tipo)
-                        
-                        _logger.info("Response de API para picking %s: %s", record.id, response)
-                        if response:
-                            record_ctx.write({
-                                'idPedidoWMS': response.get('numeroInterfaz', ''),
-                                'codigo_unico': response.get('codigoUnico', '')
-                            })
+                tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+
+                try:
+                    response = record.enviarWS(tipo)
+                    if response is not False:
+                        wms_vals = {'wms_estado': 'enviado'}
+                        if isinstance(response, dict):
+                            wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
+                            wms_vals['codigo_unico'] = response.get('codigoUnico', '')
                             
-                            # Log de éxito en actualización
-                            self.env['wms.integracion.log'].create({
-                                'fecha': fields.Datetime.now(),
-                                'nivel': 'info',
-                                'modelo': 'stock.picking',
-                                'texto': f"Picking {record.name} actualizado exitosamente en WMS. NumeroInterfaz: {response.get('numeroInterfaz', '')}, CodigoUnico: {response.get('codigoUnico', '')}",
-                                'picking_id': record.id,
-                                'resultado': 'exito',
-                                'detalle': f"Estado: {record.state}, Tipo: {tipo}, Campos actualizados: {', '.join(vals.keys())}"
-                            })
-                            
-                    except Exception as e:
-                        _logger.error("Error en integración WMS durante write para picking %s: %s", record.id, str(e))
+                        record.with_context(skip_wms_integration=True).write(wms_vals)
                         
-                        # Log de error en actualización
+                        codigo_log = response.get('codigoUnico', '') if isinstance(response, dict) else ''
                         self.env['wms.integracion.log'].create({
                             'fecha': fields.Datetime.now(),
-                            'nivel': 'error',
+                            'nivel': 'info',
                             'modelo': 'stock.picking',
-                            'texto': f"Error al actualizar picking {record.name} en WMS: {str(e)}",
+                            'texto': f"Picking {record.name} enviado a WMS. CodigoUnico: {codigo_log}",
                             'picking_id': record.id,
-                            'resultado': 'error',
-                            'detalle': f"Estado: {record.state}, Tipo operación: {record.picking_type_id.name if record.picking_type_id else 'N/A'}"
+                            'resultado': 'exito',
+                            'detalle': f"Estado: {record.state}, Tipo: {tipo}",
                         })
+                except Exception as e:
+                    self.env['wms.integracion.log'].create({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error',
+                        'modelo': 'stock.picking',
+                        'texto': f"Error al enviar picking {record.name} a WMS: {str(e)}",
+                        'picking_id': record.id,
+                        'resultado': 'error',
+                        'detalle': f"Estado: {record.state}, Tipo: {record.picking_type_id.name if record.picking_type_id else 'N/A'}",
+                    })
         return res

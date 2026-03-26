@@ -143,13 +143,11 @@ class IntegracionWIS(models.Model):
         try:
             req = requests.request(url=api_url + link, method=method, json=body, headers=headers, params=params)
             _logger.info(f"REQ: {req.text}")
-
-            # Verificar el código de estado de la respuesta
+            _logger.info(f"JSON ES BODY => {body}")
             if req.status_code != 200:
                 _logger.error(f"Error en la API: {req.status_code} - {req.text}")
                 raise ValidationError(f"Error en la API: {req.status_code} - {req.text}")
 
-            # Intentar decodificar la respuesta como JSON
             try:
                 return req.json()
             except ValueError as e:
@@ -178,8 +176,7 @@ class IntegracionWIS(models.Model):
         payload = {
             "empresa": self.empresa_id,
             "productos": [{
-                    "codigoProducto": vals.codigo_unico,
-                    "cantidadGenerica": vals.qty_available 
+                    "codigoProducto": vals.codigo_unico
             }]
         }
 
@@ -190,8 +187,6 @@ class IntegracionWIS(models.Model):
             body=None
         )
 
-        if response.get('cantidadGenerica') is None:
-            raise ValidationError("No se encontró el producto en WIS")
 
         vals.qty_available = response['cantidadGenerica']
         vals.with_context(_avoid_wms=True).write({'qty_available': vals.qty_available})
@@ -206,6 +201,13 @@ class IntegracionWIS(models.Model):
         productos = [];
         unidad_wis = vals.uom_id.name if vals.uom_id else "UND"
         numeroRandom = random.randint(100000, 999999);
+
+        _logger.info("Nombre del producto => {}".format(vals.name));
+        _logger.info("DISPLAY NAME => {}".format(vals.display_name));
+
+        if len(vals.name) > 65:
+            _logger.info("El producto supera los 65 caracteres, se truncará para la integración con WIS");
+            vals.name = vals.name[:65];
         codigo = ''
         if vals.codigo_unico:
             codigo = vals.codigo_unico;
@@ -214,7 +216,7 @@ class IntegracionWIS(models.Model):
         productos = [{
                 "codigoProducto": codigo,
                 "codigo": codigo,
-                "descripcion": f"{vals.display_name}",
+                "descripcion": f"{vals.name}",
                 "familia": 1,
                 "unidadMedida": "L",
                 "clase": 1,
@@ -222,8 +224,7 @@ class IntegracionWIS(models.Model):
                 "manejoIdentificador": "L",
                 "tipoManejoFecha": "F",
                 "unidadBulto": 1,
-                "activo": vals.active,
-                'cantidadGenerica': vals.qty_available or 1
+                "activo": vals.active
 
             }]
         
@@ -236,6 +237,9 @@ class IntegracionWIS(models.Model):
             "dsReferencia": f"PRODUCTO: {vals.display_name} desde Odoo",
             "productos": productos
         }
+
+
+        
 
         response = self.consultarAPI(
             link="/Producto/CreateOrUpdate",
@@ -546,9 +550,12 @@ class IntegracionWIS(models.Model):
 
    
 
-    def insertarPedidos(self, vals, tipo, pdfData):
-        tipoPedido = 'VEN';
+    def insertarPedidos(self, vals, tipo):
+        
+        _logger.info(f"El pedido del tipo es => {tipo}");
 
+        if not tipo:
+            raise ValidationError("Debe especificar el tipo de pedido que se va a insertar en WMS");
         if vals.codigo_unico and vals.picking_type_id != 'creacion_actualiacion':
             raise ValidationError("El picking ya tiene un código único asignado, no se puede volver a enviar a WMS");
 
@@ -588,7 +595,7 @@ class IntegracionWIS(models.Model):
             "codigoAgente": vals.partner_id.codigo_unico,
             "tipoAgente": "CLI" if vals.partner_id.customer_rank > 0 else "PRO",
             "fechaEntrega": vals.scheduled_date.isoformat(),
-            "tipoPedido": tipoPedido,
+            "tipoPedido": tipo,
             "direccion": direccion,
             "detalles": detalles
         }]
@@ -718,6 +725,7 @@ class IntegracionWIS(models.Model):
         )
 
         response['codigoUnico'] = f'REC-{numeroRandom}'
+
         return response
 
     def consultar(self):
@@ -768,20 +776,14 @@ class IntegracionWIS(models.Model):
         )
 
         response['referencia'] = numeroRandom;
-        _logger.info(f"RESPONSE {response}")
 
         return response
     
     def editarReferencia(self, vals):
         detalles = [];
 
-        _logger.info(f"VALS => {vals}");
-        _logger.info(f"SELF => {self}");
-        _logger.info(f"VALS DICT => {vals.order_line}");
-
 
         for line in vals.order_line:
-            _logger.info("ENTRA ACA");
             codigo_producto = line.product_id.codigo_unico or ''
             
             detalles.append({
@@ -791,8 +793,6 @@ class IntegracionWIS(models.Model):
                 "tipoOperacion": "M"
             })
 
-
-        _logger.info(f"DATOS EN DETALLES => {detalles}");
 
         payload = {
             'empresa': self.empresa_id,
@@ -815,8 +815,6 @@ class IntegracionWIS(models.Model):
         )
 
         response['referencia'] = vals.name;
-        _logger.info(f"RESPONSE {response}")
-        _logger.info("EDITADO");
 
         return response
     
@@ -836,9 +834,6 @@ class IntegracionWIS(models.Model):
             body=None
         )
 
-        _logger.info(f"RESPUESTA => {response}")
-
-        _logger.info(f"El usuario: {self.company_id.id} realizó una consulta de stock para el producto {vals.name} - {vals.id} - {vals.codigo_unico}, en el día {datetime.datetime.now()}");
         return response.get('cantidadGenerica', 0);
 
     def getProducto(self, codigo):
@@ -915,9 +910,19 @@ class IntegracionWIS(models.Model):
                 
                 punto_entrega = " - ".join(punto_entrega_parts) if punto_entrega_parts else "Sin dirección especificada"
                 
-                punto_entrega = punto_entrega[:200]  
+                punto_entrega = punto_entrega[:200] 
 
-                response = self.getCliente(vat_clean);
+                try:
+
+                    response = self.getCliente(vat_clean);
+
+                except Exception as e:
+                    _logger.info("No se encontró el cliente en WIS, se intentará crear uno nuevo. Error: %s", str(e))
+
+
+
+                    self.insertarClienteOrSupplier(vals);
+
 
                 if response.get('codigoAgente') != f"CLI-{vat_clean}" or response.get('descripcion') != name_clean or response.get('direccion') != punto_entrega or response.get('telefonoPrincipal') != phone_clean:
                     if conciliacion_id:
@@ -983,11 +988,12 @@ class IntegracionWIS(models.Model):
                 self.env['logs.conciliacion'].create({
                     'texto': f"Error al procesar {vals.name}: {str(e)}",
                     'modelo': 'res.partner',
+                    'nivel': 'error',
                     'fecha': fields.Datetime.now(),
                     'conciliacion_id': conciliacion_id
                 })
 
-        
+
         self.env['logs.conciliacion'].create({
             'texto': f"Se insertaron/actualizaron: {cantidad} clientes/proveedores",
             'modelo': 'res.partner',
@@ -1062,8 +1068,9 @@ class IntegracionWIS(models.Model):
                 self.env['logs.conciliacion'].create({
                     'texto': f"Error al procesar {vals.name}: {str(e)}",
                     'modelo': 'product.product',
+                    'nivel': 'error',
                     'fecha': fields.Datetime.now(),
-                    'conciliacion_id': vals.id
+                    'conciliacion_id': conciliacion_id
                 })
 
         
@@ -1078,7 +1085,6 @@ class IntegracionWIS(models.Model):
 
     def conciliarStockProducto(self, variantes, conciliacion_id=None, ubicacionSalida=None, ubicacionDestino=None, diferenciaMinima=1):
         
-        _logger.info("CAMPO DE CONCILIACION => " + str(conciliacion_id));
 
         if ubicacionDestino is None:
             ubicacionDestino = self.env['stock.location'].search([
@@ -1256,13 +1262,14 @@ class IntegracionWIS(models.Model):
                 self.env['logs.conciliacion'].create({
                     'texto': f"Error al procesar {vals.name}: {str(e)}",
                     'modelo': 'product.product',
+                    'nivel': 'error',
                     'fecha': fields.Datetime.now(),
                     'conciliacion_id': conciliacion_id
                 })
 
 
 
-   
+
 class IntegracionWISWebHooks(models.Model):
     _name = "integracion_wis.integracion_wis_webhook"
     _description = "Configuración de Webhooks para la integración con WIS"

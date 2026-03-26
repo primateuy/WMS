@@ -109,26 +109,26 @@
       <field name="name">conciliacion.maestros.tree</field>
       <field name="model">conciliacion.maestros</field>
       <field name="arch" type="xml">
-        <tree string="Lista de Conciliaciones" 
+        <tree string="Lista de Conciliaciones"
               decoration-success="estado == 'completado'"
-              decoration-danger="estado == 'error'" 
+              decoration-danger="estado in ('error', 'completado_con_errores')"
               decoration-warning="estado == 'en_proceso'"
               decoration-muted="estado == 'borrador'"
               create="true" edit="true" delete="true">
-          
+
           <field name="display_name" string="Conciliación"/>
           <field name="fecha_creacion" string="Fecha de Creación"/>
-          <field name="estado" widget="badge" 
+          <field name="estado" widget="badge"
                  decoration-success="estado == 'completado'"
-                 decoration-danger="estado == 'error'"
+                 decoration-danger="estado in ('error', 'completado_con_errores')"
                  decoration-warning="estado == 'en_proceso'"
                  decoration-info="estado == 'borrador'"/>
-          
+
           <!-- Opciones de conciliación -->
           <field name="productos" string="Productos" widget="boolean_toggle"/>
           <field name="clientes" string="Clientes" widget="boolean_toggle"/>
           <field name="codigoBarras" string="Códigos Barras" widget="boolean_toggle"/>
-          
+
         </tree>
       </field>
     </record>
@@ -165,8 +165,8 @@
                     class="btn-secondary"/>
 
             <!-- Campo de estado -->
-            <field name="estado" widget="statusbar" 
-                   statusbar_visible="borrador,en_proceso,completado,error"/>
+            <field name="estado" widget="statusbar"
+                   statusbar_visible="borrador,en_proceso,completado,completado_con_errores,error"/>
           </header>
           
           <sheet>
@@ -237,18 +237,18 @@
       <field name="name">conciliacion.maestros.tree</field>
       <field name="model">conciliacion.maestros</field>
       <field name="arch" type="xml">
-        <tree string="Lista de Conciliaciones" 
+        <tree string="Lista de Conciliaciones"
               decoration-success="estado == 'completado'"
-              decoration-danger="estado == 'error'" 
+              decoration-danger="estado in ('error', 'completado_con_errores')"
               decoration-warning="estado == 'en_proceso'"
               decoration-muted="estado == 'borrador'"
               create="true" edit="true" delete="true">
-          
+
           <field name="display_name" string="Conciliación"/>
           <field name="fecha_creacion" string="Fecha de Creación"/>
-          <field name="estado" widget="badge" 
+          <field name="estado" widget="badge"
                  decoration-success="estado == 'completado'"
-                 decoration-danger="estado == 'error'"
+                 decoration-danger="estado in ('error', 'completado_con_errores')"
                  decoration-warning="estado == 'en_proceso'"
                  decoration-info="estado == 'borrador'"/>
           
@@ -257,6 +257,29 @@
           <field name="clientes" string="Clientes" widget="boolean_toggle"/>
           <field name="codigoBarras" string="Códigos Barras" widget="boolean_toggle"/>
           
+        </tree>
+      </field>
+    </record>
+
+    <!-- Vista lista para Conciliación de Stock -->
+    <record id="view_conciliacion_stock_tree" model="ir.ui.view">
+      <field name="name">conciliacion.stock.tree</field>
+      <field name="model">conciliacion.stock</field>
+      <field name="arch" type="xml">
+        <tree string="Conciliaciones de Stock"
+              decoration-success="estado == 'completado'"
+              decoration-danger="estado in ('error', 'completado_con_errores')"
+              decoration-warning="estado == 'en_proceso'"
+              decoration-muted="estado == 'borrador'">
+          <field name="display_name" string="Conciliación"/>
+          <field name="fecha_creacion" string="Fecha de Creación"/>
+          <field name="estado" widget="badge"
+                 decoration-success="estado == 'completado'"
+                 decoration-danger="estado in ('error', 'completado_con_errores')"
+                 decoration-warning="estado == 'en_proceso'"
+                 decoration-info="estado == 'borrador'"/>
+          <field name="ubicacionSalida" string="Ubicación Salida"/>
+          <field name="ubicacionDestino" string="Ubicación Destino"/>
         </tree>
       </field>
     </record>
@@ -277,10 +300,10 @@
             
 
             <!-- Campo de estado -->
-            <field name="estado" widget="statusbar" 
-                   statusbar_visible="borrador,en_proceso,completado,error"/>
+            <field name="estado" widget="statusbar"
+                   statusbar_visible="borrador,en_proceso,completado,completado_con_errores,error"/>
           </header>
-          
+
           <sheet>
             <div class="oe_title">
               <h1>

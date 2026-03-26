@@ -361,35 +361,22 @@ class Product(models.Model):
         
         
 
+    CAMPOS_WIS = {'name', 'default_code', 'description', 'active', 'integracion_wms', 'barcode',
+                  'list_price', 'standard_price', 'taxes_id', 'uom_id', 'uom_po_id'}
+
     def write(self, vals):
         avoid_recursion = self.env.context.get('_avoid_wms', False)
         res = super(Product, self).write(vals)
-        
-        if not avoid_recursion and vals.get('integracion_wms'):
-            for record in self:
-                if res.integracion_wms and res.type == 'product':
-                    # Solo enviar si no tiene códigos WMS aún
-                    if not record.codigo_interfaz_wms and not record.codigo_unico:
+
+        if not avoid_recursion:
+            hay_cambios_relevantes = bool(self.CAMPOS_WIS & set(vals.keys()))
+            if hay_cambios_relevantes:
+                for record in self:
+                    if record.integracion_wms and record.type == 'product':
                         try:
-                            response = record.enviarWS()
-                            _logger.info(f"Producto {record.name} enviado automáticamente a WMS: {response}")
-                            
-                            if 'barcode' in vals and vals.get('barcode') and self.barcode is None and record.codigo_unico:
-                                record.saveBarcode();
-
-                            # El método enviarWS() ya actualiza los códigos, no necesitamos hacerlo aquí
-                            
+                            record.enviarWS()
+                            _logger.info(f"Producto {record.name} actualizado en WMS")
                         except Exception as e:
-                            _logger.error(f"Error enviando producto {record.name} automáticamente a WMS: {str(e)}")
-                            # No hacer raise aquí para no bloquear la operación principal
+                            _logger.error(f"Error enviando producto {record.name} a WMS: {str(e)}")
 
-
-
-
-                    if 'barcode' in vals and vals.get('barcode') and record.codigo_unico:
-                        try:
-                            record.saveBarcode()
-                        except Exception as e:
-                            _logger.error(f"Error enviando código de barras para {record.name}: {str(e)}")
-        
         return res

@@ -1,20 +1,81 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-
     <data>
-    
+
         <record id="view_picking_form_inherit_wms" model="ir.ui.view">
             <field name="name">stock.picking.form.inherit.wms</field>
             <field name="model">stock.picking</field>
             <field name="inherit_id" ref="stock.view_picking_form"/>
             <field name="arch" type="xml">
+
+                <!-- IDs WMS junto al origen -->
                 <xpath expr="//field[@name='origin']" position="after">
                     <field name="idPedidoWMS" readonly="1"/>
                     <field name="codigo_unico" readonly="1"/>
+                    <field name="wms_referencia" readonly="1"/>
                 </xpath>
-                
-                <!-- Agregar página de logs -->
+
+                <!-- Badge de estado WMS en el header, solo si fue enviado -->
+                <xpath expr="//header" position="inside">
+                    <field name="wms_estado" widget="statusbar"
+                           statusbar_visible="sin_enviar,enviado,preparado,despachado"/>
+                </xpath>
+
+                <!-- Pestaña WMS + Logs -->
                 <xpath expr="//notebook" position="inside">
+
+                    <!-- Pestaña integración WMS -->
+                    <page string="Integración WMS" name="integracion_wms"
+                          >
+
+                        <group string="Estado general">
+                            <group>
+                                <field name="wms_estado"/>
+                                <field name="wms_fecha_confirmacion" readonly="1"/>
+                            </group>
+                            <group>
+                                <field name="wms_referencia" readonly="1"/>
+                                <field name="idPedidoWMS" readonly="1"/>
+                                <field name="codigo_unico" readonly="1"/>
+                            </group>
+                        </group>
+
+                        <group string="Preparación"
+                               >
+                            <group>
+                                <field name="wms_fecha_preparacion" readonly="1"/>
+                                <field name="wms_cantidad_bultos" readonly="1"/>
+                                <field name="wms_peso_total" readonly="1"/>
+                            </group>
+                            <group>
+                                <field name="wms_transportadora" readonly="1"/>
+                                <field name="wms_observaciones_preparacion" 
+                                       readonly="1" colspan="2"/>
+                            </group>
+                        </group>
+
+                        <group string="Despacho">
+                            <group>
+                                <field name="wms_fecha_despacho" readonly="1"/>
+                                <field name="wms_nro_remito" readonly="1"/>
+                                <field name="wms_nro_seguimiento" readonly="1"/>
+                            </group>
+                            <group>
+                                <field name="wms_cantidad_bultos" readonly="1"/>
+                                <field name="wms_peso_total" readonly="1"/>
+                            </group>
+                        </group>
+
+                        <group string="Anulación">
+                            <group>
+                                <field name="wms_fecha_anulacion" readonly="1"/>
+                                <field name="wms_motivo_anulacion" readonly="1"/>
+                            </group>
+                        </group>
+
+                    </page>
+
+                    <!-- Pestaña logs -->
                     <page string="Logs WMS" name="logs_wms">
                         <group>
                             <group>
@@ -22,8 +83,8 @@
                             </group>
                         </group>
                         <field name="log_ids" readonly="1">
-                            <tree decoration-danger="nivel == 'error'" 
-                                  decoration-warning="nivel == 'warning'" 
+                            <tree decoration-danger="nivel == 'error'"
+                                  decoration-warning="nivel == 'warning'"
                                   decoration-success="nivel == 'info' and resultado == 'exito'">
                                 <field name="fecha"/>
                                 <field name="nivel"/>
@@ -33,11 +94,32 @@
                             </tree>
                         </field>
                     </page>
+
+                </xpath>
+
+            </field>
+        </record>
+
+        <!-- Filtros WMS en la vista lista -->
+        <record id="view_picking_list_wms_filter" model="ir.ui.view">
+            <field name="name">stock.picking.list.wms.filter</field>
+            <field name="model">stock.picking</field>
+            <field name="inherit_id" ref="stock.view_picking_internal_search"/>
+            <field name="arch" type="xml">
+                <xpath expr="//filter[@name='available']" position="after">
+                    <separator/>
+                    <filter string="Preparados por WMS"
+                            name="wms_preparado"
+                            domain="[('wms_estado', '=', 'preparado')]"/>
+                    <filter string="Despachados por WMS"
+                            name="wms_despachado"
+                            domain="[('wms_estado', '=', 'despachado')]"/>
+                    <filter string="Anulados por WMS"
+                            name="wms_anulado"
+                            domain="[('wms_estado', '=', 'anulado')]"/>
                 </xpath>
             </field>
         </record>
-    
-    </data>
-    
 
+    </data>
 </odoo>

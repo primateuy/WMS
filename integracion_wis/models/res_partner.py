@@ -42,6 +42,29 @@ class ResPartner(models.Model):
                 raise ValidationError("No se puede eliminar un agente que ya está sincronizado con WMS (tiene código WMS y código único).")
         return super(ResPartner, self).unlink()
 
+
+    CAMPOS_WIS = {'name', 'street', 'street2', 'city', 'zip', 'state_id', 'country_id', 'phone', 'integracion_wms'}
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        records = super(ResPartner, self).create(vals_list)
+        for partner in records:
+            if partner.integracion_wms:
+                partner.enviarWS()
+        return records
+
+    def write(self, vals):
+        res = super(ResPartner, self).write(vals)
+
+        if not self.env.context.get('skip_wis_sync'):
+            hay_cambios_relevantes = bool(self.CAMPOS_WIS & set(vals.keys()))
+            if hay_cambios_relevantes:
+                for partner in self:
+                    if partner.integracion_wms:
+                        partner.enviarWS()
+
+        return res
+
     def enviarWS(self):
 
         if self.customer_rank == 0 and self.supplier_rank == 0:
@@ -66,7 +89,7 @@ class ResPartner(models.Model):
         _logger.info("RESPONSE ES => %s", response)
 
         if response and isinstance(response, dict):
-            self.write({
+            self.with_context(skip_wis_sync=True).write({
                 'codigo_wms': response.get('numeroInterfaz', ''),
                 'codigo_unico': response.get('codigoUnico', '')
             })
