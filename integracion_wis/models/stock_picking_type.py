@@ -51,8 +51,4 @@ class StockPickingType(models.Model):
         help='Habilita el método de preparación WIS para este tipo de entrega.')
 
 
-    emitir_factura_antes_envio = fields.Boolean(
-        string='Emitir Factura Antes de Envío',
-        help='Si está marcado, se emitirá la factura antes de enviar el pedido al WMS. Y la misma se adjuntara como documento hacia WIS.',
-        default=False
-        )
+    

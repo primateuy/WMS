@@ -32,7 +32,8 @@ class ConciliacionStock(models.Model):
         ('borrador', 'Borrador'),
         ('en_proceso', 'En Proceso'),
         ('completado', 'Completado'),
-        ('error', 'Con Errores')
+        ('completado_con_errores', 'Completado con Errores'),
+        ('error', 'Error Fatal')
     ], string='Estado', default='borrador')
 
     ubicacionSalida = fields.Many2one('stock.location', string='Ubicación de Salida', domain=[('usage', '=', 'internal')], required=True)
@@ -60,46 +61,80 @@ class ConciliacionStock(models.Model):
 
     def conciliarStock(self):
         _logger.info("Iniciando proceso de conciliación de stock...")
-        self.estado = 'en_proceso'
-        productos = self.env['product.template'].search(
+        try:
+            inicio = fields.Datetime.now()
+            self.estado = 'en_proceso'
+            productos = self.env['product.template'].search([
+                ('integracion_wms', '=', True),
+                ('active', '=', True)
+            ])
 
-            [('integracion_wms', '=', True),
-            ('active', '=', True)]
-        );
+            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+            if not datosAPI or not datosAPI.apiLink:
+                raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
-        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1);
-        if not datosAPI or not datosAPI.apiLink:
-            raise ValidationError("No se encuentran todos los datos para una consulta a la API")
+            if not productos:
+                raise ValidationError("No se encontraron productos para conciliar stock.")
 
-        if not productos:
-            raise ValidationError("No se encontraron productos para conciliar stock.")
+            for producto in productos:
+                variantes = producto.product_variant_ids
+                if not variantes:
+                    self.env['logs.conciliacion.stock'].create({
+                        'texto': f'El producto {producto.name} no tiene variantes.',
+                        'nivel': 'warning',
+                        'conciliacion_id': self.id
+                    })
+                    continue
 
-        for producto in productos:
-            variantes = producto.product_variant_ids;
-            if not variantes:
+                for var in variantes:
+                    errores_antes = self.env['logs.conciliacion.stock'].search_count([
+                        ('conciliacion_id', '=', self.id),
+                        ('nivel', '=', 'error')
+                    ])
+                    try:
+                        datosAPI.conciliarStockProducto(var, self.id, ubicacionSalida=self.ubicacionSalida, ubicacionDestino=self.ubicacionDestino, diferenciaMinima=self.diferenciaMinima)
+                    except Exception as e:
+                        self.env['logs.conciliacion.stock'].create({
+                            'texto': f'Error al actualizar stock del producto {var.display_name}: {str(e)}',
+                            'nivel': 'error',
+                            'conciliacion_id': self.id
+                        })
+                        continue
+
+                    errores_despues = self.env['logs.conciliacion.stock'].search_count([
+                        ('conciliacion_id', '=', self.id),
+                        ('nivel', '=', 'error')
+                    ])
+                    if errores_despues == errores_antes:
+                        self.env['logs.conciliacion.stock'].create({
+                            'texto': f'Stock del producto {var.display_name} procesado correctamente.',
+                            'nivel': 'info',
+                            'conciliacion_id': self.id
+                        })
+
+            errores = self.logs.filtered(lambda l: l.nivel == 'error' and l.fecha >= inicio)
+            if errores:
+                self.estado = 'completado_con_errores'
                 self.env['logs.conciliacion.stock'].create({
-                    'texto': f'El producto {producto.name} no tiene variantes.',
+                    'texto': f'Conciliación completada CON ERRORES ({len(errores)} errores encontrados).',
                     'nivel': 'warning',
                     'conciliacion_id': self.id
                 })
-                continue
+            else:
+                self.estado = 'completado'
+                self.env['logs.conciliacion.stock'].create({
+                    'texto': 'Conciliación de stock completada exitosamente.',
+                    'nivel': 'info',
+                    'conciliacion_id': self.id
+                })
+            _logger.info("Proceso de conciliación de stock completado.")
 
-
-            for var in variantes:
-                try:
-                    datosAPI.conciliarStockProducto(var, self.id, ubicacionSalida=self.ubicacionSalida, ubicacionDestino=self.ubicacionDestino, diferenciaMinima=self.diferenciaMinima);
-                    self.env['logs.conciliacion.stock'].create({
-                        'texto': f'Se actualizó el stock del producto {var.display_name} correctamente.',
-                        'nivel': 'info',
-                        'conciliacion_id': self.id
-                    })
-                except Exception as e:
-                    self.env['logs.conciliacion.stock'].create({
-                        'texto': f'Error al actualizar stock del producto {var.display_name}: {str(e)}',
-                        'nivel': 'error',
-                        'conciliacion_id': self.id
-                    })
-
-        self.estado = 'completado'
-        _logger.info("Proceso de conciliación de stock completado.")
+        except Exception as e:
+            self.estado = 'error'
+            self.env['logs.conciliacion.stock'].create({
+                'texto': f'Error fatal en la conciliación de stock: {str(e)}',
+                'nivel': 'error',
+                'conciliacion_id': self.id
+            })
+            raise
 

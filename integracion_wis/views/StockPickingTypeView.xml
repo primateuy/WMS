@@ -18,7 +18,6 @@
                             <field name="estado_disparo_wis" invisible="not integracion_wms"/>
                             <field name="metodo_cancelacion_wis" invisible="not integracion_wms"/>
                             <field name="metodo_preparacion_wis" invisible="not integracion_wms"/>
-                            <field name="emitir_factura_antes_envio" invisible="not integracion_wms"/>
                         </group>
                     </page>
                 </xpath>
