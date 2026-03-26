@@ -57,23 +57,18 @@ class IntegracionWIS(models.Model):
         help='Compañía para la cual se configura la integración con WIS'
     )
 
-    ubicacionSalida = fields.Many2one(
-        'stock.location',
-        string='Ubicación de Salida',
-        domain=[('usage', '=', 'internal')],
-        help='Ubicación predeterminada de salida para conciliaciones de stock.'
-    )
-    ubicacionDestino = fields.Many2one(
-        'stock.location',
-        string='Ubicación de Destino',
-        domain=[('usage', '=', 'internal')],
-        help='Ubicación predeterminada de destino para conciliaciones de stock.'
-    )
+    ubicacionesAConsultar = fields.Many2many(
+    'stock.location',
+    string='Ubicaciones a Consultar',
+    domain=[('usage', '=', 'internal')])
+    
     diferenciaMinima = fields.Integer(
         string='Diferencia Mínima',
         default=1,
         help='Diferencia mínima para registrar un ajuste de stock.'
     )
+
+    ubicacionReponerStock = fields.Many2one('stock.location', string='Ubicación para Reponer Stock', domain=[('usage', '=', 'internal')])
 
     partner = fields.Many2one('res.partner', string='Partner por defecto', help='Partner asignado a los movimientos de stock generados', required=False)
     
@@ -221,8 +216,13 @@ class IntegracionWIS(models.Model):
                 "unidadMedida": "L",
                 "clase": 1,
                 "ramo": 1,
+                "precioIngreso": vals.standard_price,
+                "pesoNeto": vals.weight,
                 "manejoIdentificador": "L",
                 "tipoManejoFecha": "F",
+                "precioVenta": vals.list_price,
+
+                "categoria1": vals.categ_id.name if vals.categ_id else "",
                 "unidadBulto": 1,
                 "activo": vals.active
 
@@ -834,7 +834,39 @@ class IntegracionWIS(models.Model):
             body=None
         )
 
-        return response.get('cantidadGenerica', 0);
+        return response.get('cantidadGenerica', 0)
+
+    def consultaStockBulk(self, variantes):
+        """Consulta el stock de WIS para una lista de variantes de una sola vez.
+        Renueva el token una única vez antes del loop para no repetir la verificación
+        en cada llamada individual.
+        Retorna un dict {variant.id: cantidad_wis}.
+        Nota: la API WIS no expone un endpoint bulk; se consulta artículo por artículo
+        pero con un único token activo y sin overhead de renovación repetida.
+        """
+        if not self.token or self.expiracionToken < datetime.datetime.now():
+            self.renovarToken()
+
+        resultado = {}
+        for var in variantes:
+            if not var.codigo_unico:
+                continue
+            try:
+                payload = {
+                    "empresa": self.empresa_id,
+                    "codigo": var.codigo_unico,
+                }
+                response = self.consultarAPI(
+                    link="/Producto/GetProducto",
+                    params=payload,
+                    method="GET",
+                    body=None,
+                )
+                resultado[var.id] = response.get('cantidadGenerica', 0)
+            except Exception as e:
+                _logger.warning(f"No se pudo obtener stock WIS para {var.display_name}: {str(e)}")
+                resultado[var.id] = None
+        return resultado
 
     def getProducto(self, codigo):
         payload = {
@@ -1002,9 +1034,10 @@ class IntegracionWIS(models.Model):
         })
         return;
 
-    def consultarProductos(self, variantes, conciliacion_id=None):
+    
 
-        cantidad = 0;
+    def consultarProductos(self, variantes, conciliacion_id=None):
+        cantidad = 0
 
         for vals in variantes:
             try:
@@ -1012,58 +1045,68 @@ class IntegracionWIS(models.Model):
 
                 if conciliacion_id:
                     self.env['logs.conciliacion'].create({
-                        'texto': f"Consulta de producto {vals.name}: {response}",
-                        'modelo': 'product.product',
-                        'fecha': fields.Datetime.now(),
-                        'conciliacion_id': conciliacion_id
-                })
-                
-                if response.get('cantidadGenerica') != vals.qty_available or response.get('activo') != vals.active or response.get('descripcion'):
-
-                    if response.get('cantidadGenerica') != vals.qty_available:
-                        
-                        
-                        if conciliacion_id:
-                            self.env['logs.conciliacion'].create({
-                                'texto': f"Actualizando stock de {vals.name} de {response.get('cantidadGenerica')} a {vals.qty_available}",
-                                'modelo': 'product.product',
-                                'fecha': fields.Datetime.now(),
-                                'conciliacion_id': conciliacion_id
-                            })
-                    
-                    if response.get('descripcion') != vals.display_name:
-                        
-                        if conciliacion_id:
-                                
-                            self.env['logs.conciliacion'].create({
-                                'texto': f"Actualizando descripción de {vals.name} de '{response.get('descripcion')}' a '{vals.display_name}'",
-                                'modelo': 'product.product',
-                                'fecha': fields.Datetime.now(),
-                                'conciliacion_id': conciliacion_id
-                            })
-                    
-
-                    if response.get('activo') != vals.active:
-                        
-                        if conciliacion_id:
-                            self.env['logs.conciliacion'].create({
-                                'texto': f"Actualizando estado de {vals.name} de {'Activo' if response.get('activo') else 'Inactivo'} a {'Activo' if vals.active else 'Inactivo'}",
-                                'modelo': 'product.product',
-                                'fecha': fields.Datetime.now(),
-                                'conciliacion_id': conciliacion_id
-                            })
-
-                    resAPI = self.insertarProducto(vals);
-                    self.env['logs.conciliacion'].create({
-                        'texto': f"Respuesta de la API para {vals.name}: {resAPI}",
+                        'texto': f"Consultando producto {vals.name} en WIS...",
                         'modelo': 'product.product',
                         'fecha': fields.Datetime.now(),
                         'conciliacion_id': conciliacion_id
                     })
-                    cantidad += 1;
 
+                # Construir los valores esperados en WIS (igual que insertarProducto)
+                nombre_odoo = vals.name[:65] if len(vals.name) > 65 else vals.name
+                categoria_odoo = vals.categ_id.name if vals.categ_id else ""
 
-                    vals.message_post(body=f"Se actualizó el producto en WIS. Respuesta de la API: {resAPI}")
+                # Mapeo de campos Odoo → WIS para comparar
+                comparaciones = {
+                    'descripcion':      (response.get('descripcion'),     nombre_odoo),
+                    'precioIngreso':    (response.get('precioIngreso'),    vals.standard_price),
+                    'precioVenta':      (response.get('precioVenta'),      vals.list_price),
+                    'pesoNeto':         (response.get('pesoNeto'),         vals.weight),
+                    'categoria1':       (response.get('categoria1'),       categoria_odoo),
+                    'activo':           (response.get('activo'),           vals.active),
+                }
+
+                diferencias = {
+                    campo: {'wis': val_wis, 'odoo': val_odoo}
+                    for campo, (val_wis, val_odoo) in comparaciones.items()
+                    if val_wis != val_odoo
+                }
+
+                if diferencias:
+                    detalle_diffs = ", ".join(
+                        f"{campo}: WIS='{d['wis']}' → Odoo='{d['odoo']}'"
+                        for campo, d in diferencias.items()
+                    )
+
+                    if conciliacion_id:
+                        self.env['logs.conciliacion'].create({
+                            'texto': f"Diferencias encontradas en {vals.name}: {detalle_diffs}",
+                            'modelo': 'product.product',
+                            'fecha': fields.Datetime.now(),
+                            'conciliacion_id': conciliacion_id
+                        })
+
+                    resAPI = self.insertarProducto(vals)
+
+                    if conciliacion_id:
+                        self.env['logs.conciliacion'].create({
+                            'texto': f"Producto {vals.name} actualizado en WIS. Respuesta: {resAPI}",
+                            'modelo': 'product.product',
+                            'fecha': fields.Datetime.now(),
+                            'conciliacion_id': conciliacion_id
+                        })
+
+                    vals.message_post(body=f"Producto actualizado en WIS. Cambios: {detalle_diffs}")
+                    cantidad += 1
+
+                else:
+                    if conciliacion_id:
+                        self.env['logs.conciliacion'].create({
+                            'texto': f"Producto {vals.name} está sincronizado con WIS, sin diferencias.",
+                            'modelo': 'product.product',
+                            'fecha': fields.Datetime.now(),
+                            'conciliacion_id': conciliacion_id
+                        })
+
             except Exception as e:
                 self.env['logs.conciliacion'].create({
                     'texto': f"Error al procesar {vals.name}: {str(e)}",
@@ -1073,145 +1116,97 @@ class IntegracionWIS(models.Model):
                     'conciliacion_id': conciliacion_id
                 })
 
-        
         self.env['logs.conciliacion'].create({
-            'texto': f"Se modificarón: {cantidad} productos",
+            'texto': f"Conciliación finalizada. Productos actualizados: {cantidad}",
             'modelo': 'product.product',
             'fecha': fields.Datetime.now(),
             'conciliacion_id': conciliacion_id
         })
-        return;
+        return
 
 
-    def conciliarStockProducto(self, variantes, conciliacion_id=None, ubicacionSalida=None, ubicacionDestino=None, diferenciaMinima=1):
-        
+    def conciliarStockProducto(self, variant, conciliacion_id=None, cantidad_wis=None):
 
-        if ubicacionDestino is None:
-            ubicacionDestino = self.env['stock.location'].search([
-                ('usage', '=', 'internal'),
-                ('company_id', '=', self.env.company.id)
-            ], limit=1)
-        
-        if ubicacionSalida is None:
-            ubicacionSalida = self.env['stock.location'].search([
-                ('usage', '=', 'internal'),
-                ('company_id', '=', self.env.company.id)
-            ], limit=1)
+        if not self.ubicacionesAConsultar:
+            if conciliacion_id:
+                self.env['logs.conciliacion.stock'].create({
+                    'texto': 'No hay ubicaciones configuradas para consultar stock en la integración WIS.',
+                    'nivel': 'warning',
+                    'conciliacion_id': conciliacion_id
+                })
+            return
 
-        if not variantes:
-            raise ValidationError("No se han encontrado productos para conciliar stock")
+        if not variant.codigo_unico:
+            if conciliacion_id:
+                self.env['logs.conciliacion.stock'].create({
+                    'texto': f'El producto {variant.display_name} no tiene código único en WIS. Se omite.',
+                    'nivel': 'warning',
+                    'conciliacion_id': conciliacion_id
+                })
+            return
 
-        if conciliacion_id:
-            self.env['logs.conciliacion.stock'].create({
-                'texto': f"Comenzando la conciliación de stock para {len(variantes)} productos",
-                'nivel': 'info',
-                'fecha': fields.Datetime.now(),
-                'conciliacion_id': conciliacion_id
-            })
+        # Sumar cantidades en las ubicaciones configuradas
+        quants = self.env['stock.quant'].search([
+            ('product_id', '=', variant.id),
+            ('location_id', 'in', self.ubicacionesAConsultar.ids)
+        ])
+        cantidad_odoo = sum(quants.mapped('quantity'))
 
-        for vals in variantes:
-            cantidadActual = vals.qty_available
-            
-            try:
-                cantidadWIS = self.consultaStock(vals)
+        # Usar cantidad WIS preconsultada si está disponible, o consultar ahora
+        if cantidad_wis is None:
+            cantidad_wis = self.consultaStock(variant)
 
-                if cantidadWIS != cantidadActual:
+        diferencia = abs(cantidad_odoo - cantidad_wis)
+
+        if diferencia >= self.diferenciaMinima:
+            if conciliacion_id:
+                self.env['logs.conciliacion.stock'].create({
+                    'texto': (
+                        f'Diferencia de stock en {variant.display_name}: '
+                        f'Odoo={cantidad_odoo} | WIS={cantidad_wis} | Diferencia={diferencia}'
+                    ),
+                    'nivel': 'warning',
+                    'conciliacion_id': conciliacion_id
+                })
+
+
+                if not self.ubicacionReponerStock:
                     if conciliacion_id:
                         self.env['logs.conciliacion.stock'].create({
-                            'texto': f"El stock de {vals.name} es diferente. Actualizando stock en WIS de {cantidadWIS} a {cantidadActual}",
-                            'nivel': 'info',
-                            'fecha': fields.Datetime.now(),
+                            'texto': (
+                                f'No se puede ajustar stock de {variant.display_name}: '
+                                f'no hay ubicación de reposición configurada.'
+                            ),
+                            'nivel': 'error',
                             'conciliacion_id': conciliacion_id
                         })
+                    return
 
-                    # Calcular la diferencia (positiva o negativa)
-                    diferencia = cantidadActual - cantidadWIS
-                    
-                    diferencia = abs(diferencia);
+                quant_ajuste = self.env['stock.quant'].search([
+                    ('product_id', '=', variant.id),
+                    ('location_id', '=', self.ubicacionReponerStock.id),
+                ], limit=1)
 
-                    if diferencia < diferenciaMinima:
-                        if conciliacion_id:
-                            self.env['logs.conciliacion.stock'].create({
-                                'texto': f"La diferencia de stock para {vals.name} es menor que la mínima permitida ({diferenciaMinima}). No se realizará ninguna acción.",
-                                'nivel': 'info',
-                                'fecha': fields.Datetime.now(),
-                                'conciliacion_id': conciliacion_id
-                            })
-                        continue
-
-                   
-
-                    picking_type = self.env['stock.picking.type'].search([
-                        ('code', '=', 'internal'),
-                        ('warehouse_id.company_id', '=', self.env.company.id)
-                    ], limit=1)
-                    
-                    if not picking_type:
-                        picking_type = self.env['stock.picking.type'].search([
-                            ('warehouse_id.company_id', '=', self.env.company.id)
-                        ], limit=1)
-                    
-                    if not picking_type:
-                        raise ValidationError("No se encontró ningún tipo de picking disponible")
-
-                    
-
-                    try:
-                        picking = self.env['stock.picking'].create({
-                            'location_id': ubicacionSalida.id,
-                            'location_dest_id': ubicacionDestino.id,
-                            'picking_type_id': picking_type.id,
-                            'move_type': 'direct',
-                            'partner_id': self.partner.id, 
-                            'origin': f"Conciliación de stock WIS - {vals.name}",
-                            'company_id': self.env.company.id,
-                        })
-
-                        # Crear el movimiento de stock
-                        move = self.env['stock.move'].create({
-                            'name': f"Ajuste de stock: {vals.name}",
-                            'product_id': vals.id,
-                            'product_uom_qty': diferencia,
-                            'product_uom': vals.uom_id.id,
-                            'location_id': ubicacionSalida.id,
-                            'location_dest_id': ubicacionDestino.id,
-                            'picking_id': picking.id,
-                            'company_id': self.env.company.id,
-                        })
-
-                        
-                        # Marcar como hecho
-                        for move_line in picking.move_line_ids:
-                            move_line.qty_done = move_line.product_uom_qty
-                        
-
-                        if conciliacion_id:
-                            self.env['logs.conciliacion.stock'].create({
-                                'texto': f"Stock ajustado para {vals.name}: {cantidadWIS} → {cantidadActual} (diferencia: {diferencia})",
-                                'nivel': 'info',
-                                'fecha': fields.Datetime.now(),
-                                'conciliacion_id': conciliacion_id
-                            })
-
-                    except Exception as pick_error:
-                        if conciliacion_id:
-                            self.env['logs.conciliacion.stock'].create({
-                                'texto': f"Error al crear picking para {vals.name}: {str(pick_error)}",
-                                'nivel': 'error',
-                                'fecha': fields.Datetime.now(),
-                                'conciliacion_id': conciliacion_id
-                            })
-                        raise pick_error
-                        
-            except Exception as e:
-                if conciliacion_id:
-                    self.env['logs.conciliacion.stock'].create({
-                        'texto': f"Error al procesar {vals.name}: {str(e)}",
-                        'nivel': 'error',
-                        'fecha': fields.Datetime.now(),
-                        'conciliacion_id': conciliacion_id
+                if quant_ajuste:
+                    quant_ajuste.with_context(inventory_mode=True).write({
+                        'inventory_quantity': cantidad_wis,
                     })
-                continue
+                else:
+                    self.env['stock.quant'].with_context(inventory_mode=True).create({
+                        'product_id': variant.id,
+                        'location_id': self.ubicacionReponerStock.id,
+                        'inventory_quantity': cantidad_wis,
+                    })
+        else:
+            if conciliacion_id:
+                self.env['logs.conciliacion.stock'].create({
+                    'texto': (
+                        f'Stock de {variant.display_name} dentro del margen. '
+                        f'Odoo={cantidad_odoo} | WIS={cantidad_wis}'
+                    ),
+                    'nivel': 'info',
+                    'conciliacion_id': conciliacion_id
+                })
 
     def consultarCodigosBarras(self, variantes, conciliacion_id):
 

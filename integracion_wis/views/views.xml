@@ -40,8 +40,8 @@
             <field name="url_access_token"/> 
             <field name="company_id" readonly="1"/>
             <field name="apiLink"/>
-            <field name="ubicacionSalida" string="Ubicación de Salida" widget="many2one"/>
-          <field name="ubicacionDestino" string="Ubicación de Destino" widget="many2one"/>
+          <field name="ubicacionesAConsultar" string="Ubicaciones a Consultar" widget="many2many_tags"/>
+          <field name="ubicacionReponerStock" string="Ubicación para Reponer Stock" widget="many2one"/>
           <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
           <field name="partner" string="Partner por defecto" widget="many2one"/>
           </group>
@@ -221,7 +221,7 @@
       <field name="view_id" ref="view_conciliacion_maestros_tree"/>
       <field name="help" type="html">
         <p class="o_view_nocontent_smiling_face">
-          🔄 Crear tu primera conciliación WIS
+          Crear tu primera conciliación WIS
         </p>
         <p>
           Las conciliaciones te permiten sincronizar productos, clientes y códigos de barras entre Odoo y WIS.
@@ -278,8 +278,6 @@
                  decoration-danger="estado in ('error', 'completado_con_errores')"
                  decoration-warning="estado == 'en_proceso'"
                  decoration-info="estado == 'borrador'"/>
-          <field name="ubicacionSalida" string="Ubicación Salida"/>
-          <field name="ubicacionDestino" string="Ubicación Destino"/>
         </tree>
       </field>
     </record>
@@ -316,9 +314,6 @@
               <group string="Información General">
                 <field name="display_name" readonly="1"/>
                 <field name="fecha_creacion" readonly="1"/>
-                <field name="ubicacionSalida" string="Ubicación de Salida" widget="many2one"/>
-          <field name="ubicacionDestino" string="Ubicación de Destino" widget="many2one"/>
-          <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
               </group>
             </group>
             
