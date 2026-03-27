@@ -70,9 +70,6 @@ class IntegracionWIS(models.Model):
 
     ubicacionReponerStock = fields.Many2one('stock.location', string='Ubicación para Reponer Stock', domain=[('usage', '=', 'internal')])
 
-    partner = fields.Many2one('res.partner', string='Partner por defecto', help='Partner asignado a los movimientos de stock generados', required=False)
-    
-
     _sql_constraints = [
         ('company_unique', 'unique(company_id)', '¡Solo puede existir una configuración por compañía!'),
     ]
@@ -216,7 +213,6 @@ class IntegracionWIS(models.Model):
                 "unidadMedida": "L",
                 "clase": 1,
                 "ramo": 1,
-                "precioIngreso": vals.standard_price,
                 "pesoNeto": vals.weight,
                 "manejoIdentificador": "L",
                 "tipoManejoFecha": "F",
@@ -837,13 +833,7 @@ class IntegracionWIS(models.Model):
         return response.get('cantidadGenerica', 0)
 
     def consultaStockBulk(self, variantes):
-        """Consulta el stock de WIS para una lista de variantes de una sola vez.
-        Renueva el token una única vez antes del loop para no repetir la verificación
-        en cada llamada individual.
-        Retorna un dict {variant.id: cantidad_wis}.
-        Nota: la API WIS no expone un endpoint bulk; se consulta artículo por artículo
-        pero con un único token activo y sin overhead de renovación repetida.
-        """
+        
         if not self.token or self.expiracionToken < datetime.datetime.now():
             self.renovarToken()
 
@@ -1038,6 +1028,7 @@ class IntegracionWIS(models.Model):
 
     def consultarProductos(self, variantes, conciliacion_id=None):
         cantidad = 0
+        cantidadErrores = 0;
 
         for vals in variantes:
             try:
@@ -1051,15 +1042,13 @@ class IntegracionWIS(models.Model):
                         'conciliacion_id': conciliacion_id
                     })
 
-                # Construir los valores esperados en WIS (igual que insertarProducto)
                 nombre_odoo = vals.name[:65] if len(vals.name) > 65 else vals.name
                 categoria_odoo = vals.categ_id.name if vals.categ_id else ""
 
-                # Mapeo de campos Odoo → WIS para comparar
                 comparaciones = {
                     'descripcion':      (response.get('descripcion'),     nombre_odoo),
-                    'precioIngreso':    (response.get('precioIngreso'),    vals.standard_price),
-                    'precioVenta':      (response.get('precioVenta'),      vals.list_price),
+                    'precioVenta':    (response.get('precioVenta'),    vals.list_price),
+                    
                     'pesoNeto':         (response.get('pesoNeto'),         vals.weight),
                     'categoria1':       (response.get('categoria1'),       categoria_odoo),
                     'activo':           (response.get('activo'),           vals.active),
@@ -1115,6 +1104,9 @@ class IntegracionWIS(models.Model):
                     'fecha': fields.Datetime.now(),
                     'conciliacion_id': conciliacion_id
                 })
+                cantidadErrores += 1
+
+        _logger.info("Conciliación finalizada. Productos actualizados: %s, Errores: %s", cantidad, cantidadErrores)
 
         self.env['logs.conciliacion'].create({
             'texto': f"Conciliación finalizada. Productos actualizados: {cantidad}",
@@ -1122,6 +1114,13 @@ class IntegracionWIS(models.Model):
             'fecha': fields.Datetime.now(),
             'conciliacion_id': conciliacion_id
         })
+
+        if conciliacion_id:
+            conciliacion = self.env['conciliacion.maestros'].browse(conciliacion_id)
+            if cantidadErrores == 0:
+                conciliacion.estado = 'completado'
+            else:
+                conciliacion.estado = 'completado_con_errores'
         return
 
 
@@ -1145,14 +1144,12 @@ class IntegracionWIS(models.Model):
                 })
             return
 
-        # Sumar cantidades en las ubicaciones configuradas
         quants = self.env['stock.quant'].search([
             ('product_id', '=', variant.id),
             ('location_id', 'in', self.ubicacionesAConsultar.ids)
         ])
         cantidad_odoo = sum(quants.mapped('quantity'))
 
-        # Usar cantidad WIS preconsultada si está disponible, o consultar ahora
         if cantidad_wis is None:
             cantidad_wis = self.consultaStock(variant)
 
@@ -1188,14 +1185,14 @@ class IntegracionWIS(models.Model):
                 ], limit=1)
 
                 if quant_ajuste:
-                    quant_ajuste.with_context(inventory_mode=True).write({
+                    quant_ajuste.write({
                         'inventory_quantity': cantidad_wis,
                     })
                 else:
-                    self.env['stock.quant'].with_context(inventory_mode=True).create({
+                    self.env['stock.quant'].create({
                         'product_id': variant.id,
                         'location_id': self.ubicacionReponerStock.id,
-                        'inventory_quantity': cantidad_wis,
+                        'inventory_quantity': cantidad_wis
                     })
         else:
             if conciliacion_id:

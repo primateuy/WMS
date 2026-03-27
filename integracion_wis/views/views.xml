@@ -43,7 +43,6 @@
           <field name="ubicacionesAConsultar" string="Ubicaciones a Consultar" widget="many2many_tags"/>
           <field name="ubicacionReponerStock" string="Ubicación para Reponer Stock" widget="many2one"/>
           <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
-          <field name="partner" string="Partner por defecto" widget="many2one"/>
           </group>
         </form>
       </field>
