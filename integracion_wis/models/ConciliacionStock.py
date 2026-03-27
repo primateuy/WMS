@@ -36,21 +36,14 @@ class ConciliacionStock(models.Model):
         ('error', 'Error Fatal')
     ], string='Estado', default='borrador')
 
-    ubicacionSalida = fields.Many2one('stock.location', string='Ubicación de Salida', domain=[('usage', '=', 'internal')], required=True)
-    ubicacionDestino = fields.Many2one('stock.location', string='Ubicación de destino', domain=[('usage', '=', 'internal')], required=True)
-    # Campo calculado para el nombre de visualización
     display_name = fields.Char(string='Nombre', compute='_compute_display_name', store=True)
 
-    diferenciaMinima = fields.Integer(string='Diferencia Mínima para Registrar', default=1, help='Cantidad mínima de diferencia para que se registre una acción de ajuste.')
-
-
+    
     @api.model
     def cron_conciliacionStock(self):
         
         self.env['conciliacion.stock'].create({
             'name': 'Conciliación Automática - ' + fields.Datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'ubicacionSalida': self.env['integracion_wis.integracion_wis'].search([], limit=1).ubicacionSalida.id,
-            'ubicacionDestino': self.env['integracion_wis.integracion_wis'].search([], limit=1).ubicacionDestino.id,
             'diferenciaMinima': self.env['integracion_wis.integracion_wis'].search([], limit=1).diferenciaMinima,
             'partner': self.env['integracion_wis.integracion_wis'].search([], limit=1).partner.id if self.env['integracion_wis.integracion_wis'].search([], limit=1).partner else False,
             'estado': 'borrador',
@@ -76,41 +69,48 @@ class ConciliacionStock(models.Model):
             if not productos:
                 raise ValidationError("No se encontraron productos para conciliar stock.")
 
+            # Recopilar todas las variantes con código WIS antes de consultar la API,
+            # para renovar el token una sola vez y hacer todas las llamadas seguidas.
+            todas_variantes = self.env['product.product']
             for producto in productos:
-                variantes = producto.product_variant_ids
-                if not variantes:
+                if not producto.product_variant_ids:
                     self.env['logs.conciliacion.stock'].create({
                         'texto': f'El producto {producto.name} no tiene variantes.',
                         'nivel': 'warning',
                         'conciliacion_id': self.id
                     })
+                else:
+                    todas_variantes |= producto.product_variant_ids.filtered(lambda v: v.codigo_unico)
+
+            # Consultar WIS de una sola vez para todas las variantes
+            stock_wis = datosAPI.consultaStockBulk(todas_variantes)
+
+            for var in todas_variantes:
+                errores_antes = self.env['logs.conciliacion.stock'].search_count([
+                    ('conciliacion_id', '=', self.id),
+                    ('nivel', '=', 'error')
+                ])
+                try:
+                    with self.env.cr.savepoint():
+                        datosAPI.conciliarStockProducto(var, self.id, cantidad_wis=stock_wis.get(var.id))
+                except Exception as e:
+                    self.env['logs.conciliacion.stock'].create({
+                        'texto': f'Error al actualizar stock del producto {var.display_name}: {str(e)}',
+                        'nivel': 'error',
+                        'conciliacion_id': self.id
+                    })
                     continue
 
-                for var in variantes:
-                    errores_antes = self.env['logs.conciliacion.stock'].search_count([
-                        ('conciliacion_id', '=', self.id),
-                        ('nivel', '=', 'error')
-                    ])
-                    try:
-                        datosAPI.conciliarStockProducto(var, self.id, ubicacionSalida=self.ubicacionSalida, ubicacionDestino=self.ubicacionDestino, diferenciaMinima=self.diferenciaMinima)
-                    except Exception as e:
-                        self.env['logs.conciliacion.stock'].create({
-                            'texto': f'Error al actualizar stock del producto {var.display_name}: {str(e)}',
-                            'nivel': 'error',
-                            'conciliacion_id': self.id
-                        })
-                        continue
-
-                    errores_despues = self.env['logs.conciliacion.stock'].search_count([
-                        ('conciliacion_id', '=', self.id),
-                        ('nivel', '=', 'error')
-                    ])
-                    if errores_despues == errores_antes:
-                        self.env['logs.conciliacion.stock'].create({
-                            'texto': f'Stock del producto {var.display_name} procesado correctamente.',
-                            'nivel': 'info',
-                            'conciliacion_id': self.id
-                        })
+                errores_despues = self.env['logs.conciliacion.stock'].search_count([
+                    ('conciliacion_id', '=', self.id),
+                    ('nivel', '=', 'error')
+                ])
+                if errores_despues == errores_antes:
+                    self.env['logs.conciliacion.stock'].create({
+                        'texto': f'Stock del producto {var.display_name} procesado correctamente.',
+                        'nivel': 'info',
+                        'conciliacion_id': self.id
+                    })
 
             errores = self.logs.filtered(lambda l: l.nivel == 'error' and l.fecha >= inicio)
             if errores:

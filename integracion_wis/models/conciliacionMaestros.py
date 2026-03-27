@@ -180,7 +180,7 @@ class ConciliacionMaestros(models.Model):
                         self._agregar_error_parcial(f'Error procesando variantes del producto {producto.name}', 'product.product', e)
 
             if productos_con_error > 0:
-                self._agregar_log(f'📊 Resumen: {productos_procesados} variantes procesadas exitosamente, {productos_con_error} con errores', 'product.barcode', 'warning')
+                self._agregar_log(f'Resumen: {productos_procesados} variantes procesadas exitosamente, {productos_con_error} con errores', 'product.barcode', 'warning')
             else:
                 self._agregar_log(f'Total de variantes procesadas exitosamente: {productos_procesados}', 'product.barcode', 'info')
             self._completar_conciliacion('códigos de barras')
