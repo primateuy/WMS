@@ -137,9 +137,7 @@ class StockPicking(models.Model):
             return False
     
     def _update_surplus_picking_quantity(self, purchase_order, purchase_line, quantity_difference):
-        """
-        Actualiza el picking de sobrante/saldo (WH/Entrada → WH/Existencia)
-        """
+        
         try:
             entrance_location = purchase_order._get_or_create_entrance_location()
             
@@ -195,15 +193,17 @@ class StockPicking(models.Model):
             return False
 
     def button_validate(self):
-       
+
         result = super(StockPicking, self).button_validate()
-        
+
         for picking in self:
             if picking._is_crossdock_reception_picking():
                 picking._activate_dependent_crossdock_pickings()
             elif picking._is_crossdock_picking():
                 picking._activate_dependent_transfer_pickings()
-        
+            elif picking._is_transfer_picking():
+                picking._reset_transfer_backorder()
+
         return result
 
     def _is_crossdock_reception_picking(self):
@@ -211,7 +211,6 @@ class StockPicking(models.Model):
         return 'Recepción Crossdock' in (self.origin or '')
     
     def _is_crossdock_picking(self):
-        """Determina si es un picking de Crossdocking (Entrada → Crossdocking Location)"""
         almacenes = self.env['stock.warehouse'].search([])
         crossdocking_locations_ids = [alm.crossdocking_location_id.id for alm in almacenes if alm.crossdocking_location_id]
         
@@ -221,7 +220,6 @@ class StockPicking(models.Model):
         )
     
     def _is_transfer_picking(self):
-        """Determina si es un picking de Transferencia (Crossdocking → Existencias)"""
         almacenes = self.env['stock.warehouse'].search([])
         crossdocking_locations_ids = [alm.crossdocking_location_id.id for alm in almacenes if alm.crossdocking_location_id]
         
@@ -230,78 +228,219 @@ class StockPicking(models.Model):
             'Crossdock' in (self.origin or '')
         )
 
+    def _reset_transfer_backorder(self):
+        
+        backorder = self.env['stock.picking'].search([
+            ('backorder_id', '=', self.id),
+            ('state', 'not in', ('done', 'cancel')),
+        ], limit=1)
+
+        if not backorder:
+            return
+
+        try:
+            for move in backorder.move_ids:
+                move.with_context(do_not_propagate=True, no_recompute=True).write({
+                    'quantity': 0,
+                })
+            _logger.info(f"Backorder {backorder.name}: quantity=0, esperando siguiente crossdock")
+        except Exception as e:
+            _logger.error(f"Error al resetear backorder {backorder.name}: {str(e)}")
+
+    def action_assign(self):
+        
+        crossdock_picks = self.filtered(lambda p: p._is_crossdock_picking())
+        transfer_picks = self.filtered(lambda p: p._is_transfer_picking())
+        regular_picks = self - crossdock_picks - transfer_picks
+
+        if regular_picks:
+            super(StockPicking, regular_picks).action_assign()
+
+        for picking in crossdock_picks:
+            picking._assign_from_reception()
+
+        for picking in transfer_picks:
+            picking._assign_transfer_from_crossdock()
+
+        return True
+
+    def _get_crossdock_purchase_order(self):
+        """Helper: obtiene la purchase order del crossdock picking."""
+        po = self.purchase_id
+        if not po:
+            po_prefix = (self.origin or '').split(' - ')[0].strip()
+            if po_prefix:
+                po = self.env['purchase.order'].search([('name', '=', po_prefix)], limit=1)
+        return po if po and po.crossdock_enabled else None
+
+    def _assign_from_reception(self):
+        
+        try:
+            purchase_order = self._get_crossdock_purchase_order()
+            if not purchase_order:
+                return
+
+            received_qty = {}
+            for p in purchase_order.picking_ids:
+                if (p.state == 'done' and
+                        p.location_dest_id.id == self.location_id.id and
+                        'Recepción Crossdock' in (p.origin or '')):
+                    for m in p.move_ids:
+                        pid = m.product_id.id
+                        received_qty[pid] = received_qty.get(pid, 0) + m.quantity
+
+            if not received_qty:
+                return
+
+            taken_qty = {}
+            for p in purchase_order.picking_ids:
+                if (p.id != self.id and
+                        p.location_id.id == self.location_id.id and
+                        'Crossdock' in (p.origin or '') and
+                        p.state in ('done', 'assigned', 'partially_available')):
+                    for m in p.move_ids:
+                        pid = m.product_id.id
+                        taken_qty[pid] = taken_qty.get(pid, 0) + m.quantity
+
+            any_assigned = False
+            for move in self.move_ids:
+                if move.state in ('done', 'cancel'):
+                    continue
+                pid = move.product_id.id
+                available = max(0, received_qty.get(pid, 0) - taken_qty.get(pid, 0))
+                qty_to_set = min(available, move.product_uom_qty)
+                move.with_context(do_not_propagate=True, no_recompute=True).write({'quantity': qty_to_set})
+                if qty_to_set > 0:
+                    any_assigned = True
+
+            if any_assigned:
+                self.write({'state': 'assigned'})
+            _logger.info(f"{self.name} _assign_from_reception: recibido={received_qty}, tomado={taken_qty}")
+        except Exception as e:
+            _logger.error(f"Error en _assign_from_reception {self.name}: {str(e)}")
+
+    def _assign_transfer_from_crossdock(self):
+        
+        try:
+            purchase_order = self._get_crossdock_purchase_order()
+            if not purchase_order:
+                return
+
+            crossdock_location_id = self.location_id.id
+
+            # Total procesado en crossdock pickings que van a esta ubicación crossdock
+            total_done_by_product = {}
+            for p in purchase_order.picking_ids:
+                if (p.state == 'done' and
+                        p.location_dest_id.id == crossdock_location_id and
+                        'Crossdock' in (p.origin or '')):
+                    for m in p.move_ids:
+                        pid = m.product_id.id
+                        total_done_by_product[pid] = total_done_by_product.get(pid, 0) + m.quantity
+
+            if not total_done_by_product:
+                return
+
+            any_assigned = False
+            for move in self.move_ids:
+                if move.state in ('done', 'cancel'):
+                    continue
+                pid = move.product_id.id
+                qty_to_set = min(total_done_by_product.get(pid, 0), move.product_uom_qty)
+                move.with_context(do_not_propagate=True, no_recompute=True).write({'quantity': qty_to_set})
+                if qty_to_set > 0:
+                    any_assigned = True
+
+            if any_assigned:
+                self.write({'state': 'assigned'})
+            _logger.info(f"{self.name} _assign_transfer_from_crossdock: done={total_done_by_product}")
+        except Exception as e:
+            _logger.error(f"Error en _assign_transfer_from_crossdock {self.name}: {str(e)}")
+
+    def _create_backorder(self):
+        
+        backorders = super(StockPicking, self)._create_backorder()
+
+        for backorder in backorders:
+            original = backorder.backorder_id
+            if original and original._is_transfer_picking():
+                try:
+                    for move in backorder.move_ids:
+                        move.with_context(do_not_propagate=True, no_recompute=True).write({
+                            'quantity': 0
+                        })
+                    _logger.info(f"Backorder transfer {backorder.name}: quantity reseteada a 0")
+                except Exception as e:
+                    _logger.error(f"Error al resetear backorder transfer {backorder.name}: {str(e)}")
+            elif original and original._is_crossdock_picking():
+                try:
+                    backorder._assign_from_reception()
+                    _logger.info(f"Backorder crossdock {backorder.name}: asignado desde recepción")
+                except Exception as e:
+                    _logger.error(f"Error al asignar backorder crossdock {backorder.name}: {str(e)}")
+
+        return backorders
+
     def _activate_dependent_crossdock_pickings(self):
-        """
-        Activa automáticamente los pickings de Crossdocking que dependen de este picking de Recepción.
-        Los activa (assigned) y luego los valida (done) para mantener la cadena lógica.
-        """
+        
         try:
             purchase_order = self.purchase_id
             if not purchase_order or not purchase_order.crossdock_enabled:
                 return
-            
-            # Buscar pickings de crossdocking en estado waiting cuyo origen son movimientos de este picking
+
             crossdocking_pickings = purchase_order.picking_ids.filtered(
                 lambda p: (
                     p.state == 'waiting' and
                     p.id != self.id and
                     'Crossdock' in (p.origin or '') and
-                    p.location_id.id == self.location_dest_id.id  # Salen desde donde llega Recepción
+                    p.location_id.id == self.location_dest_id.id
                 )
             )
-            
-            if crossdocking_pickings:
-                
-                for picking in crossdocking_pickings:
-                    try:
-                        # Preparar los movimientos
-                        for move in picking.move_ids:
-                            move.write({'quantity': move.product_uom_qty})
-                        
-                        # Cambiar estado a assigned (activar)
-                        picking.write({'state': 'assigned'})
-                        
-                        # Validar automáticamente (pasar a done)
-                        picking.button_validate()
-                        
-                    except Exception as e:
-                        _logger.warning(f"No se pudo activar/validar el picking {picking.name}: {str(e)}")
-            
-                    
+
+            if not crossdocking_pickings:
+                return
+
+            done_qty_by_product = {}
+            for src_move in self.move_ids:
+                pid = src_move.product_id.id
+                done_qty_by_product[pid] = done_qty_by_product.get(pid, 0) + src_move.quantity
+
+            for picking in crossdocking_pickings:
+                try:
+                    for move in picking.move_ids:
+                        done_qty = done_qty_by_product.get(move.product_id.id, 0)
+                        qty_to_set = min(done_qty, move.product_uom_qty)
+                        move.with_context(do_not_propagate=True, no_recompute=True).write({
+                            'quantity': qty_to_set
+                        })
+                    picking.write({'state': 'assigned'})
+                    _logger.info(f"Picking crossdock {picking.name} activado (Listo): {done_qty_by_product}")
+                except Exception as e:
+                    _logger.warning(f"No se pudo activar el picking {picking.name}: {str(e)}")
+
         except Exception as e:
             _logger.error(f"Error al activar pickings de crossdocking: {str(e)}")
     
     def _activate_dependent_transfer_pickings(self):
-        """
-        Activa automáticamente los pickings de Transferencia que dependen de este picking de Crossdocking.
-        Los activa (assigned/listo) pero NO los valida, para que queden listos para validación manual.
-        """
+        
         try:
-            purchase_order = self.purchase_id
-            if not purchase_order or not purchase_order.crossdock_enabled:
+            purchase_order = self._get_crossdock_purchase_order()
+            if not purchase_order:
                 return
-            
-            
-            # Buscar pickings de transferencia en estado waiting cuyo origen es este picking de crossdocking
+
             transfer_pickings = purchase_order.picking_ids.filtered(
-                lambda p: (
-                    p.state == 'waiting' and
-                    p.id != self.id and
-                    'Crossdock' in (p.origin or '') and
-                    p.location_id.id == self.location_dest_id.id  # Salen desde donde llega Crossdocking
-                )
+                lambda p: p.state not in ('done', 'cancel') and
+                          p.id != self.id and
+                          'Crossdock' in (p.origin or '') and
+                          p.location_id.id == self.location_dest_id.id
             )
-            
-            if transfer_pickings:
-                for picking in transfer_pickings:
-                    try:
-                        for move in picking.move_ids:
-                            move.write({'quantity': move.product_uom_qty})
-                        
-                        picking.write({'state': 'assigned'})
-                    except Exception as e:
-                        _logger.warning(f"No se pudo activar el picking {picking.name}: {str(e)}")
-            
+
+            for picking in transfer_pickings:
+                try:
+                    picking._assign_transfer_from_crossdock()
+                except Exception as e:
+                    _logger.warning(f"No se pudo activar {picking.name}: {str(e)}")
+
         except Exception as e:
-            _logger.error(f"❌ Error al activar pickings de transferencia: {str(e)}")
+            _logger.error(f"Error al activar pickings de transferencia: {str(e)}")
     
