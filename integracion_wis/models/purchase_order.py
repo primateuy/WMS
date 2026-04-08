@@ -37,7 +37,8 @@ class PurchaseOrder(models.Model):
                         if response and isinstance(response, dict):
                             picking.with_context(skip_wms_integration=True).write({
                                 'idPedidoWMS': response.get('numeroInterfaz', ''),
-                                'codigo_unico': response.get('codigoUnico', '')
+                                'codigo_unico': response.get('codigoUnico', ''),
+                                'wms_estado': 'enviado',
                             })
                             self.env['wms.integracion.log'].create({
                                 'fecha': fields.Datetime.now(),

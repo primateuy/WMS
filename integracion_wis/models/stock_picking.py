@@ -28,10 +28,6 @@ class StockPicking(models.Model):
         index=True,
     )
  
-    # ------------------------------------------------------------------
-    # Campos WMS - Trazabilidad general
-    # ------------------------------------------------------------------
- 
     wms_referencia = fields.Char(
         string="Referencia WMS",
         copy=False,
@@ -44,10 +40,6 @@ class StockPicking(models.Model):
         readonly=True,
     )
  
-    # ------------------------------------------------------------------
-    # Campos WMS - Webhook 1: confirmacionMercaderiaPreparada
-    # ------------------------------------------------------------------
- 
     wms_fecha_preparacion = fields.Datetime(
         string="Fecha preparación WMS",
         copy=False,
@@ -58,10 +50,6 @@ class StockPicking(models.Model):
         copy=False,
         readonly=True,
     )
- 
-    # ------------------------------------------------------------------
-    # Campos WMS - Webhook 2: confirmacionDespacho
-    # ------------------------------------------------------------------
  
     wms_fecha_despacho = fields.Datetime(
         string="Fecha despacho WMS",
@@ -94,10 +82,6 @@ class StockPicking(models.Model):
         readonly=True,
         digits=(10, 3),
     )
- 
-    # ------------------------------------------------------------------
-    # Campos WMS - Webhook 3: anulacionOperativa
-    # ------------------------------------------------------------------
  
     wms_fecha_anulacion = fields.Datetime(
         string="Fecha anulación WMS",
@@ -177,18 +161,13 @@ class StockPicking(models.Model):
         
     def enviarWS(self, tipo):
 
-        
-
-        
         if not self.partner_id:
             raise ValidationError("No se ha asignado un partner")
 
-
-
-        if not self.partner_id.codigo_wms or not self.partner_id.codigo_unico:
-            raise ValidationError("El partner no se encuentra sincronizado en WIS")
-
-        
+        tipo_agente = self.picking_type_id.tipo_agente_wis or 'CLI'
+        codigo_agente = self.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else self.partner_id.codigo_unico_proveedor
+        if not codigo_agente:
+            raise ValidationError(f"El partner no tiene Identificación WIS {'Cliente' if tipo_agente == 'CLI' else 'Proveedor'}. Sincronicelo primero desde el contacto.")
 
         datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
         if not datosAPI or not datosAPI.apiLink:
@@ -196,16 +175,13 @@ class StockPicking(models.Model):
 
         state_actual = str(self.state or '').strip()
         state_objetivo = str(self.picking_type_id.estado_disparo_wis or '').strip()
-        
 
         if state_objetivo and state_actual != state_objetivo:
-            _logger.info("Postergando integración: El estado '%s' no coincide con el objetivo '%s'", state_actual, state_objetivo)
             return False
 
         
 
 
-        # Es un movimiento que viene de una compra
         if tipo == 'OCI' or self.sale_id:
             return datosAPI.insertarReferenciaRecepcion(self)
 
@@ -272,12 +248,40 @@ class StockPicking(models.Model):
 
     def write(self, vals):
         res = super(StockPicking, self).write(vals)
-        
-        if not self.env.context.get('skip_wms_integration'):
+
+        if not self.env.context.get('skip_wms_integration') and 'scheduled_date' in vals:
+            for record in self:
+                if record.wms_estado != 'enviado' or not record.picking_type_id.integracion_wms:
+                    continue
+                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                if not datosAPI:
+                    continue
+                try:
+                    datosAPI.actualizarReferenciaRecepcion(record)
+                    self.env['wms.integracion.log'].create({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'info',
+                        'modelo': 'stock.picking',
+                        'texto': f"Fecha programada actualizada en WMS para {record.name}",
+                        'picking_id': record.id,
+                        'resultado': 'exito',
+                        'detalle': f"Nueva fecha: {vals.get('scheduled_date')}",
+                    })
+                except Exception as e:
+                    self.env['wms.integracion.log'].create({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error',
+                        'modelo': 'stock.picking',
+                        'texto': f"Error al actualizar fecha en WMS para {record.name}: {str(e)}",
+                        'picking_id': record.id,
+                        'resultado': 'error',
+                    })
+
+        if not self.env.context.get('skip_wms_integration') and 'state' in vals:
             for record in self:
                 if not record.picking_type_id.integracion_wms:
                     continue
-                if not record.move_ids:          
+                if not record.move_ids:
                     continue
                 if record.wms_estado != 'sin_enviar':
                     continue
@@ -313,5 +317,42 @@ class StockPicking(models.Model):
                         'picking_id': record.id,
                         'resultado': 'error',
                         'detalle': f"Estado: {record.state}, Tipo: {record.picking_type_id.name if record.picking_type_id else 'N/A'}",
+                    })
+                    raise
+        return res
+
+
+class StockMove(models.Model):
+    _inherit = 'stock.move'
+
+    def write(self, vals):
+        res = super().write(vals)
+        if 'product_uom_qty' in vals:
+            for move in self:
+                picking = move.picking_id
+                if not picking or picking.wms_estado != 'enviado' or not picking.picking_type_id.integracion_wms:
+                    continue
+                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                if not datosAPI:
+                    continue
+                try:
+                    datosAPI.actualizarReferenciaRecepcion(picking)
+                    self.env['wms.integracion.log'].create({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'info',
+                        'modelo': 'stock.move',
+                        'texto': f"Cantidad de demanda actualizada en WMS para {picking.name}",
+                        'picking_id': picking.id,
+                        'resultado': 'exito',
+                        'detalle': f"Producto: {move.product_id.name}, Nueva cantidad: {vals.get('product_uom_qty')}",
+                    })
+                except Exception as e:
+                    self.env['wms.integracion.log'].create({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error',
+                        'modelo': 'stock.move',
+                        'texto': f"Error al actualizar cantidad en WMS para {picking.name}: {str(e)}",
+                        'picking_id': picking.id,
+                        'resultado': 'error',
                     })
         return res

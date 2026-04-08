@@ -14,9 +14,9 @@ class WebhookWIS(http.Controller):
     def callback(self, **kwargs):
         signature = request.httprequest.headers.get('X-Hub-Signature')
         body = request.httprequest.get_data()
-        
-            # if not self._verify_signature(body, signature):
-            #     return {'status': 401, 'detail': 'Firma inválida'}
+
+        if not self._verify_signature(body, signature):
+            return {'status': 401, 'detail': 'Firma inválida'}
 
         try:
             payload = json.loads(body)
@@ -60,29 +60,20 @@ class WebhookWIS(http.Controller):
     def _verify_signature(self, body, received_signature):
         if not received_signature:
             return False
-        
+
         secret = request.env['ir.config_parameter'].sudo().get_param('wis.webhook_secret', '')
         if not secret:
             _logger.warning("No está configurado wis.webhook_secret")
             return False
 
-        expected = hmac.new(
-            secret.encode('utf-8'),
-            body,
-            hashlib.sha512
-        ).hexdigest()
-
-        return hmac.compare_digest(expected, received_signature)
+        return hmac.compare_digest(secret, received_signature)
 
     def _create_log(self, data, respuesta, tipo, estado='exito'):
         try:
-            # Manejar data como string o dict
             if isinstance(data, str):
                 request_str = data
             else:
                 request_str = json.dumps(data, indent=4, ensure_ascii=False)
-                
-            # Formatear respuesta como JSON
             if isinstance(respuesta, dict):
                 respuesta_str = json.dumps(respuesta, indent=4, ensure_ascii=False)
             else:
@@ -184,7 +175,6 @@ class WebhookWIS(http.Controller):
                 es_parcial = False
 
                 for move in picking.move_ids:
-                    # 1. Resolver cant_recibida
                     cant_recibida = mapa_cantidades.get(move.id)
 
                     if cant_recibida is None:
@@ -314,7 +304,6 @@ class WebhookWIS(http.Controller):
                     subtype_xmlid='mail.mt_note',
                 )
 
-                # Log
                 request.env['wms.integracion.log'].sudo().create({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'info',
@@ -596,7 +585,6 @@ class WebhookWIS(http.Controller):
                 )
                 continue
 
-            # Validar feature flag
             if not picking.picking_type_id.metodo_preparacion_wis:
                 errores.append(
                     f"Picking '{picking.name}': tipo de operación "
@@ -612,7 +600,6 @@ class WebhookWIS(http.Controller):
                 )
                 continue
 
-            # Validar que no haya sido ya preparado/despachado/anulado
             if picking.wms_estado in ('preparado', 'despachado', 'anulado'):
                 errores.append(
                     f"Picking '{picking.name}' ya tiene wms_estado "
@@ -655,34 +642,7 @@ class WebhookWIS(http.Controller):
                 picking.name, total_bultos, peso_total,
             )
 
-            # request.env['wms.integracion.log'].create({
-            #     'fecha': fields.Datetime.now(),
-            #     'nivel': 'info',
-            #     'modelo': 'stock.picking',
-            #     'texto': (
-            #         f"Webhook recibido: mercadería preparada por WMS para picking {picking.name}. "
-            #         f"Fecha preparación: {fecha_preparacion}"
-            #     ),
-            #     'picking_id': picking.id,
-            #     'resultado': 'exito',
-            #     'detalle': f"Observaciones: {observaciones or '—'}",
-            # })
-
         if errores:
-
-                # request.env['wms.integracion.log'].create({
-                #     'fecha': fields.Datetime.now(),
-                #     'nivel': 'error',
-                #     'modelo': 'stock.picking',
-                #     'texto': (
-                #         f"Webhook recibido: mercadería preparada por WMS para picking {picking.name}. "
-                #         f"Fecha preparación: {fecha_preparacion}"
-                #     ),
-                #     'picking_id': picking.id,
-                #     'resultado': 'error',
-                #     'detalle': f"-- ERRORES EN PROCESAMIENTO -- | {' | '.join(errores)}",
-                # })
-
             raise ValueError(
                 f"Se procesaron {len(pedidos) - len(errores)}/{len(pedidos)} pedidos. "
                 f"Errores: {' | '.join(errores)}"

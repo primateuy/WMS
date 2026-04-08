@@ -205,6 +205,12 @@ class IntegracionWIS(models.Model):
             codigo = vals.codigo_unico;
         else:
             codigo = f"PRD-{numeroRandom}"
+
+            
+        tracking = vals.tracking
+        tipo_manejo_fecha    = 'F' if tracking in ('lot', 'serial') else 'D'
+        manejo_identificador = 'L' if tracking in ('lot', 'serial') else 'P'
+
         productos = [{
                 "codigoProducto": codigo,
                 "codigo": codigo,
@@ -214,8 +220,8 @@ class IntegracionWIS(models.Model):
                 "clase": 1,
                 "ramo": 1,
                 "pesoNeto": vals.weight,
-                "manejoIdentificador": "L",
-                "tipoManejoFecha": "F",
+                "manejoIdentificador": manejo_identificador,
+                "tipoManejoFecha": tipo_manejo_fecha,
                 "precioVenta": vals.list_price,
 
                 "categoria1": vals.categ_id.name if vals.categ_id else "",
@@ -223,6 +229,8 @@ class IntegracionWIS(models.Model):
                 "activo": vals.active
 
             }]
+
+        _logger.info("Payload del producto a enviar => {}".format(productos));
         
 
         
@@ -344,22 +352,6 @@ class IntegracionWIS(models.Model):
 
 
     def transferirStock(self, vals):
-        #         {
-        # "empresa": 0,
-        # "dsReferencia": "string",
-        # "archivo": "string",
-        # "idRequest": "123",
-        # "transferencias": [
-        #     {
-        #     "ubicacion": "string",
-        #     "ubicacionDestino": "string",
-        #     "codigoProducto": "string",
-        #     "identificador": "string",
-        #     "cantidad": 0
-        #     }
-        # ]
-        # }
-
         transferencias = []
 
         for i in vals.move_ids:
@@ -401,7 +393,7 @@ class IntegracionWIS(models.Model):
 
 
 
-    def insertarClienteOrSupplier(self, vals):
+    def insertarClienteOrSupplier(self, vals, tipo):
 
         self.env['logs.res.partner'].create({
             'partner_id': vals.id,
@@ -451,16 +443,14 @@ class IntegracionWIS(models.Model):
         
         punto_entrega = punto_entrega[:120]  
 
-        codigoAgente = '';
-        if vals.codigo_unico:
-            codigoAgente = vals.codigo_unico
+        if tipo == 'CLI':
+            codigoAgente = vals.codigo_unico_cliente or f"CLI-{numeroRandom}"
         else:
-            codigoAgente = f"CLI-{numeroRandom}" if vals.customer_rank > 0 else f"PRO-{numeroRandom}"
-
+            codigoAgente = vals.codigo_unico_proveedor or f"PRO-{numeroRandom}"
 
         agentes = [{
             "codigoAgente": codigoAgente,
-            "tipo": "CLI" if vals.customer_rank > 0 else "PRO",
+            "tipo": tipo,
             "descripcion": name_clean,
             "estado": 15,
             "anexo1": "",
@@ -520,11 +510,11 @@ class IntegracionWIS(models.Model):
         payload = {
             "empresa": self.empresa_id,
             "numero": vals.codigo_unico,
-            "tipoAgente": "CLI" if vals.partner_id.customer_rank > 0 else "PRO",
-            "codigoAgente": vals.partner_id.codigo_unico,
+            "tipoAgente": "CLI",
+            "codigoAgente": vals.partner_id.codigo_unico_cliente,
         }
 
-        
+
         try:
             response = self.consultarAPI(
                 link="/Pedido/GetPedido",
@@ -576,20 +566,19 @@ class IntegracionWIS(models.Model):
 
         if vals.picking_type_id.code and vals.location_id and vals.location_dest_id:
             direccion = f'ORIGEN: {vals.location_id.name} - DESTINO {vals.location_dest_id.name}';
-            #self.transferirStock(vals);
-
-        # Determinar si es crossdocking
-        
 
 
         
         direccion = vals.location_dest_id.name;
 
 
+        tipo_agente = vals.picking_type_id.tipo_agente_wis or 'CLI'
+        codigo_agente = vals.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else vals.partner_id.codigo_unico_proveedor
+
         pedidos = [{
             "nroPedido": vals.codigo_unico if vals.codigo_unico else f"P{hash_short}",
-            "codigoAgente": vals.partner_id.codigo_unico,
-            "tipoAgente": "CLI" if vals.partner_id.customer_rank > 0 else "PRO",
+            "codigoAgente": codigo_agente,
+            "tipoAgente": tipo_agente,
             "fechaEntrega": vals.scheduled_date.isoformat(),
             "tipoPedido": tipo,
             "direccion": direccion,
@@ -644,8 +633,8 @@ class IntegracionWIS(models.Model):
                 'referencias': [{
                     'referencia': 'DEV-' + str(numeroRandom),
                     'tipoReferencia': 'OD',  # Order Delivery Return
-                    'codigoAgente': picking.partner_id.codigo_unico or picking.partner_id.vat,
-                    'tipoAgente': 'CLI',
+                    'codigoAgente': (picking.partner_id.codigo_unico_cliente if (picking.picking_type_id.tipo_agente_wis or 'CLI') == 'CLI' else picking.partner_id.codigo_unico_proveedor) or picking.partner_id.vat,
+                    'tipoAgente': picking.picking_type_id.tipo_agente_wis or 'CLI',
                     'predio': '1',
                     'fechaEstimada': picking.scheduled_date.isoformat() if picking.scheduled_date else None,
                     'observaciones': f"Devolución desde ubicación: {picking.location_id.name}",
@@ -665,15 +654,9 @@ class IntegracionWIS(models.Model):
 
     def insertarReferenciaRecepcion(self, picking):
 
-        _logger.info("PICKINGS => %s", picking);
-        
-        _logger.info("CAMPOS DEL PICKING: %s", picking._fields.keys())
-        _logger.info("VALORES CARGADOS: %s", picking.read())
-
         moves = picking.move_ids or (hasattr(picking, 'move_ids_without_package') and picking.move_ids_without_package) or []
-        
+
         if not moves:
-            _logger.info("No hay productos detectados en el movimiento %s.", picking.name)
             self.env['wms.integracion.log'].create({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
@@ -684,14 +667,14 @@ class IntegracionWIS(models.Model):
                 'detalle': 'move_ids vacío al intentar insertar referencia recepción'
             })
             return False
-            
+
         detalles = []
         for move in moves:
             codigo_producto = move.product_id.codigo_unico or ''
-            
+
             if not codigo_producto:
                 raise ValidationError(f"No se encontró código único WIS en el producto: {move.product_id.name}. Por favor, asegúrese de que el producto esté sincronizado con WIS antes de enviar el movimiento.")
-                
+
             detalles.append({
                 'idLineaSistemaExterno': f"odoo__stock.move__{move.id}",
                 'codigoProducto': codigo_producto,
@@ -699,14 +682,17 @@ class IntegracionWIS(models.Model):
             })
 
         numeroRandom = random.randint(100000, 999999)
+        tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
+        codigo_agente = picking.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else picking.partner_id.codigo_unico_proveedor
+
         payload = {
             'empresa': self.empresa_id,
             'dsReferencia': f"RECEPCIÓN DESDE ODOO: {picking.name}",
             'referencias': [{
                 'referencia': 'REC-' + str(numeroRandom),
                 'tipoReferencia': 'OC',
-                'codigoAgente': picking.partner_id.codigo_unico,
-                'tipoAgente': 'PRO' if picking.partner_id.supplier_rank > 0 or not picking.partner_id.customer_rank > 0 else 'CLI',
+                'codigoAgente': codigo_agente,
+                'tipoAgente': tipo_agente,
                 'predio': '1',
                 'fechaEstimada': picking.scheduled_date.isoformat() if picking.scheduled_date else None,
                 'detalles': detalles
@@ -721,8 +707,44 @@ class IntegracionWIS(models.Model):
         )
 
         response['codigoUnico'] = f'REC-{numeroRandom}'
-
         return response
+
+    def actualizarReferenciaRecepcion(self, picking):
+        detalles = []
+        for move in picking.move_ids:
+            codigo_producto = move.product_id.codigo_unico or ''
+            if not codigo_producto:
+                raise ValidationError(f"No se encontró código único WIS en el producto: {move.product_id.name}.")
+            detalles.append({
+                'idLineaSistemaExterno': f"odoo__stock.move__{move.id}",
+                'codigoProducto': codigo_producto,
+                'cantidadOperacion': move.product_uom_qty,
+                'tipoOperacion': 'M'
+            })
+
+        tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
+        codigo_agente = picking.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else picking.partner_id.codigo_unico_proveedor
+
+        payload = {
+            'empresa': self.empresa_id,
+            'dsReferencia': f"ACTUALIZACIÓN DESDE ODOO: {picking.name}",
+            'referencias': [{
+                'referencia': picking.codigo_unico,
+                'tipoReferencia': 'OC',
+                'codigoAgente': codigo_agente,
+                'tipoAgente': tipo_agente,
+                'predio': '1',
+                'fechaEstimada': picking.scheduled_date.isoformat() if picking.scheduled_date else None,
+                'detalles': detalles
+            }]
+        }
+
+        return self.consultarAPI(
+            link="/ModificarDetalleReferencia/Update",
+            body=payload,
+            params=None,
+            method="POST"
+        )
 
     def consultar(self):
         _logger.info("ESTO ES SOLO UNA PRUEBA");
@@ -757,8 +779,8 @@ class IntegracionWIS(models.Model):
             'referencias': [{
                 'referencia': numeroRandom,
                 'tipoReferencia': 'OC',
-                'codigoAgente': vals.partner_id.codigo_unico,
-                'tipoAgente': 'CLI' if vals.partner_id.customer_rank > 0 else 'PRO' ,
+                'codigoAgente': vals.partner_id.codigo_unico_proveedor,
+                'tipoAgente': 'PRO',
                 'predio': "1",
                 'detalles': detalles
             }]
@@ -796,8 +818,8 @@ class IntegracionWIS(models.Model):
             'referencias': [{
                 'referencia': vals.referencia,
                 'tipoReferencia': 'OC',
-                'codigoAgente': vals.partner_id.codigo_unico,
-                'tipoAgente': 'CLI' if vals.partner_id.customer_rank > 0 else 'PRO' ,
+                'codigoAgente': vals.partner_id.codigo_unico_proveedor,
+                'tipoAgente': 'PRO',
                 'predio': "1",
                 'detalles': detalles
             }]

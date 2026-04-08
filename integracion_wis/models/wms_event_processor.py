@@ -214,7 +214,6 @@ class WMSEventProcessor(models.TransientModel):
                 else:
                     productos_en_paquete[sku] = quant.quantity
 
-            # Validar cada producto esperado
             discrepancias = []
             for producto_data in productos_esperados:
                 sku = producto_data.get('producto') or producto_data.get('sku')
@@ -323,7 +322,6 @@ class WMSEventProcessor(models.TransientModel):
 
                 paquete.write(datos_actualizacion)
 
-                # Agregar mensaje al paquete
                 paquete.message_post(
                     body=f"Paquete abierto por WMS - {fields.Datetime.now()}"
                 )
@@ -386,7 +384,6 @@ class WMSEventProcessor(models.TransientModel):
                 'peso': getattr(paquete, 'peso_declarado', 0.0),
             }
 
-            # Información de productos
             productos_info = []
             for quant in paquete.quant_ids:
                 productos_info.append({
@@ -461,7 +458,6 @@ class WMSEventProcessor(models.TransientModel):
                         'cerrado': contenedor.get('cerrado', True),
                     })
 
-                    # Dimensiones si existen
                     dimensiones = contenedor.get('dimensiones', {})
                     if dimensiones:
                         datos_paquete.update({
@@ -498,7 +494,6 @@ class WMSEventProcessor(models.TransientModel):
                 _logger.warning(f"Producto inválido en paquete: {detalle}")
                 return True  # Continuar con otros productos
 
-            # Buscar el producto
             producto = self.env['product.product'].search([
                 ('default_code', '=', codigo_producto)
             ], limit=1)

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+        <record id="param_wis_webhook_secret" model="ir.config_parameter">
+            <field name="key">wis.webhook_secret</field>
+            <field name="value">1234</field>
+        </record>
+    </data>
+</odoo>

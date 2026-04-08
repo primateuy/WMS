@@ -21,6 +21,15 @@ class StockPickingType(models.Model):
         help='Tipo de pedido WIS para este tipo de entrega.',
     )
 
+    tipo_agente_wis = fields.Selection(
+        selection=[
+            ('CLI', 'Cliente (CLI)'),
+            ('PRO', 'Proveedor (PRO)'),
+        ],
+        string='Tipo de Agente WIS',
+        help='Define si las operaciones de este tipo usan el agente Cliente (CLI) o Proveedor (PRO) del contacto.',
+    )
+
     metodo_creacion_wis = fields.Selection(
         selection=[
             ('creacion', 'Creación'),
