@@ -30,7 +30,8 @@
         'views/PickingWMSlog.xml',
         'views/PurchaseOrderView.xml',
         'views/WizardStock.xml',
-        'data/cron.xml',        
+        'data/cron.xml',
+        'data/default_params.xml',
     ],
     'demo': [
         'demo/demo.xml',

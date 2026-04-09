@@ -80,9 +80,6 @@ class ProductTemplate(models.Model):
     def create(self, vals):
         res = super(ProductTemplate, self).create(vals)
 
-        # if vals.get('integracion_wms') and not vals.get('default_code') or res.default_code == False:
-        #     raise ValidationError("El campo de referencia es obligatorio para integrar con WMS.")
-        
         if res.integracion_wms and res.type == 'product':
             try:
                 self._procesar_variantes_wms_directo(res)
@@ -116,9 +113,6 @@ class ProductTemplate(models.Model):
     def write(self, vals):
         res = super(ProductTemplate, self).write(vals)
 
-        # if vals.get('integracion_wms') and not vals.get('default_code') or self.default_code == False:
-        #     raise ValidationError("El campo de referencia es obligatorio para integrar con WMS.")
-        
         if vals.get('integracion_wms'):
             for record in self:
                 if record.type == 'product':
@@ -181,7 +175,6 @@ class Product(models.Model):
         default=True
     )
 
-    # Campos para logging de WMS
     wms_log_ids = fields.One2many(
         'product.wms.log', 
         'product_id', 
@@ -214,7 +207,6 @@ class Product(models.Model):
             'usuario_id': self.env.user.id
         })
         
-        # Actualizar estado de sincronización
         self.with_context(_avoid_wms=True).write({
             'wms_last_sync': fields.Datetime.now(),
             'wms_sync_status': resultado if resultado in ['success', 'error'] else 'sync'
@@ -234,7 +226,6 @@ class Product(models.Model):
 
             response = datosAPI.consultaStock(self);
             
-            # Agregar log exitoso
             self._agregar_log_wms(
                 operacion='consulta_stock',
                 resultado='success',
@@ -258,7 +249,6 @@ class Product(models.Model):
                     'context': self.env.context,
                 }
         except Exception as e:
-            # Agregar log de error
             self._agregar_log_wms(
                 operacion='consulta_stock',
                 resultado='error',
@@ -274,7 +264,6 @@ class Product(models.Model):
 
             result = datosAPI.insertarBarcode(self)
             
-            # Agregar log exitoso
             self._agregar_log_wms(
                 operacion='enviar_barcode',
                 resultado='success',
@@ -284,7 +273,6 @@ class Product(models.Model):
             
             return result
         except Exception as e:
-            # Agregar log de error
             self._agregar_log_wms(
                 operacion='enviar_barcode',
                 resultado='error',
@@ -300,24 +288,18 @@ class Product(models.Model):
 
             result = datosAPI.insertarProducto(self)
             
-            # Actualizar los campos con los códigos recibidos
             if result and isinstance(result, dict):
                 update_vals = {}
-                
                 if result.get('numeroInterfaz'):
                     update_vals['codigo_interfaz_wms'] = result.get('numeroInterfaz')
-                
                 if result.get('codigoUnico'):
                     update_vals['codigo_unico'] = result.get('codigoUnico')
-                
-                # Actualizar el producto con los nuevos códigos
                 if update_vals:
                     self.with_context(_avoid_wms=True).write(update_vals)
 
             if self.barcode:
                 self.saveBarcode();
             
-            # Agregar log exitoso
             self._agregar_log_wms(
                 operacion='enviar_producto',
                 resultado='success',
@@ -328,7 +310,6 @@ class Product(models.Model):
             return result
             
         except Exception as e:
-            # Agregar log de error
             self._agregar_log_wms(
                 operacion='enviar_producto',
                 resultado='error',

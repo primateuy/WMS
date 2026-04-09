@@ -32,6 +32,18 @@ class ResPartner(models.Model):
         string="Código unico identificatorio"
     )
 
+    codigo_unico_cliente = fields.Char(
+        string="Identificación WIS Cliente",
+        readonly=True,
+        help="Código de agente CLI en WIS (se usa en operaciones de venta/despacho)",
+    )
+
+    codigo_unico_proveedor = fields.Char(
+        string="Identificación WIS Proveedor",
+        readonly=True,
+        help="Código de agente PRO en WIS (se usa en operaciones de compra/recepción/devolución de sucursal)",
+    )
+
 
     logs = fields.One2many('logs.res.partner', 'partner_id', string='Logs de Integración')
 
@@ -81,29 +93,34 @@ class ResPartner(models.Model):
             'partner_id': self.id,
             'fecha': fields.Datetime.now(),
             'texto': 'Se envió la información a WIS',
-        })  
+        })
 
+        update_vals = {}
 
-        response = datosAPI.insertarClienteOrSupplier(self);
+        if self.customer_rank > 0:
+            response_cli = datosAPI.insertarClienteOrSupplier(self, 'CLI')
+            _logger.info("RESPONSE CLI => %s", response_cli)
+            if response_cli and isinstance(response_cli, dict):
+                update_vals['codigo_unico_cliente'] = response_cli.get('codigoUnico', '')
+                self.env['logs.res.partner'].create({
+                    'partner_id': self.id,
+                    'fecha': fields.Datetime.now(),
+                    'texto': f"Agente CLI integrado. Código Único: '{response_cli.get('codigoUnico', '')}'",
+                })
 
-        _logger.info("RESPONSE ES => %s", response)
+        if self.supplier_rank > 0:
+            response_pro = datosAPI.insertarClienteOrSupplier(self, 'PRO')
+            _logger.info("RESPONSE PRO => %s", response_pro)
+            if response_pro and isinstance(response_pro, dict):
+                update_vals['codigo_unico_proveedor'] = response_pro.get('codigoUnico', '')
+                self.env['logs.res.partner'].create({
+                    'partner_id': self.id,
+                    'fecha': fields.Datetime.now(),
+                    'texto': f"Agente PRO integrado. Código Único: '{response_pro.get('codigoUnico', '')}'",
+                })
 
-        if response and isinstance(response, dict):
-            self.with_context(skip_wis_sync=True).write({
-                'codigo_wms': response.get('numeroInterfaz', ''),
-                'codigo_unico': response.get('codigoUnico', '')
-            })
-            self.env['logs.res.partner'].create({
-                'partner_id': self.id,
-                'fecha': fields.Datetime.now(),
-                'texto': f"Integración exitosa con WIS. Código WMS: '{response.get('codigoWMS', '')}' | Código Único: '{response.get('codigoUnico', '')}'",
-            })
-        else:
-            self.env['logs.res.partner'].create({
-                'partner_id': self.id,
-                'fecha': fields.Datetime.now(),
-                'texto': f"Error en la integración con WIS. Respuesta: {response}",
-            })
+        if update_vals:
+            self.with_context(skip_wis_sync=True).write(update_vals)
 
     
 

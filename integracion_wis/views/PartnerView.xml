@@ -10,7 +10,14 @@
                         <group>
                             <field name="integracion_wms"/>
                             <field name="codigo_wms" readonly="True" invisible="not integracion_wms"/>
-                            <field name="codigo_unico" readonly="True" invisible="not integracion_wms"/>
+                        </group>
+                        <field name="customer_rank" invisible="True"/>
+                        <field name="supplier_rank" invisible="True"/>
+                        <group string="Identificaciones WIS" invisible="not integracion_wms">
+                            <field name="codigo_unico_cliente" readonly="True"
+                                invisible="customer_rank == 0"/>
+                            <field name="codigo_unico_proveedor" readonly="True"
+                                invisible="supplier_rank == 0"/>
                         </group>
                         <button name="enviarWS" 
                             string="Enviar a WIS" 
