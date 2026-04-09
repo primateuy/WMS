@@ -8,6 +8,7 @@ class WisWebhookLog(models.Model):
 
     fecha = fields.Date(string='Fecha', default=fields.Date.today, required=True)
     hora = fields.Char(string='Hora', required=True)
+    numero_interfaz_ejecucion = fields.Integer(string='Nro. Interfaz Ejecución')
     request = fields.Text(string='Request')
     tipo = fields.Char(string='Tipo')
     respuesta = fields.Text(string='Respuesta')

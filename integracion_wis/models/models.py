@@ -478,6 +478,7 @@ class IntegracionWIS(models.Model):
         }]
 
 
+
         payload = {
             "empresa": self.empresa_id,
             "dsReferencia": f"Creación de agente desde Odoo: {name_clean}",

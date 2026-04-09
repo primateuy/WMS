@@ -7,6 +7,7 @@
             <tree string="Webhook Logs" create="0" edit="0" delete="0" decoration-danger="estado == 'error'" decoration-success="estado == 'exito'" default_order="fecha desc, hora desc">
                 <field name="fecha"/>
                 <field name="hora"/>
+                <field name="numero_interfaz_ejecucion" string="Nro. Interfaz"/>
                 <field name="tipo"/>
                 <field name="estado" widget="badge" decoration-danger="estado == 'error'" decoration-success="estado == 'exito'"/>
             </tree>
@@ -23,6 +24,7 @@
                         <group>
                             <field name="fecha" readonly="1"/>
                             <field name="hora" readonly="1"/>
+                            <field name="numero_interfaz_ejecucion" readonly="1"/>
                             <field name="tipo" readonly="1"/>
                         </group>
                         <group>

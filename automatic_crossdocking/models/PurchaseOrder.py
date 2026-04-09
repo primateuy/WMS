@@ -332,29 +332,30 @@ class PurchaseOrder(models.Model):
                     'location_dest_id': warehouse.crossdocking_location_id.id,
                     'location_id': self._get_or_create_entrance_location().id,
                     'origin': f"{self.name} - Crossdock Equitativo {location.complete_name}",
-                    'picking_type_id': main_warehouse.crossdocking_type_id.id
+                    'picking_type_id': main_warehouse.crossdocking_type_id.id,
+                    'partner_id': warehouse.partner_id.id,
                 })
 
 
                 crosspick = StockPicking.with_user(SUPERUSER_ID).create(crossdockingPicking);
-                
+
 
                 all_pickings |= crosspick;
 
                 picking_moves = self._create_equitable_moves_for_picking(crosspick, location, lines_data);
                 all_moves |= picking_moves;
 
-           
+
 
             existing_picking = self.picking_ids.filtered(
-                lambda p: p.location_dest_id.id == location.id and 
+                lambda p: p.location_dest_id.id == location.id and
                 p.state not in ('done', 'cancel') and
                 'Crossdock' in (p.origin or '')
             )
-            
+
             if existing_picking:
                 picking = existing_picking[0]
-                
+
             else:
                 picking_vals = self._prepare_picking()
 
@@ -363,7 +364,8 @@ class PurchaseOrder(models.Model):
                         'location_dest_id': location.id,
                         'location_id': self._get_or_create_entrance_location().id,
                         'origin': f"{self.name} - Crossdock Equitativo {location.complete_name}",
-                        'picking_type_id': main_warehouse.crossdocking_type_id.id
+                        'picking_type_id': main_warehouse.crossdocking_type_id.id,
+                        'partner_id': self._get_forum_partner_id(),
                     })
                 else:
 
@@ -371,9 +373,10 @@ class PurchaseOrder(models.Model):
                         'location_dest_id': location.id,
                         'location_id': warehouse.crossdocking_location_id.id,
                         'origin': f"{self.name} - Crossdock Equitativo {location.complete_name}",
-                        'picking_type_id': warehouse.crossdocking_reception_type_id.id
+                        'picking_type_id': warehouse.crossdocking_reception_type_id.id,
+                        'partner_id': warehouse.partner_id.id,
                     })
-                
+
                 picking = StockPicking.with_user(SUPERUSER_ID).create(picking_vals)
             
             all_pickings |= picking
@@ -1260,35 +1263,33 @@ class PurchaseOrder(models.Model):
 
             if not esPrincipal:
 
-
                 crossdockingPicking = self._prepare_picking();
                 crossdockingPicking.update({
                     'location_dest_id': alm.crossdocking_location_id.id,
                     'location_id': self._get_or_create_entrance_location().id,
                     'origin': f"{self.name} - Crossdock Equitativo {ubi.complete_name}",
-                    'picking_type_id': main_warehouse.crossdocking_type_id.id
+                    'picking_type_id': main_warehouse.crossdocking_type_id.id,
+                    'partner_id': alm.partner_id.id,
                 })
 
-
                 crosspick = StockPicking.with_user(SUPERUSER_ID).create(crossdockingPicking);
-                
 
                 all_pickings |= crosspick;
 
                 picking_moves = self._create_crossdock_moves_for_picking(crosspick, ubi, itm);
                 all_moves |= picking_moves;
 
-           
+
 
             existing_picking = self.picking_ids.filtered(
-                lambda p: p.location_dest_id.id == ubi.id and 
+                lambda p: p.location_dest_id.id == ubi.id and
                 p.state not in ('done', 'cancel') and
                 'Crossdock' in (p.origin or '')
             )
-            
+
             if existing_picking:
                 picking = existing_picking[0]
-                
+
             else:
                 picking_vals = self._prepare_picking()
 
@@ -1297,7 +1298,8 @@ class PurchaseOrder(models.Model):
                         'location_dest_id': ubi.id,
                         'location_id': self._get_or_create_entrance_location().id,
                         'origin': f"{self.name} - Crossdock Equitativo {ubi.complete_name}",
-                        'picking_type_id': main_warehouse.crossdocking_type_id.id
+                        'picking_type_id': main_warehouse.crossdocking_type_id.id,
+                        'partner_id': self._get_forum_partner_id(),
                     })
                 else:
 
@@ -1305,9 +1307,10 @@ class PurchaseOrder(models.Model):
                         'location_dest_id': ubi.id,
                         'location_id': alm.crossdocking_location_id.id,
                         'origin': f"{self.name} - Crossdock Equitativo {ubi.complete_name}",
-                        'picking_type_id': alm.crossdocking_reception_type_id.id
+                        'picking_type_id': alm.crossdocking_reception_type_id.id,
+                        'partner_id': alm.partner_id.id,
                     })
-                
+
                 picking = StockPicking.with_user(SUPERUSER_ID).create(picking_vals)
             
             all_pickings |= picking
@@ -1757,7 +1760,15 @@ class PurchaseOrder(models.Model):
             moves |= move
 
         return moves
-    
+
+    def _get_forum_partner_id(self):
+        """Busca un contacto con nombre 'forum' (sin distinguir mayúsculas).
+        Retorna su id si existe, o False si no se encuentra."""
+        partner = self.env['res.partner'].search(
+            [('name', 'ilike', 'forum')], limit=1
+        )
+        return partner.id if partner else False
+
     def _get_or_create_entrance_location(self):
         
         main_warehouse = self.picking_type_id.warehouse_id or self.env['stock.warehouse'].search([

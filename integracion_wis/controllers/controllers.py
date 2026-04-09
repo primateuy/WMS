@@ -22,10 +22,13 @@ class WebhookWIS(http.Controller):
             payload = json.loads(body)
         except Exception as e:
             response = {'status': 400, 'detail': 'JSON inválido'}
-            self._create_log(body.decode('utf-8') if body else '', response, 'desconocido', 'error')
+            self._create_log(body.decode('utf-8') if body else '', response, 'desconocido', 'error', 0)
             return response
 
-        event_id = payload.get('id')
+        raw_id = payload.get('Id') or payload.get('id') or ''
+        event_id = raw_id[0].lower() + raw_id[1:] if raw_id else ''
+        numero_interfaz = payload.get('NumeroInterfazEjecucion') or payload.get('numeroInterfazEjecucion') or 0
+
         handlers = {
             'confirmacionRecepcion':           self._handle_confirmacion_recepcion,
             'confirmacionPedido':              self._handle_confirmacion_pedido,
@@ -42,20 +45,33 @@ class WebhookWIS(http.Controller):
         if not handler:
             _logger.warning("Tipo de evento WIS no manejado: %s", event_id)
             response = {'status': 400, 'detail': f'Evento no soportado: {event_id}'}
-            self._create_log(payload, response, event_id or 'desconocido', 'error')
+            self._create_log(payload, response, event_id or 'desconocido', 'error', numero_interfaz)
             return response
 
         try:
-            handler_data = payload.get(event_id, {}) if event_id else payload
+            pascal_id = event_id[0].upper() + event_id[1:] if event_id else ''
+            raw_data = payload.get(event_id) or payload.get(pascal_id) or ({} if event_id else payload)
+            handler_data = self._normalize_keys(raw_data)
             handler(handler_data)
             response = {'status': 200}
-            self._create_log(payload, response, event_id, 'exito')
+            self._create_log(payload, response, event_id, 'exito', numero_interfaz)
             return response
         except Exception as e:
             _logger.exception("Error procesando evento WIS %s", event_id)
             response = {'status': 500, 'detail': str(e)}
-            self._create_log(payload, response, event_id, 'error')
+            self._create_log(payload, response, event_id, 'error', numero_interfaz)
             return response
+
+    def _normalize_keys(self, obj):
+        """Normaliza recursivamente claves PascalCase a camelCase en dicts/listas."""
+        if isinstance(obj, dict):
+            return {
+                (k[0].lower() + k[1:] if k else k): self._normalize_keys(v)
+                for k, v in obj.items()
+            }
+        if isinstance(obj, list):
+            return [self._normalize_keys(i) for i in obj]
+        return obj
 
     def _verify_signature(self, body, received_signature):
         if not received_signature:
@@ -68,7 +84,7 @@ class WebhookWIS(http.Controller):
 
         return hmac.compare_digest(secret, received_signature)
 
-    def _create_log(self, data, respuesta, tipo, estado='exito'):
+    def _create_log(self, data, respuesta, tipo, estado='exito', numero_interfaz=0):
         try:
             if isinstance(data, str):
                 request_str = data
@@ -82,7 +98,8 @@ class WebhookWIS(http.Controller):
             request.env['wis.webhook.log'].sudo().create({
                 'fecha': fields.Date.today(),
                 'hora': time.strftime('%H:%M:%S'),
-                'request': request_str, 
+                'numero_interfaz_ejecucion': numero_interfaz or 0,
+                'request': request_str,
                 'respuesta': respuesta_str,
                 'tipo': tipo,
                 'estado': estado
@@ -101,12 +118,14 @@ class WebhookWIS(http.Controller):
         fecha_ingreso_raw = data.get('fechaIngreso', '') or data.get('fechaCierre', '')
         fecha_ingreso = fields.Datetime.now()
         if fecha_ingreso_raw:
-            try:
-                fecha_ingreso = datetime.strptime(fecha_ingreso_raw, '%d/%m/%Y %H:%M')
-            except ValueError:
-                _logger.warning(
-                    "No se pudo parsear fechaIngreso '%s', usando now()", fecha_ingreso_raw
-                )
+            for fmt in ('%d/%m/%Y %H:%M', '%d/%m/%Y'):
+                try:
+                    fecha_ingreso = datetime.strptime(fecha_ingreso_raw, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                _logger.warning("No se pudo parsear fechaIngreso '%s', usando now()", fecha_ingreso_raw)
 
         errores = []
 
