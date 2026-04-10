@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker exec:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker restart:*)",
+      "WebFetch(domain:primateuy.odoo.com)"
+    ]
+  }
+}
