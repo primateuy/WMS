@@ -11,22 +11,22 @@
                 <xpath expr="//sheet" position="before">
                     <div class="alert alert-warning"
                          role="alert"
-                         attrs="{'invisible': [('tiene_multiplos_incumplidos', '=', False)]}">
+                         invisible="not tiene_multiplos_incumplidos">
                         <span class="fa fa-exclamation-triangle mr-1"/>
                         <strong>Atención:</strong>
                         Una o más líneas no respetan el múltiplo de distribución del producto.
                         Revisá las cantidades antes de validar
                         (las líneas con problema están marcadas con
-                        <span class="fa fa-exclamation-circle text-warning"/>.
+                        <span class="fa fa-exclamation-circle text-warning"/>).
                     </div>
                 </xpath>
 
                 <!-- Columna de warning en la lista de moves -->
                 <xpath expr="//field[@name='move_ids_without_package']/tree/field[@name='product_id']" position="before">
-                    <field name="multiplo_incumplido" invisible="1"/>
+                    <field name="multiplo_incumplido" column_invisible="1"/>
                     <widget name="boolean_favorite"
                             nolabel="1"
-                            attrs="{'invisible': [('multiplo_incumplido', '=', False)]}"/>
+                            invisible="not multiplo_incumplido"/>
                 </xpath>
             </field>
         </record>
