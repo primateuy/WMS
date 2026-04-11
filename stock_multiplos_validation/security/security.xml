@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <record id="group_bypass_multiplos" model="res.groups">
+            <field name="name">Puede validar sin respetar múltiplos</field>
+            <field name="category_id" ref="base.module_category_inventory_inventory"/>
+            <field name="comment">Los usuarios de este grupo pueden validar operaciones de inventario aunque las cantidades no respeten el múltiplo de distribución del producto.</field>
+        </record>
+    </data>
+</odoo>

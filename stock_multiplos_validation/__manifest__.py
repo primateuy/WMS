@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 {
     'name': "Validación de Múltiplos en Operaciones de Inventario",
-    'summary': "Impide validar una operación de inventario si las cantidades no respetan el múltiplo de distribución del producto.",
+    'summary': "Advertencia y bloqueo al validar operaciones que no respetan el múltiplo de distribución.",
     'description': (
         "Extensión de automatic_crossdocking. "
-        "Cuando el tipo de operación tiene 'Respeta Múltiplos' activo, "
-        "bloquea la validación del picking si algún producto tiene una cantidad "
-        "que no es múltiplo exacto de su 'Múltiplos de Distribución', "
-        "mostrando un mensaje de error con el detalle de cada producto problemático."
+        "Cuando el tipo de operación tiene 'Respeta Múltiplos' activo:\n"
+        "- Marca visualmente las líneas con cantidades que no respetan el múltiplo.\n"
+        "- Muestra un banner de advertencia en el formulario del picking.\n"
+        "- Avisa al hacer 'Marcar como por realizar'.\n"
+        "- Bloquea la validación final, salvo usuarios con permiso especial."
     ),
     'author': "Avance Software",
     'website': "https://avancesoftware.us/",
@@ -15,8 +16,8 @@
     'version': '0.1',
     'depends': ['automatic_crossdocking'],
     'data': [
-        # sin vistas adicionales: la vista del tipo de operación y el campo
-        # respeta_multiplos ya los agrega automatic_crossdocking
+        'security/security.xml',
+        'views/stock_picking_views.xml',
     ],
     'installable': True,
     'auto_install': False,
