@@ -8,26 +8,28 @@
             <field name="model">stock.picking</field>
             <field name="inherit_id" ref="stock.view_picking_form"/>
             <field name="arch" type="xml">
+
                 <xpath expr="//sheet" position="before">
-                    <div class="alert alert-warning"
+                    <field name="tiene_multiplos_incumplidos" invisible="1"/>
+                    <div class="alert alert-warning mb-0"
                          role="alert"
                          invisible="not tiene_multiplos_incumplidos">
-                        <span class="fa fa-exclamation-triangle mr-1"/>
-                        <strong>Atención:</strong>
-                        Una o más líneas no respetan el múltiplo de distribución del producto.
-                        Revisá las cantidades antes de validar
-                        (las líneas con problema están marcadas con
-                        <span class="fa fa-exclamation-circle text-warning"/>).
+                        <i class="fa fa-exclamation-triangle"/> <strong>Atención:</strong>
+                        Una o más líneas no respetan el múltiplo de distribución.
+                        Revisá las cantidades antes de validar.
                     </div>
                 </xpath>
 
-                <!-- Columna de warning en la lista de moves -->
-                <xpath expr="//field[@name='move_ids_without_package']/tree/field[@name='product_id']" position="before">
-                    <field name="multiplo_incumplido" column_invisible="1"/>
-                    <widget name="boolean_favorite"
-                            nolabel="1"
-                            invisible="not multiplo_incumplido"/>
+                <!-- Colorear en amarillo las filas de moves con multiplo incumplido -->
+                <xpath expr="//field[@name='move_ids_without_package']/list" position="attributes">
+                    <attribute name="decoration-warning">multiplo_incumplido</attribute>
                 </xpath>
+
+                <!-- Campo oculto necesario para que decoration-warning funcione -->
+                <xpath expr="//field[@name='move_ids_without_package']/list/field[@name='product_id']" position="before">
+                    <field name="multiplo_incumplido" column_invisible="1"/>
+                </xpath>
+
             </field>
         </record>
 
