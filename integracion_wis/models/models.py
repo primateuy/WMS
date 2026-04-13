@@ -577,6 +577,7 @@ class IntegracionWIS(models.Model):
         codigo_agente = vals.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else vals.partner_id.codigo_unico_proveedor
 
         pedidos = [{
+            "tipoExpedicion": "WSF",
             "nroPedido": vals.codigo_unico if vals.codigo_unico else f"P{hash_short}",
             "codigoAgente": codigo_agente,
             "tipoAgente": tipo_agente,

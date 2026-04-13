@@ -161,11 +161,47 @@ class StockPicking(models.Model):
         
     def enviarWS(self, tipo):
 
+        _logger.info(
+            "[WIS] enviarWS llamado | picking=%s | tipo=%s | state=%s | partner=%s (id=%s) | picking_type=%s",
+            self.name, tipo, self.state,
+            self.partner_id.name if self.partner_id else 'SIN PARTNER',
+            self.partner_id.id if self.partner_id else None,
+            self.picking_type_id.name if self.picking_type_id else 'SIN TIPO',
+        )
+
+        state_actual = str(self.state or '').strip()
+        state_objetivo = str(self.picking_type_id.estado_disparo_wis or '').strip()
+
+        # 'waiting' cubre tanto 'waiting' (en espera de otra operación)
+        # como 'confirmed' (en espera de disponibilidad)
+        estados_aceptados = {state_objetivo}
+        if state_objetivo == 'waiting':
+            estados_aceptados.add('confirmed')
+
+        _logger.info(
+            "[WIS] enviarWS | state_actual='%s' | estado_disparo_wis='%s' | estados_aceptados=%s | coincide=%s",
+            state_actual, state_objetivo, estados_aceptados, state_actual in estados_aceptados,
+        )
+
+        if state_objetivo and state_actual not in estados_aceptados:
+            return False
+
         if not self.partner_id:
             raise ValidationError("No se ha asignado un partner")
 
         tipo_agente = self.picking_type_id.tipo_agente_wis or 'CLI'
         codigo_agente = self.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else self.partner_id.codigo_unico_proveedor
+
+        _logger.info(
+            "[WIS] enviarWS | tipo_agente_wis config=%s | tipo_agente resuelto=%s | "
+            "codigo_unico_cliente='%s' | codigo_unico_proveedor='%s' | codigo_agente resuelto='%s'",
+            self.picking_type_id.tipo_agente_wis,
+            tipo_agente,
+            self.partner_id.codigo_unico_cliente,
+            self.partner_id.codigo_unico_proveedor,
+            codigo_agente,
+        )
+
         if not codigo_agente:
             raise ValidationError(f"El partner no tiene Identificación WIS {'Cliente' if tipo_agente == 'CLI' else 'Proveedor'}. Sincronicelo primero desde el contacto.")
 
@@ -173,21 +209,15 @@ class StockPicking(models.Model):
         if not datosAPI or not datosAPI.apiLink:
             raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
-        state_actual = str(self.state or '').strip()
-        state_objetivo = str(self.picking_type_id.estado_disparo_wis or '').strip()
-
-        if state_objetivo and state_actual != state_objetivo:
-            return False
-
         
 
 
-        if tipo == 'OCI' or self.sale_id:
+        if (tipo == 'OCI' or self.sale_id) and self.picking_type_id.code == 'incoming':
             return datosAPI.insertarReferenciaRecepcion(self)
 
         if self.picking_type_id.code == 'incoming':
-            if self.partner_id.customer_rank > 0:
-                _logger.info("Es una devolución de cliente, se enviará a la API de devoluciones");
+            if self.partner_id.customer_rank > 0 and not self.purchase_id:
+                _logger.info("Es una devolución de cliente, se enviará a la API de devoluciones")
                 return datosAPI.insertarDevolucion(self)
 
         if tipo == 'EC':
@@ -246,6 +276,131 @@ class StockPicking(models.Model):
 
 
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        records = super(StockPicking, self).create(vals_list)
+        if self.env.context.get('skip_wms_integration'):
+            return records
+        for record in records:
+            _logger.info("[WIS] create | picking=%s | state=%s | integracion=%s | partner=%s | wms_estado=%s",
+                record.name, record.state,
+                record.picking_type_id.integracion_wms,
+                record.partner_id.name if record.partner_id else 'VACIO',
+                record.wms_estado,
+            )
+            if not record.picking_type_id.integracion_wms:
+                continue
+            if not record.move_ids:
+                continue
+            if not record.partner_id:
+                continue
+            if record.wms_estado != 'sin_enviar':
+                continue
+            estado_obj = record.picking_type_id.estado_disparo_wis or ''
+            estados_aceptados = {estado_obj}
+            if estado_obj == 'waiting':
+                estados_aceptados.add('confirmed')
+            if estado_obj and record.state not in estados_aceptados:
+                continue
+            tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+            try:
+                response = record.enviarWS(tipo)
+                if response is not False:
+                    wms_vals = {'wms_estado': 'enviado'}
+                    if isinstance(response, dict):
+                        wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                    record.with_context(skip_wms_integration=True).write(wms_vals)
+                    _logger.info("[WIS] create | picking=%s enviado a WMS", record.name)
+            except Exception as e:
+                _logger.exception("[WIS] create | error en picking=%s: %s", record.name, e)
+        return records
+
+    def _enviar_wis_si_corresponde(self, hook_name):
+        """Dispara integración WIS según estado actual del picking."""
+        if self.env.context.get('skip_wms_integration'):
+            return
+        for record in self:
+            estado_obj = record.picking_type_id.estado_disparo_wis or ''
+            estados_aceptados = {estado_obj}
+            if estado_obj == 'waiting':
+                estados_aceptados.add('confirmed')
+            _logger.info(
+                "[WIS] %s | picking=%s | state=%s | integracion=%s | partner=%s | wms_estado=%s | estado_disparo=%s",
+                hook_name, record.name, record.state,
+                record.picking_type_id.integracion_wms,
+                record.partner_id.name if record.partner_id else 'SIN PARTNER',
+                record.wms_estado, estado_obj,
+            )
+            if not record.picking_type_id.integracion_wms:
+                continue
+            if not record.move_ids:
+                continue
+            if not record.partner_id:
+                continue
+            if record.wms_estado != 'sin_enviar':
+                continue
+            if not estado_obj or record.state not in estados_aceptados:
+                continue
+            tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+            try:
+                response = record.enviarWS(tipo)
+                if response is not False:
+                    wms_vals = {'wms_estado': 'enviado'}
+                    if isinstance(response, dict):
+                        wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                    record.with_context(skip_wms_integration=True).write(wms_vals)
+                    _logger.info("[WIS] %s | picking=%s enviado a WMS", hook_name, record.name)
+            except Exception as e:
+                _logger.exception("[WIS] %s | error en picking=%s: %s", hook_name, record.name, e)
+
+    def action_confirm(self):
+        res = super().action_confirm()
+        self._enviar_wis_si_corresponde('action_confirm')
+        return res
+
+    def action_assign(self):
+        res = super().action_assign()
+        self._enviar_wis_si_corresponde('action_assign')
+        return res
+
+    def _action_done(self):
+        res = super(StockPicking, self)._action_done()
+        if self.env.context.get('skip_wms_integration'):
+            return res
+        for record in self:
+            _logger.info("[WIS] _action_done | picking=%s | type=%s | integracion=%s | partner=%s | wms_estado=%s",
+                record.name,
+                record.picking_type_id.name,
+                record.picking_type_id.integracion_wms,
+                record.partner_id.name if record.partner_id else 'SIN PARTNER',
+                record.wms_estado,
+            )
+            if not record.picking_type_id.integracion_wms:
+                continue
+            if not record.move_ids:
+                continue
+            if not record.partner_id:
+                continue
+            if record.wms_estado != 'sin_enviar':
+                continue
+            if record.picking_type_id.estado_disparo_wis not in ('done', False, ''):
+                continue
+            tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+            try:
+                response = record.enviarWS(tipo)
+                if response is not False:
+                    wms_vals = {'wms_estado': 'enviado'}
+                    if isinstance(response, dict):
+                        wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                    record.with_context(skip_wms_integration=True).write(wms_vals)
+                    _logger.info("[WIS] _action_done | picking=%s enviado a WMS", record.name)
+            except Exception as e:
+                _logger.exception("[WIS] _action_done | error en picking=%s: %s", record.name, e)
+        return res
+
     def write(self, vals):
         res = super(StockPicking, self).write(vals)
 
@@ -278,10 +433,23 @@ class StockPicking(models.Model):
                     })
 
         if not self.env.context.get('skip_wms_integration') and 'state' in vals:
+            nuevo_state = vals.get('state')
             for record in self:
+                _logger.info(
+                    "[WIS] write state | picking=%s | nuevo_state=%s | integracion_wms=%s | "
+                    "move_ids=%s | wms_estado=%s",
+                    record.name, nuevo_state,
+                    record.picking_type_id.integracion_wms,
+                    bool(record.move_ids),
+                    record.wms_estado,
+                )
+                if nuevo_state == 'done':
+                    continue  # manejado por _action_done
                 if not record.picking_type_id.integracion_wms:
                     continue
                 if not record.move_ids:
+                    continue
+                if not record.partner_id:
                     continue
                 if record.wms_estado != 'sin_enviar':
                     continue
