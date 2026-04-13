@@ -555,8 +555,10 @@ class IntegracionWIS(models.Model):
         hash_short = hash_obj.hexdigest()[:8].upper()
         detalles = [];
         for prod in vals.move_ids:
+            if not prod.product_id.codigo_unico:
+                raise ValidationError(f"El producto '{prod.product_id.name}' no tiene un código WMS asignado. Sincronícelo primero desde el formulario del producto.")
             detalles.append({
-                "codigoProducto": "PRD-" + str(prod.product_id.id),
+                "codigoProducto": prod.product_id.codigo_unico,
                 "identificador": prod.product_id.codigo_unico,
                 "cantidad": prod.product_uom_qty
             })
