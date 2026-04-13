@@ -559,7 +559,7 @@ class IntegracionWIS(models.Model):
                 raise ValidationError(f"El producto '{prod.product_id.name}' no tiene un código WMS asignado. Sincronícelo primero desde el formulario del producto.")
             detalles.append({
                 "codigoProducto": prod.product_id.codigo_unico,
-                "identificador": prod.product_id.codigo_unico,
+                "identificador": "*",
                 "cantidad": prod.product_uom_qty
             })
 
