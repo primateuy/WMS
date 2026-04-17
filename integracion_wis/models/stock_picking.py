@@ -101,6 +101,13 @@ class StockPicking(models.Model):
     codigo_unico = fields.Char(
         string = "Código WMS identificatorio"
     )
+
+    wms_nro_caja = fields.Char(
+        string="Nro. de Caja (FINT)",
+        copy=False,
+        help="Número de caja específico para pedidos de fin de temporada (FINT). "
+             "Si se completa, se enviará al WMS como LPN con tipo FINTEMP.",
+    )
     
     state = fields.Selection(selection_add=[
         ('preparado_wms', 'Preparado por WMS')
@@ -212,13 +219,13 @@ class StockPicking(models.Model):
         
 
 
+        TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
+
+        if tipo in TIPOS_DEVOLUCION:
+            return datosAPI.insertarDevolucion(self)
+
         if (tipo == 'OCI' or self.sale_id) and self.picking_type_id.code == 'incoming':
             return datosAPI.insertarReferenciaRecepcion(self)
-
-        if self.picking_type_id.code == 'incoming':
-            if self.partner_id.customer_rank > 0 and not self.purchase_id:
-                _logger.info("Es una devolución de cliente, se enviará a la API de devoluciones")
-                return datosAPI.insertarDevolucion(self)
 
         if tipo == 'EC':
             try:
@@ -281,6 +288,8 @@ class StockPicking(models.Model):
         records = super(StockPicking, self).create(vals_list)
         if self.env.context.get('skip_wms_integration'):
             return records
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return records
         for record in records:
             _logger.info("[WIS] create | picking=%s | state=%s | integracion=%s | partner=%s | wms_estado=%s",
                 record.name, record.state,
@@ -320,6 +329,8 @@ class StockPicking(models.Model):
         """Dispara integración WIS según estado actual del picking."""
         if self.env.context.get('skip_wms_integration'):
             return
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return
         for record in self:
             estado_obj = record.picking_type_id.estado_disparo_wis or ''
             estados_aceptados = {estado_obj}
@@ -354,6 +365,15 @@ class StockPicking(models.Model):
                     _logger.info("[WIS] %s | picking=%s enviado a WMS", hook_name, record.name)
             except Exception as e:
                 _logger.exception("[WIS] %s | error en picking=%s: %s", hook_name, record.name, e)
+                self.env['wms.integracion.log'].create({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'error',
+                    'modelo': 'stock.picking',
+                    'texto': f"Error al enviar picking {record.name} a WMS: {str(e)}",
+                    'picking_id': record.id,
+                    'resultado': 'error',
+                    'detalle': f"Hook: {hook_name} | Estado: {record.state} | Tipo: {record.picking_type_id.name if record.picking_type_id else 'N/A'}",
+                })
 
     def action_confirm(self):
         res = super().action_confirm()
@@ -368,6 +388,8 @@ class StockPicking(models.Model):
     def _action_done(self):
         res = super(StockPicking, self)._action_done()
         if self.env.context.get('skip_wms_integration'):
+            return res
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             return res
         for record in self:
             _logger.info("[WIS] _action_done | picking=%s | type=%s | integracion=%s | partner=%s | wms_estado=%s",
@@ -404,7 +426,9 @@ class StockPicking(models.Model):
     def write(self, vals):
         res = super(StockPicking, self).write(vals)
 
-        if not self.env.context.get('skip_wms_integration') and 'scheduled_date' in vals:
+        if (not self.env.context.get('skip_wms_integration') and
+                self.env['integracion_wis.integracion_wis']._comunicacion_habilitada() and
+                'scheduled_date' in vals):
             for record in self:
                 if record.wms_estado != 'enviado' or not record.picking_type_id.integracion_wms:
                     continue

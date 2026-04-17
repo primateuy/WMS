@@ -44,11 +44,16 @@
                     </group>
 
                         
-                        <button name="enviarWS" 
-                                type="object" 
-                                string="Enviar a WMS" 
+                        <button name="enviarWS"
+                                type="object"
+                                string="Enviar a WMS"
                                 class="btn-primary"
-                                invisible="not integracion_wms"/>
+                                invisible="not integracion_wms or codigo_unico"/>
+                        <button name="enviarWS"
+                                type="object"
+                                string="Sincronizar desde WIS"
+                                class="btn-primary"
+                                invisible="not integracion_wms or not codigo_unico"/>
                                 
                         <button name="saveBarcode" 
                                 type="object" 

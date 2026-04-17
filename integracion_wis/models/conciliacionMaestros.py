@@ -55,6 +55,9 @@ class ConciliacionMaestros(models.Model):
     @api.model
     def _cron_conciliar_clientes(self):
         """Método para el cron que ejecuta la conciliación de clientes"""
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            _logger.info("[WIS] Cron conciliación clientes omitido: comunicación deshabilitada.")
+            return True
         uruguay_time = datetime.fromisoformat(get_uruguay_datetime())
         conciliacion = self.create({
             'name': f'Conciliación Automática de Clientes - {uruguay_time.strftime("%Y-%m-%d %H:%M")}',
@@ -68,6 +71,9 @@ class ConciliacionMaestros(models.Model):
     @api.model
     def _cron_conciliar_productos(self):
         """Método para el cron que ejecuta la conciliación de productos"""
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            _logger.info("[WIS] Cron conciliación productos omitido: comunicación deshabilitada.")
+            return True
         uruguay_time = datetime.fromisoformat(get_uruguay_datetime())
         conciliacion = self.create({
             'name': f'Conciliación Automática de Productos - {uruguay_time.strftime("%Y-%m-%d %H:%M")}',
@@ -81,6 +87,9 @@ class ConciliacionMaestros(models.Model):
     @api.model
     def _cron_conciliar_codigos_barras(self):
         """Método para el cron que ejecuta la conciliación de códigos de barras"""
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            _logger.info("[WIS] Cron conciliación códigos de barras omitido: comunicación deshabilitada.")
+            return True
         uruguay_time = datetime.fromisoformat(get_uruguay_datetime())
         conciliacion = self.create({
             'name': f'Conciliación Automática de Códigos de Barras - {uruguay_time.strftime("%Y-%m-%d %H:%M")}',
@@ -145,46 +154,49 @@ class ConciliacionMaestros(models.Model):
         return error_detalle
 
     def conciliarCodigosBarra(self):
+        # Dirección: Odoo → WIS.
+        # WIS no tiene endpoint para obtener todos los barcodes de un producto,
+        # por lo que no es posible revertir la dirección de esta conciliación.
         try:
-            self._iniciar_conciliacion('códigos de barras')
+            with self.env.cr.savepoint():
 
-            productos = self.env['product.product'].search([
-                ('active', '=', True),
-                ('integracion_wms', '=', True),
-                ('codigo_unico', '!=', False)
-            ])
+                self._iniciar_conciliacion('códigos de barras')
 
-            if not productos:
-                self._agregar_log('No se encontraron productos con integración WMS activa', 'product.product', 'warning')
-                self._actualizar_estado('completado')
-                return True
+                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                if not datosAPI or not datosAPI.apiLink:
+                    raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
-            if not datosAPI or not datosAPI.apiLink:
-                error_msg = "No se encuentran todos los datos para una consulta a la API"
-                self._error_conciliacion('códigos de barras', error_msg)
-                raise ValidationError(error_msg)
+                variantes = self.env['product.product'].search([
+                    ('active', '=', True),
+                    ('integracion_wms', '=', True),
+                    ('codigo_unico', '!=', False),
+                ])
 
-            productos_procesados = 0
-            productos_con_error = 0
-            for producto in productos:
-                variantes = producto.product_variant_ids.filtered(lambda v: v.active and v.codigo_unico)
+                if not variantes:
+                    self._agregar_log('No se encontraron productos con integración WMS activa', 'product.product', 'warning')
+                    self._actualizar_estado('completado')
+                    return True
 
-                if variantes:
+                procesados = 0
+                errores    = 0
+                for variante in variantes:
                     try:
-                        datosAPI.consultarCodigosBarras(variantes, self.id)
-                        productos_procesados += len(variantes)
-                        self._agregar_log(f'Procesadas {len(variantes)} variantes del producto {producto.name}', 'product.product', 'info')
+                        datosAPI.consultarCodigosBarras(variante, self.id)
+                        procesados += 1
                     except Exception as e:
-                        productos_con_error += len(variantes)
-                        self._agregar_error_parcial(f'Error procesando variantes del producto {producto.name}', 'product.product', e)
+                        errores += 1
+                        self._agregar_error_parcial(
+                            f'Error procesando códigos de barras de {variante.name}',
+                            'product.product', e
+                        )
 
-            if productos_con_error > 0:
-                self._agregar_log(f'Resumen: {productos_procesados} variantes procesadas exitosamente, {productos_con_error} con errores', 'product.barcode', 'warning')
-            else:
-                self._agregar_log(f'Total de variantes procesadas exitosamente: {productos_procesados}', 'product.barcode', 'info')
-            self._completar_conciliacion('códigos de barras')
-            return True
+                self._agregar_log(
+                    f'Códigos de barras completado. Procesados: {procesados} | Errores: {errores}',
+                    'product.barcode',
+                    'warning' if errores > 0 else 'info'
+                )
+                self._completar_conciliacion('códigos de barras')
+                return True
 
         except Exception as e:
             self._error_conciliacion('códigos de barras', str(e))
@@ -244,34 +256,54 @@ class ConciliacionMaestros(models.Model):
 
     def conciliarClientes(self):
         try:
-            self._iniciar_conciliacion('clientes')
+            with self.env.cr.savepoint():
 
-            clientes = self.env['res.partner'].search([
-                ('active', '=', True),
-                ('integracion_wms', '=', True),
-                ('customer_rank', '>', 0)
-            ])
+                self._iniciar_conciliacion('clientes')
 
-            if not clientes:
-                self._agregar_log('No se encontraron clientes con integración WMS activa', 'res.partner', 'warning')
-                self._actualizar_estado('completado')
+                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                if not datosAPI or not datosAPI.apiLink:
+                    raise ValidationError("No se encuentran todos los datos para una consulta a la API")
+
+                clientes = self.env['res.partner'].search([
+                    ('active', '=', True),
+                    ('integracion_wms', '=', True),
+                    ('codigo_unico', '!=', False),
+                    ('customer_rank', '>', 0),
+                ])
+
+                if not clientes:
+                    self._agregar_log('No se encontraron clientes con integración WMS activa y código asignado', 'res.partner', 'warning')
+                    self._actualizar_estado('completado')
+                    return True
+
+                self._agregar_log(f'Enviando {len(clientes)} clientes/proveedores a WIS...', 'res.partner', 'info')
+
+                procesados = 0
+                errores = 0
+                for partner in clientes:
+                    try:
+                        partner.enviarWS()
+                        procesados += 1
+                    except Exception as e:
+                        errores += 1
+                        self._agregar_error_parcial(
+                            f'Error enviando agente {partner.name} a WIS', 'res.partner', e
+                        )
+
+                self.env['logs.conciliacion'].create([{
+                    'conciliacion_id': self.id,
+                    'texto': (
+                        f"Conciliación Odoo→WIS (clientes) completada. "
+                        f"Enviados a WIS: {procesados} | "
+                        f"Errores: {errores}"
+                    ),
+                    'modelo': 'res.partner',
+                    'nivel': 'warning' if errores > 0 else 'info',
+                    'fecha': get_uruguay_datetime(),
+                }])
+
+                self._completar_conciliacion('clientes')
                 return True
-
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
-            if not datosAPI or not datosAPI.apiLink:
-                error_msg = "No se encuentran todos los datos para una consulta a la API"
-                self._error_conciliacion('clientes', error_msg)
-                raise ValidationError(error_msg)
-
-            self._agregar_log(f'Procesando {len(clientes)} clientes...', 'res.partner', 'info')
-            try:
-                datosAPI.conciliarClientes(clientes, self.id)
-                self._agregar_log(f'Procesados {len(clientes)} clientes exitosamente', 'res.partner', 'info')
-            except Exception as e:
-                self._agregar_error_parcial(f'Error procesando clientes', 'res.partner', e)
-
-            self._completar_conciliacion('clientes')
-            return True
 
         except Exception as e:
             self._error_conciliacion('clientes', str(e))
@@ -279,46 +311,77 @@ class ConciliacionMaestros(models.Model):
 
     def conciliarProductos(self):
         try:
-            self._iniciar_conciliacion('productos')
+            with self.env.cr.savepoint():
 
-            productos = self.env['product.product'].search([
-                ('active', '=', True),
-                ('integracion_wms', '=', True),
-                ('codigo_unico', '!=', False)
-            ])
+                self._iniciar_conciliacion('productos')
 
-            if not productos:
-                self._agregar_log('No se encontraron productos con integración WMS activa', 'product.product', 'warning')
-                self._actualizar_estado('completado')
+                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                if not datosAPI or not datosAPI.apiLink:
+                    raise ValidationError("No se encuentran todos los datos para una consulta a la API")
+
+                ultima_sync  = datosAPI.ultima_sync_productos
+                inicio_sync  = fields.Datetime.now()
+
+                dominio_base = [
+                    ('active', '=', True),
+                    ('integracion_wms', '=', True),
+                    ('codigo_unico', '!=', False),
+                ]
+
+                if ultima_sync:
+                    variantes_a_sincronizar = self.env['product.product'].search(
+                        dominio_base + [('write_date', '>', ultima_sync)]
+                    )
+                    todas   = self.env['product.product'].search_count(dominio_base)
+                    omitidos = todas - len(variantes_a_sincronizar)
+                else:
+                    variantes_a_sincronizar = self.env['product.product'].search(dominio_base)
+                    omitidos = 0
+
+                if not variantes_a_sincronizar:
+                    self._agregar_log(
+                        f'Todos los productos están sincronizados ({omitidos} sin cambios desde '
+                        f'{ultima_sync}). Nada que procesar.',
+                        'product.product', 'info'
+                    )
+                    self._actualizar_estado('completado')
+                    return True
+
+                self._agregar_log(
+                    f'Sincronización incremental: {len(variantes_a_sincronizar)} modificados '
+                    f'| {omitidos} sin cambios (omitidos) '
+                    f'| referencia: {ultima_sync or "primera ejecución"}.',
+                    'product.product', 'info'
+                )
+
+                resultado = datosAPI.insertarProductosMasivo(variantes_a_sincronizar)
+
+                if resultado['errores'] == 0:
+                    datosAPI.write({'ultima_sync_productos': inicio_sync})
+                else:
+                    self._agregar_log(
+                        f'ultima_sync_productos NO actualizada porque hubo {resultado["errores"]} errores. '
+                        f'Los productos fallidos serán reintentados en la próxima ejecución.',
+                        'product.product', 'warning'
+                    )
+
+                self.env['logs.conciliacion'].create([{
+                    'conciliacion_id': self.id,
+                    'texto': (
+                        f"Conciliación Odoo→WIS completada. "
+                        f"Enviados a WIS: {resultado['enviados']} | "
+                        f"Omitidos (sin modificar): {omitidos} | "
+                        f"Errores: {resultado['errores']}"
+                    ),
+                    'modelo': 'product.product',
+                    'nivel': 'warning' if resultado['errores'] > 0 else 'info',
+                    'fecha': get_uruguay_datetime(),
+                }])
+
+                self._completar_conciliacion('productos')
                 return True
 
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
-            if not datosAPI or not datosAPI.apiLink:
-                error_msg = "No se encuentran todos los datos para una consulta a la API"
-                self._error_conciliacion('productos', error_msg)
-                raise ValidationError(error_msg)
-
-            productos_procesados = 0
-            productos_con_error = 0
-            for producto in productos:
-                variantes = producto.product_variant_ids.filtered(lambda v: v.active and v.codigo_unico)
-
-                if variantes:
-                    try:
-                        datosAPI.consultarProductos(variantes, self.id)
-                        productos_procesados += len(variantes)
-                        self._agregar_log(f'Procesadas {len(variantes)} variantes del producto {producto.name}', 'product.product', 'info')
-                    except Exception as e:
-                        productos_con_error += len(variantes)
-                        self._agregar_error_parcial(f'Error procesando variantes del producto {producto.name}', 'product.product', e)
-
-            if productos_con_error > 0:
-                self._agregar_log(f'Resumen: {productos_procesados} variantes procesadas exitosamente, {productos_con_error} con errores', 'product.product', 'warning')
-            else:
-                self._agregar_log(f'Total de variantes procesadas exitosamente: {productos_procesados}', 'product.product', 'info')
-            self._completar_conciliacion('productos')
-            return True
-
         except Exception as e:
+            # El savepoint fue revertido, la transacción principal sigue válida.
             self._error_conciliacion('productos', str(e))
             raise

@@ -60,6 +60,8 @@ class ResPartner(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         records = super(ResPartner, self).create(vals_list)
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return records
         for partner in records:
             if partner.integracion_wms:
                 partner.enviarWS()
@@ -68,7 +70,8 @@ class ResPartner(models.Model):
     def write(self, vals):
         res = super(ResPartner, self).write(vals)
 
-        if not self.env.context.get('skip_wis_sync'):
+        if (not self.env.context.get('skip_wis_sync') and
+                self.env['integracion_wis.integracion_wis']._comunicacion_habilitada()):
             hay_cambios_relevantes = bool(self.CAMPOS_WIS & set(vals.keys()))
             if hay_cambios_relevantes:
                 for partner in self:
@@ -77,7 +80,38 @@ class ResPartner(models.Model):
 
         return res
 
+    def _aplicar_sync_desde_wis(self, wis, tipo):
+        """Compara datos de WIS con Odoo y aplica los cambios en Odoo si difieren.
+        Retorna texto descriptivo de los cambios aplicados (o None si no hubo cambios).
+        """
+        cambios = {}
+        detalle = []
+
+        desc_wis = (wis.get('descripcion') or '').strip()
+        if desc_wis and desc_wis != (self.name or '').strip():
+            cambios['name'] = desc_wis
+            detalle.append(f"name: '{self.name}' → '{desc_wis}'")
+
+        tel_wis = (wis.get('telefonoPrincipal') or '').strip()
+        if tel_wis and tel_wis != (self.phone or '').strip():
+            cambios['phone'] = tel_wis
+            detalle.append(f"phone: '{self.phone}' → '{tel_wis}'")
+
+        dir_wis = (wis.get('direccion') or '').strip()
+        if dir_wis and dir_wis != (self.street or '').strip():
+            cambios['street'] = dir_wis
+            detalle.append(f"street: '{self.street}' → '{dir_wis}'")
+
+        if cambios:
+            self.with_context(skip_wis_sync=True).write(cambios)
+            resumen = f"[{tipo}] Sincronizado desde WIS: {', '.join(detalle)}"
+            self.message_post(body=resumen)
+            return resumen
+        return None
+
     def enviarWS(self):
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
 
         if self.customer_rank == 0 and self.supplier_rank == 0:
             raise ValidationError("El agente no es ni cliente ni proveedor, no se puede integrar con WIS")
@@ -89,34 +123,34 @@ class ResPartner(models.Model):
         if not datosAPI or not datosAPI.apiLink:
             raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
-        self.env['logs.res.partner'].create({
-            'partner_id': self.id,
-            'fecha': fields.Datetime.now(),
-            'texto': 'Se envió la información a WIS',
-        })
-
         update_vals = {}
 
+        # --- Rol CLI ---
         if self.customer_rank > 0:
             response_cli = datosAPI.insertarClienteOrSupplier(self, 'CLI')
             _logger.info("RESPONSE CLI => %s", response_cli)
             if response_cli and isinstance(response_cli, dict):
-                update_vals['codigo_unico_cliente'] = response_cli.get('codigoUnico', '')
+                codigo_cli = response_cli.get('codigoUnico', '')
+                if codigo_cli and not self.codigo_unico_cliente:
+                    update_vals['codigo_unico_cliente'] = codigo_cli
                 self.env['logs.res.partner'].create({
                     'partner_id': self.id,
                     'fecha': fields.Datetime.now(),
-                    'texto': f"Agente CLI integrado. Código Único: '{response_cli.get('codigoUnico', '')}'",
+                    'texto': f"[CLI] Datos de Odoo enviados a WIS. Código Único: '{self.codigo_unico_cliente or codigo_cli}'",
                 })
 
+        # --- Rol PRO ---
         if self.supplier_rank > 0:
             response_pro = datosAPI.insertarClienteOrSupplier(self, 'PRO')
             _logger.info("RESPONSE PRO => %s", response_pro)
             if response_pro and isinstance(response_pro, dict):
-                update_vals['codigo_unico_proveedor'] = response_pro.get('codigoUnico', '')
+                codigo_pro = response_pro.get('codigoUnico', '')
+                if codigo_pro and not self.codigo_unico_proveedor:
+                    update_vals['codigo_unico_proveedor'] = codigo_pro
                 self.env['logs.res.partner'].create({
                     'partner_id': self.id,
                     'fecha': fields.Datetime.now(),
-                    'texto': f"Agente PRO integrado. Código Único: '{response_pro.get('codigoUnico', '')}'",
+                    'texto': f"[PRO] Datos de Odoo enviados a WIS. Código Único: '{self.codigo_unico_proveedor or codigo_pro}'",
                 })
 
         if update_vals:

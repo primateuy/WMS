@@ -19,10 +19,18 @@
                             <field name="codigo_unico_proveedor" readonly="True"
                                 invisible="supplier_rank == 0"/>
                         </group>
-                        <button name="enviarWS" 
-                            string="Enviar a WIS" 
-                            type="object" 
-                            class="btn-primary" invisible="not integracion_wms"/>
+                        <!-- Sin ningún código WIS: primera vez, se envía desde Odoo -->
+                        <button name="enviarWS"
+                            string="Enviar a WIS"
+                            type="object"
+                            class="btn-primary"
+                            invisible="not integracion_wms or codigo_unico_cliente or codigo_unico_proveedor"/>
+                        <!-- Ya tiene al menos un código WIS: sincronizar desde WIS -->
+                        <button name="enviarWS"
+                            string="Sincronizar desde WIS"
+                            type="object"
+                            class="btn-primary"
+                            invisible="not integracion_wms or (not codigo_unico_cliente and not codigo_unico_proveedor)"/>
                         
                         <group invisible="not integracion_wms">
 

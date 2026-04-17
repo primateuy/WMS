@@ -40,6 +40,13 @@
                             </group>
                         </group>
 
+                        <group string="Configuración de envío">
+                            <group>
+                                <field name="wms_nro_caja"
+                                       help="Solo para pedidos FINT. Si se completa, el WMS preparará esa caja específica (LPN tipo FINTEMP)."/>
+                            </group>
+                        </group>
+
                         <group string="Preparación"
                                >
                             <group>
