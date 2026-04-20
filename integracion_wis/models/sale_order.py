@@ -20,7 +20,8 @@ class SaleOrder(models.Model):
                     
                     datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
 
-                    if datosAPI and datosAPI.apiLink and picking.state == picking.picking_type_id.estado_disparo_wis:
+                    if (datosAPI and datosAPI.apiLink and datosAPI.comunicacion_activa and
+                            picking.state == picking.picking_type_id.estado_disparo_wis):
                         response = datosAPI.insertarReferenciaRecepcion(picking)
                         
                         if response and isinstance(response, dict):

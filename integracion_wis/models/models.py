@@ -70,9 +70,29 @@ class IntegracionWIS(models.Model):
 
     ubicacionReponerStock = fields.Many2one('stock.location', string='Ubicación para Reponer Stock', domain=[('usage', '=', 'internal')])
 
+    ultima_sync_productos = fields.Datetime(
+        string='Última sincronización de productos',
+        readonly=True,
+        help='Fecha de la última conciliación masiva de productos completada exitosamente. '
+             'Solo se sincronizan productos cuyo write_date sea posterior a este valor.',
+    )
+
+    comunicacion_activa = fields.Boolean(
+        string='Comunicación con WIS habilitada',
+        default=True,
+        help='Si está deshabilitada, Odoo se comporta con su lógica por defecto sin enviar '
+             'ninguna comunicación al WMS. Los crons, triggers automáticos y botones '
+             'manuales de integración quedan inactivos.',
+    )
+
     _sql_constraints = [
         ('company_unique', 'unique(company_id)', '¡Solo puede existir una configuración por compañía!'),
     ]
+
+    @api.model
+    def _comunicacion_habilitada(self):
+        config = self.search([], limit=1)
+        return bool(config and config.comunicacion_activa)
 
     def _get_clean_api_url(self):
         self.ensure_one()
@@ -133,7 +153,7 @@ class IntegracionWIS(models.Model):
         api_url = self._get_clean_api_url()
 
         try:
-            req = requests.request(url=api_url + link, method=method, json=body, headers=headers, params=params)
+            req = requests.request(url=api_url + link, method=method, json=body, headers=headers, params=params, timeout=30)
             _logger.info(f"REQ: {req.text}")
             _logger.info(f"JSON ES BODY => {body}")
             if req.status_code != 200:
@@ -187,6 +207,137 @@ class IntegracionWIS(models.Model):
         return True;
 
 
+    def _build_producto_payload(self, vals):
+        """Construye el dict de un producto para /Producto/CreateOrUpdate.
+
+        manejoIdentificador y tipoManejoFecha son campos de creación:
+        WIS no permite modificarlos si el producto ya tiene movimientos.
+        Solo se incluyen cuando el producto todavía no tiene codigo_unico
+        (primera sincronización).
+        """
+        nombre = vals.name[:65] if len(vals.name) > 65 else vals.name
+        payload = {
+            "codigoProducto": vals.codigo_unico,
+            "codigo":         vals.codigo_unico,
+            "descripcion":    nombre,
+            "familia":        1,
+            "unidadMedida":   "L",
+            "clase":          1,
+            "ramo":           1,
+            "pesoNeto":       vals.weight,
+            "precioVenta":    vals.list_price,
+            "categoria1":     vals.categ_id.name if vals.categ_id else "",
+            "unidadBulto":    1,
+            "activo":         vals.active,
+        }
+        # Solo en la creación inicial (producto nuevo en WIS)
+        if not vals.codigo_unico:
+            tracking = vals.tracking
+            payload["tipoManejoFecha"]    = 'F' if tracking in ('lot', 'serial') else 'D'
+            payload["manejoIdentificador"] = 'L' if tracking in ('lot', 'serial') else 'P'
+        return payload
+
+    def _enviar_chunk_productos(self, chunk, lote_label):
+        """Envía un chunk de productos. Si falla el batch, reintenta uno por uno
+        para que un producto con error no bloquee al resto del lote."""
+        payload = {
+            "empresa":      self.empresa_id,
+            "dsReferencia": f"Sincronización masiva desde Odoo - {lote_label}",
+            "productos":    chunk,
+        }
+        try:
+            self.consultarAPI(link="/Producto/CreateOrUpdate", body=payload,
+                              params=None, method="POST")
+            return len(chunk), 0, []
+        except Exception as batch_err:
+            _logger.warning(
+                "[WIS] %s | batch falló (%s), reintentando uno por uno...",
+                lote_label, str(batch_err)
+            )
+
+        # Fallback: reintento individual para aislar el producto problemático
+        enviados, errores, errores_detalle = 0, 0, []
+        for item in chunk:
+            single_payload = {
+                "empresa":      self.empresa_id,
+                "dsReferencia": f"Reintento individual - {item.get('codigo', '?')}",
+                "productos":    [item],
+            }
+            try:
+                self.consultarAPI(link="/Producto/CreateOrUpdate", body=single_payload,
+                                  params=None, method="POST")
+                enviados += 1
+            except Exception as item_err:
+                err_str = str(item_err)
+                # WIS no permite modificar manejoIdentificador en productos con
+                # movimientos, aunque no lo enviemos (aplica un default y compara).
+                # Este caso NO es un error real: el producto ya existe en WIS
+                # con el valor correcto — simplemente se omite.
+                if 'ManejoIdentificador' in err_str and 'No se permite modificar' in err_str:
+                    enviados += 1
+                    _logger.warning(
+                        "[WIS] reintento individual OMITIDO (manejoIdentificador bloqueado) "
+                        "| codigo=%s — producto ya sincronizado en WIS",
+                        item.get('codigo', '?')
+                    )
+                else:
+                    errores += 1
+                    errores_detalle.append(
+                        f"{item.get('codigo', '?')}: {err_str}"
+                    )
+                    _logger.error("[WIS] reintento individual ERROR | codigo=%s | %s",
+                                  item.get('codigo', '?'), err_str)
+        return enviados, errores, errores_detalle
+
+    def insertarProductosMasivo(self, variantes, chunk_size=200):
+        """Envía todos los productos en lotes a /Producto/CreateOrUpdate.
+
+        En lugar de 1 llamada HTTP por producto, agrupa hasta chunk_size
+        productos por request. Para 1400 productos con chunk_size=200
+        se realizan 7 llamadas en lugar de 1400.
+
+        Si un chunk falla (ej. un producto con manejoIdentificador bloqueado),
+        reintenta cada producto individualmente para no perder los demás.
+
+        Returns dict con 'enviados', 'errores' y 'errores_detalle'.
+        """
+        variantes_list = list(variantes)
+        total = len(variantes_list)
+        enviados = 0
+        errores = 0
+        todos_errores_detalle = []
+        total_chunks = -(-total // chunk_size)  # ceil division
+
+        _logger.info("[WIS] insertarProductosMasivo | total=%d | chunk_size=%d | chunks=%d",
+                     total, chunk_size, total_chunks)
+
+        for chunk_idx in range(0, total, chunk_size):
+            chunk_vars = variantes_list[chunk_idx:chunk_idx + chunk_size]
+            lote_num = chunk_idx // chunk_size + 1
+            lote_label = f"lote {lote_num}/{total_chunks}"
+
+            productos_payload = [
+                self._build_producto_payload(v)
+                for v in chunk_vars
+                if v.codigo_unico
+            ]
+
+            if not productos_payload:
+                continue
+
+            ok, err, err_detalle = self._enviar_chunk_productos(productos_payload, lote_label)
+            enviados += ok
+            errores  += err
+            todos_errores_detalle.extend(err_detalle)
+
+            _logger.info("[WIS] insertarProductosMasivo | %s | ok=%d err=%d | acumulado=%d",
+                         lote_label, ok, err, enviados)
+
+        _logger.info("[WIS] insertarProductosMasivo | FINALIZADO | enviados=%d | errores=%d",
+                     enviados, errores)
+        return {'enviados': enviados, 'errores': errores,
+                'errores_detalle': todos_errores_detalle}
+
     def insertarProducto(self, vals):
         
 
@@ -229,6 +380,8 @@ class IntegracionWIS(models.Model):
                 "activo": vals.active
 
             }]
+
+        
 
         _logger.info("Payload del producto a enviar => {}".format(productos));
         
@@ -575,19 +728,29 @@ class IntegracionWIS(models.Model):
         direccion = vals.location_dest_id.name;
 
 
-        tipo_agente = vals.picking_type_id.tipo_agente_wis or 'CLI'
-        codigo_agente = vals.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else vals.partner_id.codigo_unico_proveedor
+        codigo_agente = vals.partner_id.codigo_unico_cliente
 
-        pedidos = [{
-            "tipoExpedicion": "WSF",
-            "nroPedido": vals.codigo_unico if vals.codigo_unico else f"P{hash_short}",
+        nro_pedido = vals.codigo_unico if vals.codigo_unico else f"P{hash_short}"
+
+        pedido = {
+            "tipoExpedicion": "WSF" if tipo == 'NORM' else "WIS",
+            "nroPedido": nro_pedido,
+            "comparteContenedorEntrega": vals.name,
             "codigoAgente": codigo_agente,
-            "tipoAgente": tipo_agente,
+            "tipoAgente": "CLI",
             "fechaEntrega": vals.scheduled_date.isoformat(),
             "tipoPedido": tipo,
             "direccion": direccion,
-            "detalles": detalles
-        }]
+            "detalles": detalles,
+        }
+
+        if tipo == 'FINT' and vals.wms_nro_caja:
+            pedido["lpns"] = [{
+                "idExterno": vals.wms_nro_caja,
+                "tipo": "FINTEMP",
+            }]
+
+        pedidos = [pedido]
 
 
 
@@ -607,7 +770,7 @@ class IntegracionWIS(models.Model):
             method="POST"
         )
 
-        response['codigoUnico'] = vals.codigo_unico if vals.codigo_unico else f"P{hash_short}";
+        response['codigoUnico'] = nro_pedido
         
 
         _logger.info(f"RESPONSE => {response}")
@@ -672,18 +835,41 @@ class IntegracionWIS(models.Model):
             })
             return False
 
+        # Fecha de vencimiento por defecto: scheduled_date del picking o hoy + 1 año.
+        # WIS exige fechaVencimiento para productos con tipoManejoFecha='F'.
+        # Se envía siempre para evitar el error aunque el tracking en Odoo no coincida
+        # con lo que fue registrado en WIS.
+        if picking.scheduled_date:
+            fecha_venc_default = picking.scheduled_date.date().isoformat()
+        else:
+            fecha_venc_default = (datetime.datetime.now() + datetime.timedelta(days=365)).date().isoformat()
+
         detalles = []
+        colocarFecha = False;
         for move in moves:
             codigo_producto = move.product_id.codigo_unico or ''
 
             if not codigo_producto:
                 raise ValidationError(f"No se encontró código único WIS en el producto: {move.product_id.name}. Por favor, asegúrese de que el producto esté sincronizado con WIS antes de enviar el movimiento.")
 
+            # Buscar fecha de vencimiento real en líneas de movimiento (lotes)
+            fecha_venc = None
+            for ml in move.move_line_ids:
+                if hasattr(ml, 'expiration_date') and ml.expiration_date:
+                    fecha_venc = ml.expiration_date.date().isoformat()
+                    break
+                if hasattr(ml, 'lot_id') and ml.lot_id and hasattr(ml.lot_id, 'expiration_date') and ml.lot_id.expiration_date:
+                    fecha_venc = ml.lot_id.expiration_date.date().isoformat()
+                    break
+
             detalles.append({
                 'idLineaSistemaExterno': f"odoo__stock.move__{move.id}",
                 'codigoProducto': codigo_producto,
-                'cantidadReferencia': move.product_uom_qty
+                'cantidadReferencia': move.product_uom_qty,
+                'fechaVencimiento': fecha_venc or fecha_venc_default,
             })
+
+            colocarFecha = True if fecha_venc else False;
 
         numeroRandom = random.randint(100000, 999999)
         tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
@@ -695,6 +881,7 @@ class IntegracionWIS(models.Model):
             'referencias': [{
                 'referencia': 'REC-' + str(numeroRandom),
                 'tipoReferencia': 'OC',
+                'fechaVencimientoOrden': self.date_order if colocarFecha else None,
                 'codigoAgente': codigo_agente,
                 'tipoAgente': tipo_agente,
                 'predio': '1',
@@ -754,52 +941,7 @@ class IntegracionWIS(models.Model):
         _logger.info("ESTO ES SOLO UNA PRUEBA");
         return True; 
     
-    def insertarOrdenDeCompra(self, vals):
-        detalles = [];
-
-        _logger.info(f"VALS => {vals}");
-        _logger.info(f"SELF => {self}");
-        _logger.info(f"VALS DICT => {vals.order_line}");
-
-
-        for line in vals.order_line:
-            _logger.info("ENTRA ACA");
-            codigo_producto = line.product_id.codigo_unico or ''
-            
-            detalles.append({
-                'idLineaSistemaExterno': f"odoo__purchase.order.line__{line.id}", 
-                'codigoProducto': codigo_producto,
-                'cantidadReferencia': line.product_qty
-            })
-
-
-        _logger.info(f"DATOS EN DETALLES => {detalles}");
-
-        numeroRandom = random.randint(100000, 999999);
-
-        payload = {
-            'empresa': self.empresa_id,
-            'dsReferencia': "CREACION DE ORDEN DE COMPRA DESDE ODOO", 
-            'referencias': [{
-                'referencia': numeroRandom,
-                'tipoReferencia': 'OC',
-                'codigoAgente': vals.partner_id.codigo_unico_proveedor,
-                'tipoAgente': 'PRO',
-                'predio': "1",
-                'detalles': detalles
-            }]
-        }
-
-        response = self.consultarAPI(
-            link="/ReferenciaRecepcion/Create",
-            body=payload,
-            params=None,
-            method="POST"
-        )
-
-        response['referencia'] = numeroRandom;
-
-        return response
+    
     
     def editarReferencia(self, vals):
         detalles = [];
@@ -884,6 +1026,193 @@ class IntegracionWIS(models.Model):
                 resultado[var.id] = None
         return resultado
 
+    def sincronizarClientesDesdeWIS(self, clientes, conciliacion_id=None):
+        """Consulta cada cliente en WIS y, si los datos difieren, actualiza Odoo.
+
+        WIS es la fuente de verdad. Campos sincronizados WIS → Odoo:
+          descripcion → name
+          telefonoPrincipal → phone
+          direccion → street
+
+        Returns dict con 'actualizados', 'sin_cambios', 'errores', 'errores_detalle'.
+        """
+        actualizados = 0
+        sin_cambios  = 0
+        errores      = 0
+        errores_detalle = []
+
+        for cliente in clientes:
+            if not cliente.codigo_unico:
+                continue
+            try:
+                wis = self.getCliente(cliente.codigo_unico)
+
+                cambios = {}
+                detalle_diffs = []
+
+                # descripcion → name
+                desc_wis = (wis.get('descripcion') or '').strip()
+                if desc_wis and desc_wis != (cliente.name or '').strip():
+                    cambios['name'] = desc_wis
+                    detalle_diffs.append(f"name: Odoo='{cliente.name}' → WIS='{desc_wis}'")
+
+                # telefonoPrincipal → phone
+                tel_wis = (wis.get('telefonoPrincipal') or '').strip()
+                if tel_wis and tel_wis != (cliente.phone or '').strip():
+                    cambios['phone'] = tel_wis
+                    detalle_diffs.append(f"phone: Odoo='{cliente.phone}' → WIS='{tel_wis}'")
+
+                # direccion → street (primer segmento de la dirección)
+                dir_wis = (wis.get('direccion') or '').strip()
+                if dir_wis and dir_wis != (cliente.street or '').strip():
+                    cambios['street'] = dir_wis
+                    detalle_diffs.append(f"street: Odoo='{cliente.street}' → WIS='{dir_wis}'")
+
+                if cambios:
+                    cliente.with_context(no_reindex=True, skip_wis_sync=True).write(cambios)
+                    cliente.message_post(
+                        body=f"Cliente actualizado desde WIS. Cambios: {', '.join(detalle_diffs)}"
+                    )
+                    actualizados += 1
+                    _logger.info("[WIS] sincronizarClientesDesdeWIS | %s actualizado | %s",
+                                 cliente.name, ', '.join(detalle_diffs))
+                    if conciliacion_id:
+                        self.env['logs.conciliacion'].create({
+                            'conciliacion_id': conciliacion_id,
+                            'texto': f"{cliente.name} actualizado en Odoo desde WIS: {', '.join(detalle_diffs)}",
+                            'modelo': 'res.partner',
+                            'nivel': 'info',
+                            'fecha': fields.Datetime.now(),
+                        })
+                else:
+                    sin_cambios += 1
+
+            except Exception as e:
+                errores += 1
+                errores_detalle.append(f"{cliente.name}: {str(e)}")
+                _logger.error("[WIS] sincronizarClientesDesdeWIS | error en %s: %s",
+                              cliente.name, str(e))
+                if conciliacion_id:
+                    self.env['logs.conciliacion'].create({
+                        'conciliacion_id': conciliacion_id,
+                        'texto': f"Error al sincronizar cliente {cliente.name} desde WIS: {str(e)}",
+                        'modelo': 'res.partner',
+                        'nivel': 'error',
+                        'fecha': fields.Datetime.now(),
+                    })
+
+        _logger.info(
+            "[WIS] sincronizarClientesDesdeWIS | FINALIZADO | actualizados=%d | sin_cambios=%d | errores=%d",
+            actualizados, sin_cambios, errores
+        )
+        return {
+            'actualizados':    actualizados,
+            'sin_cambios':     sin_cambios,
+            'errores':         errores,
+            'errores_detalle': errores_detalle,
+        }
+
+    def sincronizarProductosDesdeWIS(self, variantes, conciliacion_id=None):
+        """Consulta cada producto en WIS y, si los datos difieren, actualiza Odoo.
+
+        WIS es la fuente de verdad. Odoo se actualiza para reflejar lo que WIS tiene.
+
+        Returns dict con 'actualizados', 'sin_cambios', 'errores', 'errores_detalle'.
+        """
+        actualizados = 0
+        sin_cambios = 0
+        errores = 0
+        errores_detalle = []
+
+        # Campos que se sincronizan WIS → Odoo
+        # clave WIS : (campo Odoo, función de conversión opcional)
+        CAMPOS_SYNC = {
+            'descripcion': 'name',
+            'pesoNeto':    'weight',
+            'precioVenta': 'list_price',
+            'activo':      'active',
+        }
+
+        for variant in variantes:
+            if not variant.codigo_unico:
+                continue
+            try:
+                wis = self.getProducto(variant.codigo_unico)
+
+                cambios = {}
+                detalle_diffs = []
+
+                for campo_wis, campo_odoo in CAMPOS_SYNC.items():
+                    val_wis  = wis.get(campo_wis)
+                    val_odoo = getattr(variant, campo_odoo)
+
+                    # Normalizar nombre: WIS puede devolverlo en mayúsculas
+                    if campo_wis == 'descripcion' and val_wis:
+                        val_wis = val_wis.strip()
+
+                    if val_wis is not None and val_wis != val_odoo:
+                        cambios[campo_odoo] = val_wis
+                        detalle_diffs.append(
+                            f"{campo_wis}: Odoo='{val_odoo}' → WIS='{val_wis}'"
+                        )
+
+                # Categoría: buscar por nombre en Odoo
+                cat_wis = wis.get('categoria1', '').strip() if wis.get('categoria1') else ''
+                if cat_wis and variant.categ_id.name != cat_wis:
+                    categoria = self.env['product.category'].search(
+                        [('name', '=', cat_wis)], limit=1
+                    )
+                    if categoria:
+                        cambios['categ_id'] = categoria.id
+                        detalle_diffs.append(
+                            f"categoria1: Odoo='{variant.categ_id.name}' → WIS='{cat_wis}'"
+                        )
+
+                if cambios:
+                    variant.with_context(_avoid_wms=True).write(cambios)
+                    variant.message_post(
+                        body=f"Producto actualizado desde WIS. Cambios: {', '.join(detalle_diffs)}"
+                    )
+                    actualizados += 1
+                    _logger.info("[WIS] sincronizarDesdeWIS | %s actualizado | %s",
+                                 variant.display_name, ', '.join(detalle_diffs))
+
+                    if conciliacion_id:
+                        self.env['logs.conciliacion'].create({
+                            'conciliacion_id': conciliacion_id,
+                            'texto': f"{variant.name} actualizado en Odoo desde WIS: {', '.join(detalle_diffs)}",
+                            'modelo': 'product.product',
+                            'nivel': 'info',
+                            'fecha': fields.Datetime.now(),
+                        })
+                else:
+                    sin_cambios += 1
+
+            except Exception as e:
+                errores += 1
+                errores_detalle.append(f"{variant.display_name}: {str(e)}")
+                _logger.error("[WIS] sincronizarDesdeWIS | error en %s: %s",
+                              variant.display_name, str(e))
+                if conciliacion_id:
+                    self.env['logs.conciliacion'].create({
+                        'conciliacion_id': conciliacion_id,
+                        'texto': f"Error al sincronizar {variant.name} desde WIS: {str(e)}",
+                        'modelo': 'product.product',
+                        'nivel': 'error',
+                        'fecha': fields.Datetime.now(),
+                    })
+
+        _logger.info(
+            "[WIS] sincronizarDesdeWIS | FINALIZADO | actualizados=%d | sin_cambios=%d | errores=%d",
+            actualizados, sin_cambios, errores
+        )
+        return {
+            'actualizados': actualizados,
+            'sin_cambios':  sin_cambios,
+            'errores':      errores,
+            'errores_detalle': errores_detalle,
+        }
+
     def getProducto(self, codigo):
         payload = {
             "empresa": self.empresa_id,
@@ -913,7 +1242,21 @@ class IntegracionWIS(models.Model):
             body="None"
         )
 
-        return response;
+        return response
+
+    def getAgente(self, codigo, tipo):
+        """Consulta un agente en WIS por código y tipo ('CLI' o 'PRO')."""
+        payload = {
+            "empresa": self.empresa_id,
+            "codigo": codigo,
+            "tipo": tipo,
+        }
+        return self.consultarAPI(
+            link="/Agente/GetAgente",
+            params=payload,
+            method="GET",
+            body=None,
+        )
 
     def conciliarClientes(self, clientes, conciliacion_id=None):
         cantidad = 0;
@@ -966,11 +1309,8 @@ class IntegracionWIS(models.Model):
 
                 except Exception as e:
                     _logger.info("No se encontró el cliente en WIS, se intentará crear uno nuevo. Error: %s", str(e))
-
-
-
-                    self.insertarClienteOrSupplier(vals);
-
+                    self.insertarClienteOrSupplier(vals, 'CLI');
+                    continue
 
                 if response.get('codigoAgente') != f"CLI-{vat_clean}" or response.get('descripcion') != name_clean or response.get('direccion') != punto_entrega or response.get('telefonoPrincipal') != phone_clean:
                     if conciliacion_id:
@@ -1008,7 +1348,7 @@ class IntegracionWIS(models.Model):
                         
 
 
-                    response = self.insertarClienteOrSupplier(vals);
+                    response = self.insertarClienteOrSupplier(vals, 'CLI');
 
                     if conciliacion_id:
                         self.env['logs.conciliacion'].create({
@@ -1100,18 +1440,36 @@ class IntegracionWIS(models.Model):
                             'conciliacion_id': conciliacion_id
                         })
 
-                    resAPI = self.insertarProducto(vals)
+                    try:
+                        resAPI = self.insertarProducto(vals)
 
-                    if conciliacion_id:
-                        self.env['logs.conciliacion'].create({
-                            'texto': f"Producto {vals.name} actualizado en WIS. Respuesta: {resAPI}",
-                            'modelo': 'product.product',
-                            'fecha': fields.Datetime.now(),
-                            'conciliacion_id': conciliacion_id
-                        })
+                        if conciliacion_id:
+                            self.env['logs.conciliacion'].create({
+                                'texto': f"Producto {vals.name} actualizado en WIS. Respuesta: {resAPI}",
+                                'modelo': 'product.product',
+                                'fecha': fields.Datetime.now(),
+                                'conciliacion_id': conciliacion_id
+                            })
 
-                    vals.message_post(body=f"Producto actualizado en WIS. Cambios: {detalle_diffs}")
-                    cantidad += 1
+                        vals.message_post(body=f"Producto actualizado en WIS. Cambios: {detalle_diffs}")
+                        cantidad += 1
+
+                    except Exception as update_err:
+                        err_str = str(update_err)
+                        if 'ManejoIdentificador' in err_str and 'No se permite modificar' in err_str:
+                            # El producto ya existe en WIS con tracking asignado.
+                            # Este campo no se puede cambiar una vez que hay movimientos.
+                            # Se omite sin contar como error.
+                            if conciliacion_id:
+                                self.env['logs.conciliacion'].create({
+                                    'texto': f"Producto {vals.name} omitido: manejoIdentificador bloqueado en WIS (producto en uso). Sin impacto.",
+                                    'modelo': 'product.product',
+                                    'nivel': 'warning',
+                                    'fecha': fields.Datetime.now(),
+                                    'conciliacion_id': conciliacion_id
+                                })
+                        else:
+                            raise
 
                 else:
                     if conciliacion_id:

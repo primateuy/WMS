@@ -41,7 +41,10 @@ class ConciliacionStock(models.Model):
     
     @api.model
     def cron_conciliacionStock(self):
-        
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            _logger.info("[WIS] Cron conciliación stock omitido: comunicación deshabilitada.")
+            return
+
         self.env['conciliacion.stock'].create({
             'name': 'Conciliación Automática - ' + fields.Datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'diferenciaMinima': self.env['integracion_wis.integracion_wis'].search([], limit=1).diferenciaMinima,

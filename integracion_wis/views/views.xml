@@ -33,16 +33,31 @@
       <field name="model">integracion_wis.integracion_wis</field>
       <field name="arch" type="xml">
         <form>
+          <div class="alert alert-warning mb-0" role="alert"
+               invisible="comunicacion_activa">
+            <strong>Comunicación con WIS deshabilitada.</strong>
+            Odoo funciona con su comportamiento por defecto. Ningún dato se envía al WMS.
+          </div>
+          <div class="alert alert-success mb-0" role="alert"
+               invisible="not comunicacion_activa">
+            <strong>Comunicación con WIS habilitada.</strong>
+            Los triggers automáticos y crons de integración están activos.
+          </div>
+          <group>
+            <field name="comunicacion_activa" widget="boolean_toggle"
+                   string="Comunicación con WIS habilitada"/>
+          </group>
           <group>
             <field name="empresa_id"/>
             <field name="client_id"/>
             <field name="client_secret"/>
-            <field name="url_access_token"/> 
+            <field name="url_access_token"/>
             <field name="company_id" readonly="1"/>
             <field name="apiLink"/>
           <field name="ubicacionesAConsultar" string="Ubicaciones a Consultar" widget="many2many_tags"/>
           <field name="ubicacionReponerStock" string="Ubicación para Reponer Stock" widget="many2one"/>
           <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
+          <field name="ultima_sync_productos" readonly="1"/>
           </group>
         </form>
       </field>

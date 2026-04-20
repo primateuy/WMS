@@ -64,6 +64,8 @@ class ProductTemplate(models.Model):
 
     def enviar_variantes_wms(self):
         """Envía todas las variantes del template a WMS"""
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
         for variant in self.product_variant_ids:
             if variant.type == 'product':
                 try:
@@ -89,6 +91,8 @@ class ProductTemplate(models.Model):
         return res
 
     def _procesar_variantes_wms_directo(self, template):
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return
         template = template.with_context(_avoid_wms=True)
         
         if template.product_variant_ids:
@@ -113,7 +117,7 @@ class ProductTemplate(models.Model):
     def write(self, vals):
         res = super(ProductTemplate, self).write(vals)
 
-        if vals.get('integracion_wms'):
+        if vals.get('integracion_wms') and self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             for record in self:
                 if record.type == 'product':
                     record.product_variant_ids.with_context(_avoid_wms=True).write({
@@ -128,7 +132,10 @@ class ProductTemplate(models.Model):
 
     def _create_variant_ids(self):
         res = super(ProductTemplate, self)._create_variant_ids()
-        
+
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return res
+
         for template in self:
             if template.integracion_wms and template.type == 'product':
 
@@ -281,13 +288,15 @@ class Product(models.Model):
             raise
 
     def enviarWS(self):
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
         try:
             datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
             if not datosAPI or not datosAPI.apiLink:
                 raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
             result = datosAPI.insertarProducto(self)
-            
+
             if result and isinstance(result, dict):
                 update_vals = {}
                 if result.get('numeroInterfaz'):
@@ -298,17 +307,17 @@ class Product(models.Model):
                     self.with_context(_avoid_wms=True).write(update_vals)
 
             if self.barcode:
-                self.saveBarcode();
-            
+                self.saveBarcode()
+
             self._agregar_log_wms(
                 operacion='enviar_producto',
                 resultado='success',
                 detalle=f'Producto enviado exitosamente. Códigos: Interface={result.get("numeroInterfaz", "N/A")}, Único={result.get("codigoUnico", "N/A")}',
                 response_data=result
             )
-            
+
             return result
-            
+
         except Exception as e:
             self._agregar_log_wms(
                 operacion='enviar_producto',
@@ -320,8 +329,9 @@ class Product(models.Model):
     @api.model
     def create(self, vals):
         res = super(Product, self).create(vals)
-        if (not self.env.context.get('_avoid_wms') and 
-            res.integracion_wms and 
+        if (not self.env.context.get('_avoid_wms') and
+            self.env['integracion_wis.integracion_wis']._comunicacion_habilitada() and
+            res.integracion_wms and
             res.type == 'product' and
             not res.product_tmpl_id.integracion_wms):
             try:
@@ -349,7 +359,7 @@ class Product(models.Model):
         avoid_recursion = self.env.context.get('_avoid_wms', False)
         res = super(Product, self).write(vals)
 
-        if not avoid_recursion:
+        if not avoid_recursion and self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             hay_cambios_relevantes = bool(self.CAMPOS_WIS & set(vals.keys()))
             if hay_cambios_relevantes:
                 for record in self:
