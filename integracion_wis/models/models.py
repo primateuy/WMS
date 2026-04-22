@@ -728,7 +728,8 @@ class IntegracionWIS(models.Model):
         direccion = vals.location_dest_id.name;
 
 
-        codigo_agente = vals.partner_id.codigo_unico_cliente
+        _partner = vals._get_wis_partner()
+        codigo_agente = _partner.codigo_unico_cliente if _partner else ''
 
         nro_pedido = vals.codigo_unico if vals.codigo_unico else f"P{hash_short}"
 
@@ -793,15 +794,20 @@ class IntegracionWIS(models.Model):
                     'cantidadReferencia': move.product_uom_qty
                 })
 
-            numeroRandom = random.randint(100000, 999999);
+            numeroRandom = random.randint(100000, 999999)
+            _tipo_ag_dev = picking.picking_type_id.tipo_agente_wis or 'CLI'
+            _partner_dev = picking._get_wis_partner()
+            _cod_ag_dev = ''
+            if _partner_dev:
+                _cod_ag_dev = (_partner_dev.codigo_unico_cliente if _tipo_ag_dev == 'CLI' else _partner_dev.codigo_unico_proveedor) or (picking.partner_id.vat if picking.partner_id else '')
             payload = {
                 'empresa': self.empresa_id,
                 'dsReferencia': f"DEVOLUCIÓN DE CLIENTE DESDE ODOO: {picking.name}",
                 'referencias': [{
                     'referencia': 'DEV-' + str(numeroRandom),
                     'tipoReferencia': 'OD',  # Order Delivery Return
-                    'codigoAgente': (picking.partner_id.codigo_unico_cliente if (picking.picking_type_id.tipo_agente_wis or 'CLI') == 'CLI' else picking.partner_id.codigo_unico_proveedor) or picking.partner_id.vat,
-                    'tipoAgente': picking.picking_type_id.tipo_agente_wis or 'CLI',
+                    'codigoAgente': _cod_ag_dev,
+                    'tipoAgente': _tipo_ag_dev,
                     'predio': '1',
                     'fechaEstimada': picking.scheduled_date.isoformat() if picking.scheduled_date else None,
                     'observaciones': f"Devolución desde ubicación: {picking.location_id.name}",
@@ -873,7 +879,8 @@ class IntegracionWIS(models.Model):
 
         numeroRandom = random.randint(100000, 999999)
         tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
-        codigo_agente = picking.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else picking.partner_id.codigo_unico_proveedor
+        _partner_rec = picking._get_wis_partner()
+        codigo_agente = (_partner_rec.codigo_unico_cliente if tipo_agente == 'CLI' else _partner_rec.codigo_unico_proveedor) if _partner_rec else ''
 
         payload = {
             'empresa': self.empresa_id,
@@ -914,7 +921,8 @@ class IntegracionWIS(models.Model):
             })
 
         tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
-        codigo_agente = picking.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else picking.partner_id.codigo_unico_proveedor
+        _partner_act = picking._get_wis_partner()
+        codigo_agente = (_partner_act.codigo_unico_cliente if tipo_agente == 'CLI' else _partner_act.codigo_unico_proveedor) if _partner_act else ''
 
         payload = {
             'empresa': self.empresa_id,

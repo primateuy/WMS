@@ -129,6 +129,14 @@ class StockPicking(models.Model):
         for record in self:
             record.log_count = len(record.log_ids)
 
+    def _get_wis_partner(self):
+        """Partner efectivo para WIS: partner_id del picking, o partner de la compañía del tipo de operación como fallback."""
+        self.ensure_one()
+        if self.partner_id:
+            return self.partner_id
+        company = self.picking_type_id.company_id
+        return company.partner_id if company else False
+
     def needs_crossdocking(self):
         self.ensure_one()
         main_stock_location = self.picking_type_id.warehouse_id.lot_stock_id
@@ -193,24 +201,28 @@ class StockPicking(models.Model):
         if state_objetivo and state_actual not in estados_aceptados:
             return False
 
+        partner = self._get_wis_partner()
+        if not partner:
+            raise ValidationError("No se ha asignado un partner y la compañía del tipo de operación no tiene partner configurado")
         if not self.partner_id:
-            raise ValidationError("No se ha asignado un partner")
+            _logger.info("[WIS] enviarWS | sin partner_id, usando partner de compañía como fallback: %s (id=%s)", partner.name, partner.id)
 
         tipo_agente = self.picking_type_id.tipo_agente_wis or 'CLI'
-        codigo_agente = self.partner_id.codigo_unico_cliente if tipo_agente == 'CLI' else self.partner_id.codigo_unico_proveedor
+        codigo_agente = partner.codigo_unico_cliente if tipo_agente == 'CLI' else partner.codigo_unico_proveedor
 
         _logger.info(
             "[WIS] enviarWS | tipo_agente_wis config=%s | tipo_agente resuelto=%s | "
             "codigo_unico_cliente='%s' | codigo_unico_proveedor='%s' | codigo_agente resuelto='%s'",
             self.picking_type_id.tipo_agente_wis,
             tipo_agente,
-            self.partner_id.codigo_unico_cliente,
-            self.partner_id.codigo_unico_proveedor,
+            partner.codigo_unico_cliente,
+            partner.codigo_unico_proveedor,
             codigo_agente,
         )
 
         if not codigo_agente:
-            raise ValidationError(f"El partner no tiene Identificación WIS {'Cliente' if tipo_agente == 'CLI' else 'Proveedor'}. Sincronicelo primero desde el contacto.")
+            fallback_info = f" (compañía fallback: {partner.name})" if not self.partner_id else ""
+            raise ValidationError(f"El partner{fallback_info} no tiene Identificación WIS {'Cliente' if tipo_agente == 'CLI' else 'Proveedor'}. Sincronicelo primero desde el contacto.")
 
         datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
         if not datosAPI or not datosAPI.apiLink:
@@ -301,15 +313,16 @@ class StockPicking(models.Model):
                 continue
             if not record.move_ids:
                 continue
-            if not record.partner_id:
-                continue
             if record.wms_estado != 'sin_enviar':
                 continue
             estado_obj = record.picking_type_id.estado_disparo_wis or ''
             estados_aceptados = {estado_obj}
             if estado_obj == 'waiting':
                 estados_aceptados.add('confirmed')
-            if estado_obj and record.state not in estados_aceptados:
+            # Requiere estado_obj configurado Y que el estado actual coincida.
+            # Si estado_obj no está configurado, el disparo es en 'done' (manejado por _action_done).
+            # Esto evita enviar pickings en 'draft' que todavía no están completamente formados.
+            if not estado_obj or record.state not in estados_aceptados:
                 continue
             tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
             try:
@@ -346,8 +359,6 @@ class StockPicking(models.Model):
             if not record.picking_type_id.integracion_wms:
                 continue
             if not record.move_ids:
-                continue
-            if not record.partner_id:
                 continue
             if record.wms_estado != 'sin_enviar':
                 continue
@@ -402,8 +413,6 @@ class StockPicking(models.Model):
             if not record.picking_type_id.integracion_wms:
                 continue
             if not record.move_ids:
-                continue
-            if not record.partner_id:
                 continue
             if record.wms_estado != 'sin_enviar':
                 continue
@@ -472,8 +481,6 @@ class StockPicking(models.Model):
                 if not record.picking_type_id.integracion_wms:
                     continue
                 if not record.move_ids:
-                    continue
-                if not record.partner_id:
                     continue
                 if record.wms_estado != 'sin_enviar':
                     continue
