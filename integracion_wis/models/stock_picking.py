@@ -524,6 +524,48 @@ class StockPicking(models.Model):
 class StockMove(models.Model):
     _inherit = 'stock.move'
 
+    def _action_confirm(self, merge=True, merge_into=False):
+        res = super()._action_confirm(merge=merge, merge_into=merge_into)
+        if self.env.context.get('skip_wms_integration'):
+            return res
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return res
+        # Recopila pickings únicos afectados cuyo estado haya quedado en waiting/confirmed
+        pickings_vistos = set()
+        for move in res:
+            picking = move.picking_id
+            if not picking or picking.id in pickings_vistos:
+                continue
+            pickings_vistos.add(picking.id)
+            if not picking.picking_type_id.integracion_wms:
+                continue
+            if not picking.move_ids:
+                continue
+            if picking.wms_estado != 'sin_enviar':
+                continue
+            estado_obj = picking.picking_type_id.estado_disparo_wis or ''
+            if not estado_obj:
+                continue
+            estados_aceptados = {estado_obj}
+            if estado_obj == 'waiting':
+                estados_aceptados.add('confirmed')
+            if picking.state not in estados_aceptados:
+                continue
+            tipo = picking.picking_type_id.tipo_pedido_wis or 'NORM'
+            _logger.info("[WIS] _action_confirm | picking=%s | state=%s | enviando a WMS", picking.name, picking.state)
+            try:
+                response = picking.enviarWS(tipo)
+                if response is not False:
+                    wms_vals = {'wms_estado': 'enviado'}
+                    if isinstance(response, dict):
+                        wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                    picking.with_context(skip_wms_integration=True).write(wms_vals)
+                    _logger.info("[WIS] _action_confirm | picking=%s enviado a WMS", picking.name)
+            except Exception as e:
+                _logger.exception("[WIS] _action_confirm | error en picking=%s: %s", picking.name, e)
+        return res
+
     def write(self, vals):
         res = super().write(vals)
         if 'product_uom_qty' in vals:
