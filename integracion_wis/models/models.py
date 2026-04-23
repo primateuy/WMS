@@ -729,7 +729,8 @@ class IntegracionWIS(models.Model):
 
 
         _partner = vals._get_wis_partner()
-        codigo_agente = _partner.codigo_unico_cliente if _partner else ''
+        tipo_agente = vals.picking_type_id.tipo_agente_wis or 'CLI'
+        codigo_agente = (_partner.codigo_unico_cliente if tipo_agente == 'CLI' else _partner.codigo_unico_proveedor) if _partner else ''
 
         nro_pedido = vals.codigo_unico if vals.codigo_unico else f"P{hash_short}"
 
@@ -738,7 +739,7 @@ class IntegracionWIS(models.Model):
             "nroPedido": nro_pedido,
             "comparteContenedorEntrega": vals.name,
             "codigoAgente": codigo_agente,
-            "tipoAgente": "CLI",
+            "tipoAgente": tipo_agente,
             "fechaEntrega": vals.scheduled_date.isoformat(),
             "tipoPedido": tipo,
             "direccion": direccion,
