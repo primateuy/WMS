@@ -32,6 +32,7 @@
         'views/WizardStock.xml',
         'data/cron.xml',
         'data/default_params.xml',
+        'views/UomView.xml',
     ],
     'demo': [
         'demo/demo.xml',

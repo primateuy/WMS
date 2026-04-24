@@ -16,3 +16,4 @@ from . import conciliacionMaestros
 from . import ConciliacionStock
 from . import webhook_log
 from . import sale_order
+from . import uom_wis

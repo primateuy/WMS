@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="uom_form_view_wis_code" model="ir.ui.view">
+        <field name="name">uom.uom.form.wis_code</field>
+        <field name="model">uom.uom</field>
+        <field name="inherit_id" ref="uom.product_uom_form_view"/>
+        <field name="arch" type="xml">
+            <field name="name" position="after">
+                <field name="wis_code" placeholder="Ej: UN, KG, L"/>
+            </field>
+        </field>
+    </record>
+</odoo>

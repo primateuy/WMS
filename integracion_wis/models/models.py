@@ -216,12 +216,13 @@ class IntegracionWIS(models.Model):
         (primera sincronización).
         """
         nombre = vals.name[:65] if len(vals.name) > 65 else vals.name
+        unidad_wis = (vals.uom_id.wis_code or '').strip() or 'UND'
         payload = {
             "codigoProducto": vals.codigo_unico,
             "codigo":         vals.codigo_unico,
             "descripcion":    nombre,
             "familia":        1,
-            "unidadMedida":   "UND",
+            "unidadMedida":   unidad_wis,
             "clase":          1,
             "ramo":           1,
             "pesoNeto":       vals.weight,
@@ -342,7 +343,8 @@ class IntegracionWIS(models.Model):
         
 
         productos = [];
-        unidad_wis = vals.uom_id.name if vals.uom_id else "UND"
+        unidad_wis = (vals.uom_id.wis_code or '').strip() if vals.uom_id else 'UND'
+        unidad_wis = unidad_wis or 'UND'
         numeroRandom = random.randint(100000, 999999);
 
         _logger.info("Nombre del producto => {}".format(vals.name));
@@ -367,7 +369,7 @@ class IntegracionWIS(models.Model):
                 "codigo": codigo,
                 "descripcion": f"{vals.name}",
                 "familia": 1,
-                "unidadMedida": "UND",
+                "unidadMedida": unidad_wis,
                 "clase": 1,
                 "ramo": 1,
                 "pesoNeto": vals.weight,
