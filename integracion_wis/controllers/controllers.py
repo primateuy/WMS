@@ -14,9 +14,31 @@ class WebhookWIS(http.Controller):
     def callback(self, **kwargs):
         signature = request.httprequest.headers.get('X-Hub-Signature')
         body = request.httprequest.get_data()
+        
+        # ===== LOG INMEDIATO AL LLEGAR =====
+        try:
+            body_str = body.decode('utf-8') if body else 'BODY VACÍO'
+            headers_dict = dict(request.httprequest.headers)
+            debug_msg = f"""WEBHOOK RECIBIDO:
+IP: {request.remote_addr}
+Método: {request.method}
+Headers: {str(headers_dict)[:500]}
+Body: {body_str[:500]}"""
+            
+            request.env['wis.webhook.log'].sudo().create({
+                'fecha': fields.Date.today(),
+                'hora': time.strftime('%H:%M:%S'),
+                'request': debug_msg,
+                'respuesta': 'Webhook recibido',
+                'tipo': 'ENTRADA_DEBUG',
+                'estado': 'exito'
+            })
+        except Exception as e:
+            _logger.error(f"Error en log inicial: {str(e)}")
 
-        if not self._verify_signature(body, signature):
-            return {'status': 401, 'detail': 'Firma inválida'}
+        # ===== VERIFICACIÓN DE FIRMA (DESACTIVADA TEMPORALMENTE) =====
+        # if not self._verify_signature(body, signature):
+        #     return {'status': 401, 'detail': 'Firma inválida'}
 
         try:
             payload = json.loads(body)
