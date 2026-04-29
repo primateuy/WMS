@@ -1,6 +1,7 @@
 from odoo import models, fields, api
 from odoo.exceptions import ValidationError
 import logging
+import json
 import requests
 
 _logger = logging.getLogger(__name__)
@@ -202,21 +203,20 @@ class Product(models.Model):
         ('sync', 'Sincronizado')
     ], string='Estado Sincronización', default='pending', readonly=True)
 
-    def _agregar_log_wms(self, operacion, resultado='success', detalle='', response_data=None):
-        """Método helper para agregar logs de WMS"""
+    def _agregar_log_wms(self, operacion, resultado='success', detalle='', response_data=None, payload_enviado=None):
         self.env['product.wms.log'].create({
             'product_id': self.id,
             'operacion': operacion,
             'resultado': resultado,
             'detalle': detalle,
-            'response_data': str(response_data) if response_data else '',
+            'payload_enviado': payload_enviado or '',
+            'response_data': json.dumps(response_data, ensure_ascii=False, indent=2) if isinstance(response_data, dict) else (str(response_data) if response_data else ''),
             'fecha': fields.Datetime.now(),
-            'usuario_id': self.env.user.id
+            'usuario_id': self.env.user.id,
         })
-        
         self.with_context(_avoid_wms=True).write({
             'wms_last_sync': fields.Datetime.now(),
-            'wms_sync_status': resultado if resultado in ['success', 'error'] else 'sync'
+            'wms_sync_status': resultado if resultado in ['success', 'error'] else 'sync',
         })
 
     def consultaStock(self):
@@ -295,6 +295,21 @@ class Product(models.Model):
             if not datosAPI or not datosAPI.apiLink:
                 raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
+            tracking = self.tracking
+            unidad_wis = (self.uom_id.wis_code or '').strip() if self.uom_id else 'UND'
+            payload_log = json.dumps({
+                'codigoProducto': self.codigo_unico or '(nuevo)',
+                'descripcion': self.name,
+                'unidadMedida': unidad_wis or 'UND',
+                'pesoNeto': self.weight,
+                'precioVenta': self.list_price,
+                'categoria1': self.categ_id.name if self.categ_id else '',
+                'activo': self.active,
+                'tracking': tracking,
+                'tipoManejoFecha': 'F' if tracking in ('lot', 'serial') else 'D',
+                'manejoIdentificador': 'L' if tracking in ('lot', 'serial') else 'P',
+            }, ensure_ascii=False, indent=2)
+
             result = datosAPI.insertarProducto(self)
 
             if result and isinstance(result, dict):
@@ -312,8 +327,9 @@ class Product(models.Model):
             self._agregar_log_wms(
                 operacion='enviar_producto',
                 resultado='success',
-                detalle=f'Producto enviado exitosamente. Códigos: Interface={result.get("numeroInterfaz", "N/A")}, Único={result.get("codigoUnico", "N/A")}',
-                response_data=result
+                detalle=f'Enviado. Interface={result.get("numeroInterfaz", "N/A")}, Único={result.get("codigoUnico", "N/A")}',
+                response_data=result,
+                payload_enviado=payload_log,
             )
 
             return result
@@ -322,7 +338,8 @@ class Product(models.Model):
             self._agregar_log_wms(
                 operacion='enviar_producto',
                 resultado='error',
-                detalle=f'Error enviando producto: {str(e)}'
+                detalle=f'Error enviando producto: {str(e)}',
+                payload_enviado=payload_log if 'payload_log' in dir() else '',
             )
             raise
 

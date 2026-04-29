@@ -1,5 +1,6 @@
 from odoo import models, fields, api
 import logging
+import json
 from odoo.exceptions import ValidationError
 
 _logger = logging.getLogger(__name__)
@@ -9,11 +10,24 @@ class ResPartnerLogs(models.Model):
     _description = 'Logs de Integración de Agentes con WIS'
     _order = 'fecha desc'
 
-
     partner_id = fields.Many2one('res.partner', string='Agente', ondelete='cascade', required=True)
-    fecha = fields.Datetime(string='Fecha', required=True, default=fields.Datetime.now
-    )
+    fecha = fields.Datetime(string='Fecha', required=True, default=fields.Datetime.now)
     texto = fields.Text(string='Detalle')
+
+    operacion = fields.Selection([
+        ('envio_cli', 'Envío CLI'),
+        ('envio_pro', 'Envío PRO'),
+        ('sincronizacion', 'Sincronización'),
+        ('otro', 'Otro'),
+    ], string='Operación', default='otro')
+
+    resultado = fields.Selection([
+        ('exito', 'Éxito'),
+        ('error', 'Error'),
+    ], string='Resultado', default='exito')
+
+    payload_enviado = fields.Text(string='Payload enviado a WIS')
+    response_data = fields.Text(string='Respuesta de WIS')
 
 class ResPartner(models.Model):
     _inherit = 'res.partner'
@@ -125,33 +139,100 @@ class ResPartner(models.Model):
 
         update_vals = {}
 
+        phone_clean = (self.phone or '').replace(' ', '').replace('-', '')
+        country_code = self.country_id.code.upper() if self.country_id and self.country_id.code else 'UY'
+
+        punto_entrega_parts = []
+        if self.street:
+            punto_entrega_parts.append(f"Calle: {self.street}")
+        if self.street2:
+            punto_entrega_parts.append(f"Esquina: {self.street2}")
+        if self.city:
+            ciudad = self.city + (f" (CP: {self.zip})" if self.zip else '')
+            punto_entrega_parts.append(ciudad)
+        elif self.zip:
+            punto_entrega_parts.append(f"CP: {self.zip}")
+        if self.state_id and self.state_id.name:
+            punto_entrega_parts.append(f"Provincia: {self.state_id.name}")
+        punto_entrega = ' - '.join(punto_entrega_parts) if punto_entrega_parts else 'Sin dirección'
+
         # --- Rol CLI ---
         if self.customer_rank > 0:
-            response_cli = datosAPI.insertarClienteOrSupplier(self, 'CLI')
-            _logger.info("RESPONSE CLI => %s", response_cli)
-            if response_cli and isinstance(response_cli, dict):
-                codigo_cli = response_cli.get('codigoUnico', '')
-                if codigo_cli and not self.codigo_unico_cliente:
-                    update_vals['codigo_unico_cliente'] = codigo_cli
+            codigo_cli_enviado = self.codigo_unico_cliente or f"CLI-pendiente"
+            payload_cli = json.dumps({
+                'codigoAgente': codigo_cli_enviado,
+                'tipo': 'CLI',
+                'descripcion': (self.name or '').upper(),
+                'telefonoPrincipal': phone_clean or '00000000',
+                'direccion': punto_entrega[:120],
+                'pais': country_code,
+                'localidad': (self.city or '').upper(),
+            }, ensure_ascii=False, indent=2)
+            try:
+                response_cli = datosAPI.insertarClienteOrSupplier(self, 'CLI')
+                _logger.info("RESPONSE CLI => %s", response_cli)
+                if response_cli and isinstance(response_cli, dict):
+                    codigo_cli = response_cli.get('codigoUnico', '')
+                    if codigo_cli and not self.codigo_unico_cliente:
+                        update_vals['codigo_unico_cliente'] = codigo_cli
+                    self.env['logs.res.partner'].create({
+                        'partner_id': self.id,
+                        'fecha': fields.Datetime.now(),
+                        'operacion': 'envio_cli',
+                        'resultado': 'exito',
+                        'texto': f"[CLI] Enviado a WIS. Código: '{self.codigo_unico_cliente or codigo_cli}'",
+                        'payload_enviado': payload_cli,
+                        'response_data': json.dumps(response_cli, ensure_ascii=False, indent=2),
+                    })
+            except Exception as e:
                 self.env['logs.res.partner'].create({
                     'partner_id': self.id,
                     'fecha': fields.Datetime.now(),
-                    'texto': f"[CLI] Datos de Odoo enviados a WIS. Código Único: '{self.codigo_unico_cliente or codigo_cli}'",
+                    'operacion': 'envio_cli',
+                    'resultado': 'error',
+                    'texto': f"[CLI] Error al enviar a WIS: {str(e)}",
+                    'payload_enviado': payload_cli,
                 })
+                raise
 
         # --- Rol PRO ---
         if self.supplier_rank > 0:
-            response_pro = datosAPI.insertarClienteOrSupplier(self, 'PRO')
-            _logger.info("RESPONSE PRO => %s", response_pro)
-            if response_pro and isinstance(response_pro, dict):
-                codigo_pro = response_pro.get('codigoUnico', '')
-                if codigo_pro and not self.codigo_unico_proveedor:
-                    update_vals['codigo_unico_proveedor'] = codigo_pro
+            codigo_pro_enviado = self.codigo_unico_proveedor or f"PRO-pendiente"
+            payload_pro = json.dumps({
+                'codigoAgente': codigo_pro_enviado,
+                'tipo': 'PRO',
+                'descripcion': (self.name or '').upper(),
+                'telefonoPrincipal': phone_clean or '00000000',
+                'direccion': punto_entrega[:120],
+                'pais': country_code,
+                'localidad': (self.city or '').upper(),
+            }, ensure_ascii=False, indent=2)
+            try:
+                response_pro = datosAPI.insertarClienteOrSupplier(self, 'PRO')
+                _logger.info("RESPONSE PRO => %s", response_pro)
+                if response_pro and isinstance(response_pro, dict):
+                    codigo_pro = response_pro.get('codigoUnico', '')
+                    if codigo_pro and not self.codigo_unico_proveedor:
+                        update_vals['codigo_unico_proveedor'] = codigo_pro
+                    self.env['logs.res.partner'].create({
+                        'partner_id': self.id,
+                        'fecha': fields.Datetime.now(),
+                        'operacion': 'envio_pro',
+                        'resultado': 'exito',
+                        'texto': f"[PRO] Enviado a WIS. Código: '{self.codigo_unico_proveedor or codigo_pro}'",
+                        'payload_enviado': payload_pro,
+                        'response_data': json.dumps(response_pro, ensure_ascii=False, indent=2),
+                    })
+            except Exception as e:
                 self.env['logs.res.partner'].create({
                     'partner_id': self.id,
                     'fecha': fields.Datetime.now(),
-                    'texto': f"[PRO] Datos de Odoo enviados a WIS. Código Único: '{self.codigo_unico_proveedor or codigo_pro}'",
+                    'operacion': 'envio_pro',
+                    'resultado': 'error',
+                    'texto': f"[PRO] Error al enviar a WIS: {str(e)}",
+                    'payload_enviado': payload_pro,
                 })
+                raise
 
         if update_vals:
             self.with_context(skip_wis_sync=True).write(update_vals)

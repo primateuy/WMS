@@ -20,7 +20,6 @@ class WMSIntegracionLog(models.Model):
     modelo = fields.Char(string='Módulo/Modelo', required=True)
     texto = fields.Text(string='Detalle del Log', required=True)
     
-    # Campos adicionales para picking
     picking_id = fields.Many2one('stock.picking', string='Picking', ondelete='cascade')
     resultado = fields.Selection([
         ('exito', 'Éxito'),
@@ -28,6 +27,7 @@ class WMSIntegracionLog(models.Model):
         ('pendiente', 'Pendiente')
     ], string='Resultado')
     detalle = fields.Text(string='Detalle')
+    payload_webhook = fields.Text(string='Payload recibido de WIS')
     
     @api.depends('fecha', 'nivel', 'modelo')
     def _compute_name(self):

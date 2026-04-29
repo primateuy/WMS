@@ -175,20 +175,59 @@ Body: {body_str[:500]}"""
                 )
                 continue
 
-            picking = None
-
-
-            picking = request.env['stock.picking'].sudo().search(
-                [('codigo_unico', '=', numero_referencia)], limit=1
+            pickings_todos = request.env['stock.picking'].sudo().search(
+                [('codigo_unico', '=', numero_referencia)]
+            )
+            pickings_activos = pickings_todos.filtered(
+                lambda p: p.wms_estado != 'sin_enviar' and p.state not in ('done', 'cancel')
             )
 
-            if not picking:
-                _logger.info("No se encontró picking con codigo_unico %s", numero_referencia)
-                errores.append(
-                    f"No se encontró picking para referencia '{numero_referencia}' "
-                    f"(tipo: {tipo_referencia})."
+            if len(pickings_activos) == 0:
+                _logger.warning(
+                    "[WIS] confirmacionRecepcion | Sin pickings activos con codigo_unico='%s'. "
+                    "Pickings totales encontrados: %s",
+                    numero_referencia,
+                    pickings_todos.mapped('name'),
                 )
-                continue  
+                request.env['wms.integracion.log'].sudo().create({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'warning',
+                    'modelo': 'stock.picking',
+                    'texto': f"confirmacionRecepcion: sin pickings activos para referencia '{numero_referencia}'.",
+                    'picking_id': False,
+                    'resultado': 'error',
+                    'detalle': f"Pickings totales: {pickings_todos.mapped('name')}",
+                })
+                errores.append(
+                    f"Sin pickings activos para referencia '{numero_referencia}' (tipo: {tipo_referencia})."
+                )
+                continue
+
+            if len(pickings_activos) > 1:
+                nombres = ', '.join(pickings_activos.mapped('name'))
+                _logger.error(
+                    "[WIS] confirmacionRecepcion | Múltiples pickings activos con codigo_unico='%s': %s",
+                    numero_referencia, nombres,
+                )
+                request.env['wms.integracion.log'].sudo().create({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'error',
+                    'modelo': 'stock.picking',
+                    'texto': (
+                        f"confirmacionRecepcion: múltiples pickings activos para '{numero_referencia}'. "
+                        f"Intervención manual requerida."
+                    ),
+                    'picking_id': False,
+                    'resultado': 'error',
+                    'detalle': f"Pickings en conflicto: {nombres}",
+                })
+                errores.append(
+                    f"Múltiples pickings activos para '{numero_referencia}': {nombres}. "
+                    f"Intervención manual requerida."
+                )
+                continue
+
+            picking = pickings_activos
             
 
 
@@ -360,6 +399,7 @@ Body: {body_str[:500]}"""
                         f"Tipo: {tipo_referencia} | "
                         f"Fecha: {fecha_ingreso}"
                     ),
+                    'payload_webhook': json.dumps(ref, ensure_ascii=False, indent=2),
                 })
 
             except Exception as e:
@@ -430,9 +470,37 @@ Body: {body_str[:500]}"""
                 [('name', '=', nombre_pedido)], limit=1
             )
             if not picking:
-                picking = request.env['stock.picking'].sudo().search(
-                    [('codigo_unico', '=', nombre_pedido)], limit=1
+                pickings_todos = request.env['stock.picking'].sudo().search(
+                    [('codigo_unico', '=', nombre_pedido)]
                 )
+                pickings_activos = pickings_todos.filtered(
+                    lambda p: p.wms_estado != 'sin_enviar' and p.state not in ('done', 'cancel')
+                )
+                if len(pickings_activos) == 1:
+                    picking = pickings_activos
+                elif len(pickings_activos) > 1:
+                    nombres = ', '.join(pickings_activos.mapped('name'))
+                    _logger.error(
+                        "[WIS] confirmacionPedido | Múltiples pickings activos con codigo_unico='%s': %s",
+                        nombre_pedido, nombres,
+                    )
+                    request.env['wms.integracion.log'].sudo().create({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error',
+                        'modelo': 'stock.picking',
+                        'texto': (
+                            f"confirmacionPedido: múltiples pickings activos para '{nombre_pedido}'. "
+                            f"Intervención manual requerida."
+                        ),
+                        'picking_id': False,
+                        'resultado': 'error',
+                        'detalle': f"Pickings en conflicto: {nombres}",
+                    })
+                    errores.append(
+                        f"Múltiples pickings activos para '{nombre_pedido}': {nombres}. "
+                        f"Intervención manual requerida."
+                    )
+                    continue
             if not picking:
                 picking = request.env['stock.picking'].sudo().search(
                     [('idPedidoWMS', '=', nombre_pedido)], limit=1
@@ -550,6 +618,10 @@ Body: {body_str[:500]}"""
                         f"Precintos: {precintos or '—'} | "
                         f"Fecha despacho: {fecha_despacho}"
                     ),
+                    'payload_webhook': json.dumps({
+                        'pedido': pedido_data,
+                        'contenedores': contenedores,
+                    }, ensure_ascii=False, indent=2),
                 })
 
             except Exception as e:

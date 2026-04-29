@@ -84,21 +84,35 @@
 
                     <!-- Pestaña logs -->
                     <page string="Logs WMS" name="logs_wms">
-                        <group>
-                            <group>
-                                <field name="log_count" readonly="1"/>
-                            </group>
-                        </group>
                         <field name="log_ids" readonly="1">
                             <tree decoration-danger="nivel == 'error'"
                                   decoration-warning="nivel == 'warning'"
-                                  decoration-success="nivel == 'info' and resultado == 'exito'">
+                                  decoration-success="nivel == 'info' and resultado == 'exito'"
+                                  create="0" delete="0" edit="0">
                                 <field name="fecha"/>
                                 <field name="nivel"/>
                                 <field name="resultado"/>
                                 <field name="texto"/>
                                 <field name="detalle"/>
+                                <field name="payload_webhook" string="Webhook recibido" optional="show"/>
                             </tree>
+                            <form create="0" delete="0" edit="0">
+                                <group>
+                                    <group>
+                                        <field name="fecha" readonly="1"/>
+                                        <field name="nivel" readonly="1"/>
+                                        <field name="resultado" readonly="1"/>
+                                        <field name="modelo" readonly="1"/>
+                                    </group>
+                                    <group>
+                                        <field name="texto" widget="text" readonly="1"/>
+                                        <field name="detalle" widget="text" readonly="1"/>
+                                    </group>
+                                </group>
+                                <group string="Payload recibido de WIS" invisible="not payload_webhook">
+                                    <field name="payload_webhook" widget="text" readonly="1" nolabel="1"/>
+                                </group>
+                            </form>
                         </field>
                     </page>
 

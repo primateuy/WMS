@@ -30,8 +30,10 @@ class ProductWmsLog(models.Model):
     ], string='Resultado', required=True)
     
     detalle = fields.Text(string='Detalle')
-    
-    response_data = fields.Text(string='Datos de Respuesta')
+
+    payload_enviado = fields.Text(string='Payload enviado a WIS')
+
+    response_data = fields.Text(string='Respuesta de WIS')
     
     fecha = fields.Datetime(
         string='Fecha', 

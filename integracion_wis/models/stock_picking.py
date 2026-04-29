@@ -338,6 +338,23 @@ class StockPicking(models.Model):
                 _logger.exception("[WIS] create | error en picking=%s: %s", record.name, e)
         return records
 
+    def _create_backorder(self):
+        backorders = super()._create_backorder()
+        for backorder in backorders:
+            original = backorder.backorder_id
+            if not original:
+                continue
+            if not original.picking_type_id.integra_parciales and original.codigo_unico:
+                backorder.with_context(skip_wms_integration=True).write({
+                    'codigo_unico': original.codigo_unico,
+                    'wms_estado': 'enviado',
+                })
+                _logger.info(
+                    "[WIS] _create_backorder | backorder=%s hereda codigo_unico='%s' de original=%s",
+                    backorder.name, original.codigo_unico, original.name,
+                )
+        return backorders
+
     def _enviar_wis_si_corresponde(self, hook_name):
         """Dispara integración WIS según estado actual del picking."""
         if self.env.context.get('skip_wms_integration'):
@@ -361,6 +378,12 @@ class StockPicking(models.Model):
             if not record.move_ids:
                 continue
             if record.wms_estado != 'sin_enviar':
+                continue
+            if record.codigo_unico:
+                _logger.info(
+                    "[WIS] %s | picking=%s ya tiene codigo_unico='%s', se omite reenvío a WMS.",
+                    hook_name, record.name, record.codigo_unico,
+                )
                 continue
             if not estado_obj or record.state not in estados_aceptados:
                 continue

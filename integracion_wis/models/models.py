@@ -844,10 +844,7 @@ class IntegracionWIS(models.Model):
             })
             return False
 
-        # Fecha de vencimiento por defecto: scheduled_date del picking o hoy + 1 año.
-        # WIS exige fechaVencimiento para productos con tipoManejoFecha='F'.
-        # Se envía siempre para evitar el error aunque el tracking en Odoo no coincida
-        # con lo que fue registrado en WIS.
+        
         if picking.scheduled_date:
             fecha_venc_default = picking.scheduled_date.date().isoformat()
         else:
@@ -885,13 +882,41 @@ class IntegracionWIS(models.Model):
         _partner_rec = picking._get_wis_partner()
         codigo_agente = (_partner_rec.codigo_unico_cliente if tipo_agente == 'CLI' else _partner_rec.codigo_unico_proveedor) if _partner_rec else ''
 
+        if tipo_agente == 'CLI' and not codigo_agente:
+            self.env['wms.integracion.log'].create({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'error',
+                'modelo': 'stock.picking',
+                'texto': f"El cliente asociado al picking {picking.name} no tiene un código único de cliente para WIS. Por favor, sincronice el cliente con WIS antes de enviar la referencia de recepción.",
+                'picking_id': picking.id,
+                'resultado': 'error',
+                'detalle': 'El cliente asociado al picking no tiene un código único de cliente para WIS. Por favor, sincronice el cliente con WIS antes de enviar la referencia de recepción.'
+            })
+
+            raise ValidationError(f"El cliente asociado al picking {picking.name} no tiene un código único de cliente para WIS. Por favor, sincronice el cliente con WIS antes de enviar la referencia de recepción.")
+
+        if tipo_agente == 'PRO' and not codigo_agente:
+            self.env['wms.integracion.log'].create({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'error',
+                'modelo': 'stock.picking',
+                'texto': f"El proveedor asociado al picking {picking.name} no tiene un código único de proveedor para WIS. Por favor, sincronice el proveedor con WIS antes de enviar la referencia de recepción.",
+                'picking_id': picking.id,
+                'resultado': 'error',
+                'detalle': 'El proveedor asociado al picking no tiene un código único de proveedor para WIS. Por favor, sincronice el proveedor con WIS antes de enviar la referencia de recepción.'
+            })
+
+            raise ValidationError(f"El proveedor asociado al picking {picking.name} no tiene un código único de proveedor para WIS. Por favor, sincronice el proveedor con WIS antes de enviar la referencia de recepción.")
+
+
+
         payload = {
             'empresa': self.empresa_id,
             'dsReferencia': f"RECEPCIÓN DESDE ODOO: {picking.name}",
             'referencias': [{
                 'referencia': 'REC-' + str(numeroRandom),
                 'tipoReferencia': 'OC',
-                'fechaVencimientoOrden': self.date_order if colocarFecha else None,
+                'fechaVencimientoOrden': picking.date_done.isoformat() if (colocarFecha and picking.date_done) else None,
                 'codigoAgente': codigo_agente,
                 'tipoAgente': tipo_agente,
                 'predio': '1',

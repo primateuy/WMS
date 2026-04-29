@@ -59,5 +59,10 @@ class StockPickingType(models.Model):
         default=False,
         help='Habilita el método de preparación WIS para este tipo de entrega.')
 
-
-    
+    integra_parciales = fields.Boolean(
+        string='Integrar parciales como nuevas operaciones',
+        default=False,
+        help='Si está activo, los backorders de este tipo se envían a WIS como operaciones nuevas. '
+             'Si está inactivo (por defecto), el backorder hereda el código WIS del picking original '
+             'y WIS sigue la operación con su saldo remanente.'
+    )
