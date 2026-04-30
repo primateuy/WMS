@@ -200,10 +200,7 @@ class IntegracionWIS(models.Model):
         )
 
 
-        vals.qty_available = response['cantidadGenerica']
-        vals.with_context(_avoid_wms=True).write({'qty_available': vals.qty_available})
-
-        _logger.info(f"El usuario: {self.company_id.id} actualizó el stock del producto {vals.name} - {vals.id} - {vals.codigo_unico} a {vals.qty_available}, en el día {datetime.datetime.now()}");
+        _logger.info(f"El usuario: {self.company_id.id} consultó el stock del producto {vals.name} - {vals.id} - {vals.codigo_unico}, en el día {datetime.datetime.now()}");
         return True;
 
 
@@ -681,7 +678,6 @@ class IntegracionWIS(models.Model):
             _logger.info("RESPUESTA DEL GET PEDIDO: %s", str(response))
         except Exception as e:
             _logger.error("Error en la solicitud a la API: %s", str(e))
-            exception = req.json().get('detail', 'Ocurrió un error')
             raise ValidationError(f"Error en la solicitud a la API: {str(e)}")
 
 
