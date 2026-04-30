@@ -1,6 +1,7 @@
 import json
 import hmac
 import hashlib
+import base64
 import logging
 import time
 from odoo import http, fields
@@ -20,8 +21,8 @@ class WebhookWIS(http.Controller):
             body_str = body.decode('utf-8') if body else 'BODY VACÍO'
             headers_dict = dict(request.httprequest.headers)
             debug_msg = f"""WEBHOOK RECIBIDO:
-IP: {request.remote_addr}
-Método: {request.method}
+IP: {request.httprequest.remote_addr}
+Método: {request.httprequest.method}
 Headers: {str(headers_dict)[:500]}
 Body: {body_str[:500]}"""
             
@@ -36,7 +37,6 @@ Body: {body_str[:500]}"""
         except Exception as e:
             _logger.error(f"Error en log inicial: {str(e)}")
 
-        # ===== VERIFICACIÓN DE FIRMA (DESACTIVADA TEMPORALMENTE) =====
         # if not self._verify_signature(body, signature):
         #     return {'status': 401, 'detail': 'Firma inválida'}
 
@@ -97,14 +97,27 @@ Body: {body_str[:500]}"""
 
     def _verify_signature(self, body, received_signature):
         if not received_signature:
+            _logger.warning("[WIS FIRMA] Header X-Hub-Signature ausente o vacío")
             return False
 
         secret = request.env['ir.config_parameter'].sudo().get_param('wis.webhook_secret', '')
         if not secret:
-            _logger.warning("No está configurado wis.webhook_secret")
+            _logger.warning("[WIS FIRMA] Parámetro wis.webhook_secret no configurado en Odoo")
             return False
 
-        return hmac.compare_digest(secret, received_signature)
+        # WIS firma con HMAC-SHA512 y envía el resultado codificado en Base64
+        computed = hmac.new(secret.encode('utf-8'), body, hashlib.sha512).digest()
+        computed_b64 = base64.b64encode(computed).decode('utf-8')
+        _logger.info("[WIS FIRMA] Body recibido (primeros 200 bytes): %s", body[:200])
+        _logger.info("[WIS FIRMA] Firma esperada (Base64): %s", computed_b64)
+        _logger.info("[WIS FIRMA] Firma recibida (header): %s", received_signature)
+        try:
+            signature_bytes = base64.b64decode(received_signature)
+        except Exception:
+            _logger.warning("X-Hub-Signature no es Base64 válido")
+            return False
+
+        return hmac.compare_digest(computed, signature_bytes)
 
     def _create_log(self, data, respuesta, tipo, estado='exito', numero_interfaz=0):
         try:
