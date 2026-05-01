@@ -200,7 +200,10 @@ class IntegracionWIS(models.Model):
         )
 
 
-        _logger.info(f"El usuario: {self.company_id.id} consultó el stock del producto {vals.name} - {vals.id} - {vals.codigo_unico}, en el día {datetime.datetime.now()}");
+        vals.qty_available = response['cantidadGenerica']
+        vals.with_context(_avoid_wms=True).write({'qty_available': vals.qty_available})
+
+        _logger.info(f"El usuario: {self.company_id.id} actualizó el stock del producto {vals.name} - {vals.id} - {vals.codigo_unico} a {vals.qty_available}, en el día {datetime.datetime.now()}");
         return True;
 
 
@@ -1639,7 +1642,7 @@ class IntegracionWIS(models.Model):
 
                 codigosBarras = vals.barcode.split(',');
 
-                for cod in codigoBarras:
+                for cod in codigosBarras:
                     response = self.existeBarcode(cod);
 
                     

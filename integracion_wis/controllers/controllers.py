@@ -305,14 +305,14 @@ Body: {body_str[:500]}"""
 
                     cant_restante = cant_recibida
                     for move_line in move.move_line_ids:
-                        capacidad_linea = move_line.quantity or move.product_uom_qty
+                        capacidad_linea = move.product_uom_qty
                         if cant_restante <= 0:
-                            move_line.sudo().qty_done = 0
+                            move_line.sudo().quantity = 0
                         elif cant_restante >= capacidad_linea:
-                            move_line.sudo().qty_done = capacidad_linea
+                            move_line.sudo().quantity = capacidad_linea
                             cant_restante -= capacidad_linea
                         else:
-                            move_line.sudo().qty_done = cant_restante
+                            move_line.sudo().quantity = cant_restante
                             cant_restante = 0
 
                 
