@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Agrega el botón "Importar Variantes" en el Product Template -->
+    <record id="product_template_form_variant_import" model="ir.ui.view">
+        <field name="name">product.template.form.variant.import</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//div[@name='button_box']" position="inside">
+                <button type="action"
+                        name="%(primate_product_variant_import.action_primate_product_variant_import_wizard)d"
+                        string="Importar Variantes"
+                        icon="fa-file-excel-o"
+                        class="oe_stat_button"
+                        groups="base.group_user"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Menú en Inventario / Configuración (opcional) -->
+    <menuitem id="menu_primate_product_variant_import"
+              name="Importar Variantes desde Excel"
+              parent="product.menu_product_config_root"
+              action="action_primate_product_variant_import_wizard"
+              sequence="99"
+              groups="base.group_user"/>
+</odoo>
