@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- ═══════════════════════════════════════════════════════════════
+         Vista del Wizard de Importación de Variantes
+    ═══════════════════════════════════════════════════════════════ -->
+    <record id="product_variant_import_wizard_form" model="ir.ui.view">
+        <field name="name">product.variant.import.wizard.form</field>
+        <field name="model">product.variant.import.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Importar Variantes de Producto">
+
+                <!-- PASO 1: Carga del archivo (estado draft) -->
+                <group invisible="state == 'done'">
+                    <group string="Archivo Excel">
+                        <field name="import_file"
+                               filename="import_file_name"
+                               widget="binary"
+                               required="1"/>
+                        <field name="import_file_name" invisible="1"/>
+                    </group>
+                    <group string="Instrucciones">
+                        <div class="alert alert-info" role="alert">
+                            <p>
+                                <strong>Formato requerido del Excel:</strong>
+                            </p>
+                            <ul>
+                                <li><b>Referencia Interna</b> — ref. interna de la variante (opcional)</li>
+                                <li><b>Product Template</b> — ID externo o nombre del template</li>
+                                <li><b>Atributo 1</b> / <b>Valor Atributo 1</b></li>
+                                <li><b>Atributo 2</b> / <b>Valor Atributo 2</b> … (N pares)</li>
+                            </ul>
+                            <p>
+                                El Product Template debe existir en Odoo y tener los
+                                atributos configurados antes de la importación.
+                            </p>
+                        </div>
+                    </group>
+                </group>
+
+                <!-- PASO 2: Resultado (estado done) -->
+                <group invisible="state != 'done'">
+                    <field name="result_info"
+                           widget="text"
+                           readonly="1"
+                           nolabel="1"
+                           style="font-family: monospace; white-space: pre-wrap;
+                                  min-height: 200px; background: #f8f9fa;
+                                  padding: 12px; border-radius: 4px;"/>
+                </group>
+
+                <field name="state" invisible="1"/>
+
+                <footer>
+                    <!-- Draft: Descargar plantilla + Importar -->
+                    <button name="action_import"
+                            string="Importar"
+                            type="object"
+                            class="btn-primary"
+                            invisible="state == 'done'"/>
+                    <button name="action_download_template"
+                            string="Descargar Plantilla"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="state == 'done'"/>
+                    <button string="Cerrar"
+                            class="btn-secondary"
+                            special="cancel"/>
+                    <!-- Done: Nueva importación -->
+                    <button name="action_import"
+                            string="Importar otro archivo"
+                            type="object"
+                            class="btn-primary"
+                            invisible="state != 'done'"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <!-- Acción para abrir el wizard -->
+    <record id="action_product_variant_import_wizard" model="ir.actions.act_window">
+        <field name="name">Importar Variantes desde Excel</field>
+        <field name="res_model">product.variant.import.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="view_id"
+               ref="product_variant_import_wizard_form"/>
+    </record>
+</odoo>
