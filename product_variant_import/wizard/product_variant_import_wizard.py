@@ -1,4 +1,4 @@
-# Copyright 2024 PrimateUY / ProyectaSoft
+# Copyright 2024 PrimateUY
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 import base64
