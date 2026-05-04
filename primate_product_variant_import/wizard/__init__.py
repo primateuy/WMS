@@ -1,1 +1,1 @@
-from . import primate_product_variant_import_wizard
+from . import product_variant_import_wizard
