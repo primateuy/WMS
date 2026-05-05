@@ -16,12 +16,4 @@
             </xpath>
         </field>
     </record>
-
-    <!-- Menú en Inventario / Configuración (opcional) -->
-    <menuitem id="menu_primate_product_variant_import"
-              name="Importar Variantes desde Excel"
-              parent="product.menu_product_config_root"
-              action="action_primate_product_variant_import_wizard"
-              sequence="99"
-              groups="base.group_user"/>
 </odoo>
