@@ -12,7 +12,7 @@
     "depends": ["product"],
     "data": [
         "security/ir.model.access.csv",
-        "views/primate_product_variant_import_wizard_views.xml",
+        "views/product_variant_import_wizard_views.xml",
         "views/product_template_views.xml",
     ],
     "installable": True,
