@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Agrega el botón "Importar Variantes" en el Product Template -->
+    <!-- Botón en el formulario de Product Template -->
     <record id="product_template_form_variant_import" model="ir.ui.view">
         <field name="name">product.template.form.variant.import</field>
         <field name="model">product.template</field>
@@ -16,4 +16,12 @@
             </xpath>
         </field>
     </record>
+
+    <!-- Menú en Inventario > Productos -->
+    <menuitem id="menu_primate_product_variant_import"
+              name="Importar Variantes desde Excel"
+              parent="stock.menu_stock_inventory_control"
+              action="action_primate_product_variant_import_wizard"
+              sequence="99"
+              groups="base.group_user"/>
 </odoo>
