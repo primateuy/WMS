@@ -389,6 +389,19 @@ class ProductVariantImportWizard(models.TransientModel):
         # Resolver los product.template.attribute.value (ptav)
         ptav_ids = self._resolve_ptav_ids(template, attr_value_map, row_num)
 
+
+        # Si el template tiene atributos pero no se detectó ninguno en la fila, error
+        if not ptav_ids and template.attribute_line_ids:
+            raise UserError(
+                _(
+                    "El template '%s' tiene atributos configurados pero no se "
+                    "encontraron pares Atributo/Valor en la fila. "
+                    "Verifique que las columnas se llamen exactamente "
+                    "'Atributo 1', 'Valor Atributo 1', etc., "
+                    "y que las celdas no estén vacías."
+                )
+                % template.name
+            )
         # Buscar variante existente con exactamente esos valores
         existing = self._find_existing_variant(template, ptav_ids)
 
@@ -436,18 +449,21 @@ class ProductVariantImportWizard(models.TransientModel):
         Dado un dict {nombre_atributo: nombre_valor}, devuelve la lista de IDs
         de product.template.attribute.value correspondientes al template.
 
-        Valida que:
-         - El atributo exista en las líneas del template
-         - El valor exista en esa línea del template
+        Requisitos:
+         - El atributo DEBE existir en las líneas del template (error si no).
+         - El valor puede NO existir: se crea y se agrega a la línea del template.
+           Odoo genera el PTAV automáticamente al agregar el valor.
         """
         if not attr_value_map:
             return []
 
+        AttributeValue = self.env["product.attribute.value"]
         ptav_obj = self.env["product.template.attribute.value"]
         ptav_ids = []
 
         for attr_name, val_name in attr_value_map.items():
-            # Buscar línea de atributo en el template
+
+            # 1. Buscar línea de atributo en el template
             attr_line = template.attribute_line_ids.filtered(
                 lambda l, a=attr_name: l.attribute_id.name.strip().lower()
                 == a.strip().lower()
@@ -456,34 +472,57 @@ class ProductVariantImportWizard(models.TransientModel):
                 raise UserError(
                     _(
                         "El atributo '%s' no está configurado en el template '%s'. "
-                        "Agréguelo antes de importar."
+                        "Agréguelo al template antes de importar."
                     )
                     % (attr_name, template.name)
                 )
             if len(attr_line) > 1:
                 attr_line = attr_line[0]
 
-            # Buscar el valor en esa línea
+            attribute = attr_line.attribute_id
+
+            # 2. Buscar el valor en la línea; si no existe, crearlo
             attr_value = attr_line.value_ids.filtered(
                 lambda v, vn=val_name: v.name.strip().lower() == vn.strip().lower()
             )
+
             if not attr_value:
-                raise UserError(
-                    _(
-                        "El valor '%s' no existe para el atributo '%s' "
-                        "en el template '%s'. "
-                        "Agréguelo en las líneas de atributos del template."
-                    )
-                    % (val_name, attr_name, template.name)
+                # Buscar si el valor ya existe globalmente para este atributo
+                attr_value = AttributeValue.search(
+                    [
+                        ("attribute_id", "=", attribute.id),
+                        ("name", "=ilike", val_name.strip()),
+                    ],
+                    limit=1,
                 )
+                if not attr_value:
+                    attr_value = AttributeValue.create(
+                        {
+                            "attribute_id": attribute.id,
+                            "name": val_name.strip(),
+                        }
+                    )
+                    _logger.info(
+                        "Creado nuevo valor de atributo: %s = %s",
+                        attr_name,
+                        val_name,
+                    )
+
+                # Agregar el valor a la línea de atributo del template
+                attr_line.write({"value_ids": [(4, attr_value.id)]})
+                _logger.info(
+                    "Valor '%s' agregado a la línea '%s' del template '%s'",
+                    val_name, attr_name, template.name,
+                )
+
             if len(attr_value) > 1:
                 attr_value = attr_value[0]
 
-            # Buscar el product.template.attribute.value (ptav)
+            # 3. Buscar el PTAV (Odoo lo genera al agregar el valor)
             ptav = ptav_obj.search(
                 [
                     ("product_tmpl_id", "=", template.id),
-                    ("attribute_id", "=", attr_line.attribute_id.id),
+                    ("attribute_id", "=", attribute.id),
                     ("product_attribute_value_id", "=", attr_value.id),
                 ],
                 limit=1,
@@ -491,13 +530,13 @@ class ProductVariantImportWizard(models.TransientModel):
             if not ptav:
                 raise UserError(
                     _(
-                        "No se encontró el vínculo template-atributo-valor para "
-                        "'%s' = '%s' en '%s'. "
-                        "Esto puede ocurrir si el template no generó los PTAVs aún; "
-                        "intente guardar el template primero."
+                        "No se pudo obtener el vínculo interno (PTAV) para "
+                        "'%s' = '%s' en '%s' luego de agregar el valor. "
+                        "Contacte al administrador."
                     )
                     % (attr_name, val_name, template.name)
                 )
+
             ptav_ids.append(ptav.id)
 
         return ptav_ids
