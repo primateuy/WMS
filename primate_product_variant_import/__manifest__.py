@@ -3,15 +3,17 @@
 
 {
     "name": "Product Variant Import from Excel",
-    "summary": "Importa variantes de producto desde un archivo Excel.",
-    "version": "17.0.1.0.0",
+    "summary": "Importa variantes de producto desde un archivo Excel en background.",
+    "version": "17.0.2.0.0",
     "category": "Inventory/Products",
     "author": "PrimateUY",
     "website": "https://github.com/primateuy/WMS/",
     "license": "AGPL-3",
-    "depends": ["product"],
+    "depends": ["product", "stock"],
     "data": [
         "security/ir.model.access.csv",
+        "data/sequences.xml",
+        "views/primate_variant_import_job_views.xml",
         "views/product_variant_import_wizard_views.xml",
         "views/product_template_views.xml",
     ],

@@ -6,62 +6,48 @@
         <field name="arch" type="xml">
             <form string="Importar Variantes desde Excel">
 
-                <!-- PASO 1: carga del archivo -->
+                <!-- PASO 1 -->
                 <div invisible="state == 'done'">
-
-                    <!-- Instrucciones: ancho completo -->
                     <div class="alert alert-info mb-3" role="alert">
                         <div class="row">
                             <div class="col-12">
-                                <strong>Formato requerido del Excel:</strong>
-                                cada fila representa una variante.
+                                <strong>Formato requerido del Excel</strong>
+                                — cada fila representa una variante.
                             </div>
                         </div>
                         <div class="row mt-2">
                             <div class="col-6">
                                 <table class="table table-sm table-borderless mb-0">
                                     <tbody>
-                                        <tr>
-                                            <td><code>Referencia Interna</code></td>
-                                            <td>Ref. interna de la variante (opcional)</td>
-                                        </tr>
-                                        <tr>
-                                            <td><code>Product Template</code></td>
-                                            <td>ID externo o nombre exacto del template</td>
-                                        </tr>
+                                        <tr><td><code>Referencia Interna</code></td>
+                                            <td>Ref. interna de la variante (opcional)</td></tr>
+                                        <tr><td><code>Product Template</code></td>
+                                            <td>ID externo o nombre exacto del template</td></tr>
                                     </tbody>
                                 </table>
                             </div>
                             <div class="col-6">
                                 <table class="table table-sm table-borderless mb-0">
                                     <tbody>
-                                        <tr>
-                                            <td><code>Atributo 1</code> / <code>Valor Atributo 1</code></td>
-                                            <td>Primer par atributo-valor</td>
-                                        </tr>
-                                        <tr>
-                                            <td><code>Atributo N</code> / <code>Valor Atributo N</code></td>
-                                            <td>Tantos pares como se necesiten</td>
-                                        </tr>
+                                        <tr><td><code>Atributo 1</code> / <code>Valor Atributo 1</code></td>
+                                            <td>Primer par atributo-valor</td></tr>
+                                        <tr><td><code>Atributo N</code> / <code>Valor Atributo N</code></td>
+                                            <td>Tantos pares como se necesiten</td></tr>
                                     </tbody>
                                 </table>
                             </div>
                         </div>
                         <div class="row mt-1">
                             <div class="col-12 text-muted" style="font-size:0.875rem">
-                                El Product Template debe existir en Odoo con los atributos
-                                ya configurados. Cada fila puede referenciar un template distinto.
+                                Funciona con templates configurados como
+                                "No crearlas automáticamente". Cada fila puede
+                                referenciar un template distinto.
                             </div>
                         </div>
                     </div>
-
-                    <!-- Campo de carga -->
                     <group>
                         <group string="Archivo">
-                            <field name="import_file"
-                                   filename="import_file_name"
-                                   widget="binary"
-                                   required="0"/>
+                            <field name="import_file" filename="import_file_name" widget="binary"/>
                             <field name="import_file_name" invisible="1"/>
                         </group>
                     </group>
@@ -69,38 +55,27 @@
 
                 <!-- PASO 2: resultado -->
                 <div invisible="state != 'done'">
-                    <field name="result_info"
-                           widget="text"
-                           readonly="1"
-                           nolabel="1"
-                           style="font-family: monospace; font-size: 0.875rem;
-                                  white-space: pre-wrap; min-height: 200px;
-                                  background: #f8f9fa; padding: 12px;
-                                  border-radius: 4px; border: 1px solid #dee2e6;
-                                  display: block; width: 100%;"/>
+                    <div class="alert alert-success" role="alert">
+                        <h5 class="alert-heading">
+                            <i class="fa fa-check-circle"/> Importación completada
+                        </h5>
+                        <p>El resultado quedó registrado en el historial.</p>
+                    </div>
+                    <group>
+                        <field name="job_id" readonly="1"/>
+                    </group>
                 </div>
 
                 <field name="state" invisible="1"/>
 
                 <footer>
-                    <button name="action_import"
-                            string="Importar"
-                            type="object"
-                            class="btn-primary"
-                            invisible="state == 'done'"/>
-                    <button name="action_download_template"
-                            string="Descargar Plantilla"
-                            type="object"
-                            class="btn-secondary"
-                            invisible="state == 'done'"/>
-                    <button string="Cerrar"
-                            class="btn-secondary"
-                            special="cancel"/>
-                    <button name="action_import"
-                            string="Importar otro archivo"
-                            type="object"
-                            class="btn-primary"
-                            invisible="state != 'done'"/>
+                    <button name="action_import" string="Importar" type="object"
+                            class="btn-primary" invisible="state == 'done'"/>
+                    <button name="action_download_template" string="Descargar Plantilla"
+                            type="object" class="btn-secondary" invisible="state == 'done'"/>
+                    <button name="action_view_job" string="Ver resultado" type="object"
+                            class="btn-primary" invisible="state != 'done'"/>
+                    <button string="Cerrar" class="btn-secondary" special="cancel"/>
                 </footer>
             </form>
         </field>

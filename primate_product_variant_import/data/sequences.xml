@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <record id="seq_primate_variant_import_job" model="ir.sequence">
+        <field name="name">Importación de Variantes</field>
+        <field name="code">primate.variant.import.job</field>
+        <field name="prefix">IMP/%(year)s/</field>
+        <field name="padding">4</field>
+    </record>
+</odoo>
