@@ -66,6 +66,7 @@
                                 <field name="wms_fecha_despacho" readonly="1"/>
                                 <field name="wms_nro_remito" readonly="1"/>
                                 <field name="wms_nro_seguimiento" readonly="1"/>
+                                <field name="wms_descripcion_camion" readonly="1"/>
                             </group>
                             <group>
                                 <field name="wms_cantidad_bultos" readonly="1"/>

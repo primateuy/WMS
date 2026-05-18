@@ -1,0 +1,68 @@
+{
+    "info": {
+        "name": "WIS Webhooks - Forum (ajustes y almacenamiento)",
+        "description": "Colección con casos REALES recibidos en o17_forum_support (wis.webhook.log) para reproducir el webhook /webhook/wis/callback.\n\nIMPORTANTE: el endpoint es type='json' y al ser auth='public' atiende sin firma si X-Hub-Signature está deshabilitado (controllers.py:40-41 comentado hoy). El handler hace `request.update_env(user=SUPERUSER_ID)` así que ojo con disparar pruebas contra una BD con datos reales — varios payloads NO son idempotentes y crean pickings.\n\nVariables:\n- base_url: http://localhost:8088 (o el host del Odoo destino)\n- wis_secret: 1234 (solo si descomentás `_verify_signature`. Si no, el header X-Hub-Signature es ignorado).",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+        {"key": "base_url", "value": "http://localhost:8088"},
+        {"key": "wis_secret", "value": "1234"}
+    ],
+    "item": [
+        {
+            "name": "00 - Ping (test handler, seguro)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json"}
+                ],
+                "url": {"raw": "{{base_url}}/webhook/wis/callback", "host": ["{{base_url}}"], "path": ["webhook", "wis", "callback"]},
+                "body": {"mode": "raw", "raw": "{\n    \"Id\": \"test\",\n    \"NumeroInterfazEjecucion\": 1,\n    \"Test\": {}\n}"}
+            }
+        },
+        {
+            "name": "01 - Ajustes mov. (PRD-550854, producto inexistente → 500 controlado, NO toca stock)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json"}
+                ],
+                "url": {"raw": "{{base_url}}/webhook/wis/callback", "host": ["{{base_url}}"], "path": ["webhook", "wis", "callback"]},
+                "body": {"mode": "raw", "raw": "{\n    \"Id\": \"Ajustes\",\n    \"NumeroInterfazEjecucion\": 95739,\n    \"Ajustes\": {\n        \"Ajustes\": [\n            {\n                \"Aplicacion\": \"INV540\",\n                \"Empresa\": 6005,\n                \"Ubicacion\": \"1BB00200\",\n                \"Funcionario\": 14,\n                \"TipoAjuste\": \"US\",\n                \"Motivo\": \"AM\",\n                \"DescripcionMotivo\": \"ASD\",\n                \"Producto\": \"PRD-550854\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"1\",\n                \"FechaRealizacion\": \"10/05/2026\",\n                \"AreaAveria\": \"N\",\n                \"NumeroAjusteStock\": 64043,\n                \"Predio\": \"1\",\n                \"CantidadMovimiento\": 150.0\n            }\n        ]\n    }\n}"}
+            }
+        },
+        {
+            "name": "02 - Ajustes mov. (PRD-490654, qty -50)  ⚠️ DESTRUCTIVO: crea picking real",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json"}
+                ],
+                "url": {"raw": "{{base_url}}/webhook/wis/callback", "host": ["{{base_url}}"], "path": ["webhook", "wis", "callback"]},
+                "body": {"mode": "raw", "raw": "{\n    \"Id\": \"Ajustes\",\n    \"NumeroInterfazEjecucion\": 95738,\n    \"Ajustes\": {\n        \"Ajustes\": [\n            {\n                \"Aplicacion\": \"INV540\",\n                \"Empresa\": 6005,\n                \"Ubicacion\": \"1BB00200\",\n                \"Funcionario\": 14,\n                \"TipoAjuste\": \"US\",\n                \"Motivo\": \"AM\",\n                \"DescripcionMotivo\": \"PRUEBA1\",\n                \"Producto\": \"PRD-490654\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"FechaRealizacion\": \"10/05/2026\",\n                \"AreaAveria\": \"N\",\n                \"NumeroAjusteStock\": 64042,\n                \"Predio\": \"1\",\n                \"CantidadMovimiento\": -50.0\n            }\n        ]\n    }\n}"}
+            }
+        },
+        {
+            "name": "03 - Almacenamiento (REC-932515 inexistente → 500 controlado)",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json"}
+                ],
+                "url": {"raw": "{{base_url}}/webhook/wis/callback", "host": ["{{base_url}}"], "path": ["webhook", "wis", "callback"]},
+                "body": {"mode": "raw", "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93394,\n    \"Almacenamiento\": {\n        \"Agenda\": 456,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36734\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-932515\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-1\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"1\",\n                \"Vencimiento\": \"08/05/2026\",\n                \"CantidadAlmacenada\": 120.0,\n                \"CantidadDisponible\": 0.0,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    }\n}"}
+            }
+        },
+        {
+            "name": "04 - Almacenamiento múltiple (REC-910005 con 5 productos)  ⚠️ DESTRUCTIVO si el picking sigue pendiente",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {"key": "Content-Type", "value": "application/json"}
+                ],
+                "url": {"raw": "{{base_url}}/webhook/wis/callback", "host": ["{{base_url}}"], "path": ["webhook", "wis", "callback"]},
+                "body": {"mode": "raw", "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93329,\n    \"Almacenamiento\": {\n        \"Agenda\": 463,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-103389\",\n        \"Etiqueta\": \"36741\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-910005\",\n        \"Detalles\": [\n            {\"Empresa\": 6005, \"Producto\": \"PRD-306770\", \"Faixa\": 1.0, \"Identificador\": \"*\", \"CantidadAlmacenada\": 150.0, \"CantidadDisponible\": 0.0, \"Ubicacion\": \"1BB00200\", \"FechaOperacion\": \"08/05/2026\", \"Funcionario\": 14},\n            {\"Empresa\": 6005, \"Producto\": \"PRD-367206\", \"Faixa\": 1.0, \"Identificador\": \"*\", \"CantidadAlmacenada\": 200.0, \"CantidadDisponible\": 0.0, \"Ubicacion\": \"1BB00200\", \"FechaOperacion\": \"08/05/2026\", \"Funcionario\": 14},\n            {\"Empresa\": 6005, \"Producto\": \"PRD-490654\", \"Faixa\": 1.0, \"Identificador\": \"*\", \"CantidadAlmacenada\": 300.0, \"CantidadDisponible\": 0.0, \"Ubicacion\": \"1BB00200\", \"FechaOperacion\": \"08/05/2026\", \"Funcionario\": 14},\n            {\"Empresa\": 6005, \"Producto\": \"PRD-556768\", \"Faixa\": 1.0, \"Identificador\": \"*\", \"CantidadAlmacenada\": 200.0, \"CantidadDisponible\": 0.0, \"Ubicacion\": \"1BB00200\", \"FechaOperacion\": \"08/05/2026\", \"Funcionario\": 14},\n            {\"Empresa\": 6005, \"Producto\": \"PRD-761034\", \"Faixa\": 1.0, \"Identificador\": \"*\", \"CantidadAlmacenada\": 10.0, \"CantidadDisponible\": 0.0, \"Ubicacion\": \"1BB00200\", \"FechaOperacion\": \"08/05/2026\", \"Funcionario\": 14}\n        ]\n    }\n}"}
+            }
+        }
+    ]
+}

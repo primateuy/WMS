@@ -5,6 +5,7 @@ from . import models
 from . import res_partner
 from . import stock_picking
 from . import stock_picking_type
+from . import StockQuantPackage
 from . import Product
 from . import purchase_order
 from . import wms_event_processor

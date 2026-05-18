@@ -1,0 +1,35 @@
+{
+    "Id": "Almacenamiento",
+    "NumeroInterfazEjecucion": 93394,
+    "ConfirmacionRecepcion": null,
+    "ConfirmacionPedido": null,
+    "PedidosAnulados": null,
+    "Ajustes": null,
+    "ConsultaStock": null,
+    "ConfirmacionMercaderiaPreparada": null,
+    "Almacenamiento": {
+        "Agenda": 456,
+        "TipoAgente": "PRO",
+        "CodigoAgente": "PRO-181390",
+        "Etiqueta": "36734",
+        "TipoEtiqueta": "WE",
+        "Serializado": "REC-932515",
+        "Detalles": [
+            {
+                "Empresa": 6005,
+                "Producto": "PRD-1",
+                "Faixa": 1.0,
+                "Identificador": "1",
+                "Vencimiento": "08/05/2026",
+                "CantidadAlmacenada": 120.0,
+                "CantidadDisponible": 0.0,
+                "Serializado": null,
+                "Ubicacion": "1BB00200",
+                "FechaOperacion": "08/05/2026",
+                "Funcionario": 14
+            }
+        ]
+    },
+    "ConfirmacionProduccion": null,
+    "Test": null
+}

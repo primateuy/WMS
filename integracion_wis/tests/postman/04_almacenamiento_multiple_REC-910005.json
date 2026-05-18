@@ -1,0 +1,87 @@
+{
+    "Id": "Almacenamiento",
+    "NumeroInterfazEjecucion": 93329,
+    "ConfirmacionRecepcion": null,
+    "ConfirmacionPedido": null,
+    "PedidosAnulados": null,
+    "Ajustes": null,
+    "ConsultaStock": null,
+    "ConfirmacionMercaderiaPreparada": null,
+    "Almacenamiento": {
+        "Agenda": 463,
+        "TipoAgente": "PRO",
+        "CodigoAgente": "PRO-103389",
+        "Etiqueta": "36741",
+        "TipoEtiqueta": "WE",
+        "Serializado": "REC-910005",
+        "Detalles": [
+            {
+                "Empresa": 6005,
+                "Producto": "PRD-306770",
+                "Faixa": 1.0,
+                "Identificador": "*",
+                "Vencimiento": null,
+                "CantidadAlmacenada": 150.0,
+                "CantidadDisponible": 0.0,
+                "Serializado": null,
+                "Ubicacion": "1BB00200",
+                "FechaOperacion": "08/05/2026",
+                "Funcionario": 14
+            },
+            {
+                "Empresa": 6005,
+                "Producto": "PRD-367206",
+                "Faixa": 1.0,
+                "Identificador": "*",
+                "Vencimiento": null,
+                "CantidadAlmacenada": 200.0,
+                "CantidadDisponible": 0.0,
+                "Serializado": null,
+                "Ubicacion": "1BB00200",
+                "FechaOperacion": "08/05/2026",
+                "Funcionario": 14
+            },
+            {
+                "Empresa": 6005,
+                "Producto": "PRD-490654",
+                "Faixa": 1.0,
+                "Identificador": "*",
+                "Vencimiento": null,
+                "CantidadAlmacenada": 300.0,
+                "CantidadDisponible": 0.0,
+                "Serializado": null,
+                "Ubicacion": "1BB00200",
+                "FechaOperacion": "08/05/2026",
+                "Funcionario": 14
+            },
+            {
+                "Empresa": 6005,
+                "Producto": "PRD-556768",
+                "Faixa": 1.0,
+                "Identificador": "*",
+                "Vencimiento": null,
+                "CantidadAlmacenada": 200.0,
+                "CantidadDisponible": 0.0,
+                "Serializado": null,
+                "Ubicacion": "1BB00200",
+                "FechaOperacion": "08/05/2026",
+                "Funcionario": 14
+            },
+            {
+                "Empresa": 6005,
+                "Producto": "PRD-761034",
+                "Faixa": 1.0,
+                "Identificador": "*",
+                "Vencimiento": null,
+                "CantidadAlmacenada": 10.0,
+                "CantidadDisponible": 0.0,
+                "Serializado": null,
+                "Ubicacion": "1BB00200",
+                "FechaOperacion": "08/05/2026",
+                "Funcionario": 14
+            }
+        ]
+    },
+    "ConfirmacionProduccion": null,
+    "Test": null
+}

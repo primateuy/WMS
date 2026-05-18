@@ -1,0 +1,25 @@
+{
+    "Id": "Ajustes",
+    "NumeroInterfazEjecucion": 999001,
+    "Ajustes": {
+        "Ajustes": [
+            {
+                "Aplicacion": "INV540",
+                "Empresa": 6005,
+                "Ubicacion": "1BB00200",
+                "Funcionario": 14,
+                "TipoAjuste": "US",
+                "Motivo": "AM",
+                "DescripcionMotivo": "PRUEBA-POSTMAN-REAL",
+                "Producto": "PRD-428421",
+                "Faixa": 1.0,
+                "Identificador": "*",
+                "FechaRealizacion": "18/05/2026",
+                "AreaAveria": "N",
+                "NumeroAjusteStock": 999001,
+                "Predio": "1",
+                "CantidadMovimiento": 5.0
+            }
+        ]
+    }
+}

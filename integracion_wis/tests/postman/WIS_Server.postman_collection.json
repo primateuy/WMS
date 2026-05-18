@@ -1,0 +1,738 @@
+{
+  "info": {
+    "_postman_id": "aa97c331-1a75-4dd5-8e4a-6a410c0e6f63",
+    "name": "WIS Webhooks - Forum (ajustes + almacenamiento + históricos)",
+    "description": "Colección unificada para probar el endpoint POST /webhook/wis/callback contra cualquier servidor.\n\n**Variables** (editar en la colección):\n- `base_url`: dominio del Odoo destino, sin barra final. Ej: `https://primate.uy` o `http://localhost:8088`.\n- `use_hmac`: `false` por default; pasar a `true` si el server destino tiene `_verify_signature` activado.\n- `wis_secret`: secreto HMAC-SHA512 (solo si `use_hmac=true`). En la BD se guarda en `ir.config_parameter.wis.webhook_secret`.\n\n**Resultado esperado**: cuerpo `{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{...}}`. El `result.status` es 200/400/500 según el caso. Los `error` de Odoo (excepciones no atrapadas) vienen como `result.error` o HTTP 500.\n\n**Idempotencia**: ningún caso es idempotente. Reenviar un ajuste con `NumeroAjusteStock` distinto crea otro picking; un almacenamiento sobre un picking ya `done` da 500 controlado.\n\n**Pre-requisitos**:\n- Módulo `integracion_wis` instalado y actualizado (schema con `picking_type_ajuste_wis_id` y `tipo_ajuste_recuento`).\n- Para los ajustes con movimiento: `integracion_wis.integracion_wis.picking_type_ajuste_wis_id` configurado, con `return_picking_type_id` para CantidadMovimiento negativa.\n- Para almacenamientos con movimiento: aplicar el fix de `controllers.py:1622-1670` (search por `group_id` en vez de `purchase_id`).\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://support-forum.primateuy.com"
+    },
+    {
+      "key": "use_hmac",
+      "value": "false"
+    },
+    {
+      "key": "wis_secret",
+      "value": ""
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Pre-request opcional: si pm.variables.get('use_hmac') === 'true' agrega el header X-Hub-Signature.",
+          "// WIS firma con HMAC-SHA512(body, secret) y manda el resultado en Base64.",
+          "// Si en el servidor `_verify_signature` sigue comentado, dejá use_hmac=false.",
+          "const useHmac = (pm.variables.get('use_hmac') || 'false').toLowerCase() === 'true';",
+          "if (useHmac) {",
+          "    const secret = pm.variables.get('wis_secret') || '';",
+          "    if (!secret) {",
+          "        console.warn('use_hmac=true pero wis_secret está vacío; el server va a rechazar la firma.');",
+          "    }",
+          "    const body = (pm.request.body && pm.request.body.raw) || '';",
+          "    const hmac = CryptoJS.HmacSHA512(body, secret);",
+          "    const sig = CryptoJS.enc.Base64.stringify(hmac);",
+          "    pm.request.headers.upsert({ key: 'X-Hub-Signature', value: sig });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "00 - Sanity / Conectividad",
+      "description": "Verifica que el endpoint responde y que el dispatcher reconoce el evento.",
+      "item": [
+        {
+          "name": "00 - Ping (test handler)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"test\",\n    \"NumeroInterfazEjecucion\": 1,\n    \"Test\": {}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Sanity check. El handler `_handle_test` es `pass`; responde 200 sin tocar nada."
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 - Casos REALES reproducidos en local (crean movimientos de stock)",
+      "description": "Estos casos en el local del 18-may-2026 movieron stock real. Replicarlos sobre el server hace lo mismo.",
+      "item": [
+        {
+          "name": "Ajuste +5 PRD-428421 (real, crea picking interno)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Ajustes\",\n    \"NumeroInterfazEjecucion\": 999001,\n    \"Ajustes\": {\n        \"Ajustes\": [\n            {\n                \"Aplicacion\": \"INV540\",\n                \"Empresa\": 6005,\n                \"Ubicacion\": \"1BB00200\",\n                \"Funcionario\": 14,\n                \"TipoAjuste\": \"US\",\n                \"Motivo\": \"AM\",\n                \"DescripcionMotivo\": \"PRUEBA-POSTMAN-REAL\",\n                \"Producto\": \"PRD-428421\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"FechaRealizacion\": \"18/05/2026\",\n                \"AreaAveria\": \"N\",\n                \"NumeroAjusteStock\": 999001,\n                \"Predio\": \"1\",\n                \"CantidadMovimiento\": 5.0\n            }\n        ]\n    }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "En local creó POLO/INT/00009 (done). Mueve 5 uds. de POLO/Existencias a Tránsito a Almacenes. Requiere `integracion_wis.integracion_wis.picking_type_ajuste_wis_id` configurado."
+          }
+        },
+        {
+          "name": "Almacenamiento REC-240715 (12 productos, 2700 uds. - real)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 999002,\n    \"Almacenamiento\": {\n        \"Agenda\": 999,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-TEST\",\n        \"Etiqueta\": \"99999\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-240715\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-334563\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-957388\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-124706\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-511869\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-587552\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-852644\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-372002\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-772021\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-140418\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-580167\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 500.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-943964\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-150623\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "En local validó POLO/INT/00006 a done y dejó 12 quants nuevos en POLO/Existencias. Requiere que el IMP POLO/IMPO/00009 esté en `done` y que aplique el fix de group_id (controllers.py:1622-1670)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Casos seguros (500 controlado)",
+      "description": "Útiles para validar conectividad y manejo de error sin tocar stock.",
+      "item": [
+        {
+          "name": "Ajuste con producto inexistente (PRD-550854) — 500 controlado",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Ajustes\",\n    \"NumeroInterfazEjecucion\": 95739,\n    \"Ajustes\": {\n        \"Ajustes\": [\n            {\n                \"Aplicacion\": \"INV540\",\n                \"Empresa\": 6005,\n                \"Ubicacion\": \"1BB00200\",\n                \"Funcionario\": 14,\n                \"TipoAjuste\": \"US\",\n                \"Motivo\": \"AM\",\n                \"DescripcionMotivo\": \"ASD\",\n                \"Producto\": \"PRD-550854\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"1\",\n                \"FechaRealizacion\": \"10/05/2026\",\n                \"AreaAveria\": \"N\",\n                \"NumeroAjusteStock\": 64043,\n                \"Predio\": \"1\",\n                \"CantidadMovimiento\": 150.0\n            }\n        ]\n    }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Devuelve 500 con detail='ajustes: 1 con error de 1 total. ajustes: producto codigo_unico=PRD-550854 no encontrado.'. No toca stock."
+          }
+        },
+        {
+          "name": "Almacenamiento con picking inexistente (REC-932515) — 500 controlado",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93394,\n    \"Almacenamiento\": {\n        \"Agenda\": 456,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36734\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-932515\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-1\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"1\",\n                \"Vencimiento\": \"08/05/2026\",\n                \"CantidadAlmacenada\": 120.0,\n                \"CantidadDisponible\": 0.0,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Devuelve 500 con detail='almacenamiento: no se encontró picking de recepción para REC-932515.'. No toca stock."
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Casos destructivos (mueven stock si el IMP sigue pendiente)",
+      "description": "Replicación del histórico nro=93329. Si en el server destino el IMP POLO/IMPO/00002 ya está `done` y el INT también, da 500 controlado; si está pendiente, valida y mueve stock.",
+      "item": [
+        {
+          "name": "Almacenamiento REC-910005 (5 productos) — DESTRUCTIVO si el IMP está pendiente",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93329,\n    \"Almacenamiento\": {\n        \"Agenda\": 463,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-103389\",\n        \"Etiqueta\": \"36741\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-910005\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-306770\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"CantidadAlmacenada\": 150.0,\n                \"CantidadDisponible\": 0.0,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-367206\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-490654\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-556768\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-761034\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"CantidadAlmacenada\": 10.0,\n                \"CantidadDisponible\": 0.0,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "En local validó POLO/INT/00004 a done. Si el IMP correspondiente sigue pendiente en el server destino, lo dispara también."
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Payloads históricos crudos de o17_forum_support",
+      "description": "Los 12 almacenamientos + 2 ajustes recibidos originalmente por el server entre 2026-05-08 y 2026-05-10.",
+      "item": [
+        {
+          "name": "[Hist nro=93289] Almacenamiento — REC-859208 (5 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93289,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 467,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-597347\",\n        \"Etiqueta\": \"36747\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-859208\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-239198\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-367206\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-576948\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-858756\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-993976\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 100.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=26). NumeroInterfazEjecucion=93289."
+          }
+        },
+        {
+          "name": "[Hist nro=93292] Almacenamiento — REC-760730 (4 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93292,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 466,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-597347\",\n        \"Etiqueta\": \"36746\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-760730\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-239198\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-367206\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-576948\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-858756\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=28). NumeroInterfazEjecucion=93292."
+          }
+        },
+        {
+          "name": "[Hist nro=93306] Almacenamiento — REC-577298 (5 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93306,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 465,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-597347\",\n        \"Etiqueta\": \"36745\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-577298\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-239198\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-367206\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-576948\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-858756\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-993976\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 150.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=30). NumeroInterfazEjecucion=93306."
+          }
+        },
+        {
+          "name": "[Hist nro=93318] Almacenamiento — REC-633430 (4 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93318,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 464,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-597347\",\n        \"Etiqueta\": \"36744\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-633430\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-239198\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-367206\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-576948\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-993976\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 150.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=32). NumeroInterfazEjecucion=93318."
+          }
+        },
+        {
+          "name": "[Hist nro=93329] Almacenamiento — REC-910005 (5 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93329,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 463,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-103389\",\n        \"Etiqueta\": \"36741\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-910005\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-306770\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 150.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-367206\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-490654\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 300.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-556768\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-761034\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 10.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=34). NumeroInterfazEjecucion=93329."
+          }
+        },
+        {
+          "name": "[Hist nro=93332] Almacenamiento — REC-434563 (1 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93332,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 462,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-183426\",\n        \"Etiqueta\": \"36740\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-434563\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-572415\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 5000.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=36). NumeroInterfazEjecucion=93332."
+          }
+        },
+        {
+          "name": "[Hist nro=93343] Almacenamiento — REC-388839 (1 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93343,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 461,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36739\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-388839\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-127238\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": \"01/01/2027\",\n                \"CantidadAlmacenada\": 10.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=38). NumeroInterfazEjecucion=93343."
+          }
+        },
+        {
+          "name": "[Hist nro=93354] Almacenamiento — REC-262197 (1 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93354,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 460,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36738\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-262197\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-127238\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": \"01/01/2027\",\n                \"CantidadAlmacenada\": 120.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=40). NumeroInterfazEjecucion=93354."
+          }
+        },
+        {
+          "name": "[Hist nro=93364] Almacenamiento — REC-428038 (1 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93364,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 459,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36737\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-428038\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-127238\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": \"01/01/2027\",\n                \"CantidadAlmacenada\": 103.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=42). NumeroInterfazEjecucion=93364."
+          }
+        },
+        {
+          "name": "[Hist nro=93376] Almacenamiento — REC-870015 (1 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93376,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 458,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36736\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-870015\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-127238\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": \"01/01/2027\",\n                \"CantidadAlmacenada\": 120.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=44). NumeroInterfazEjecucion=93376."
+          }
+        },
+        {
+          "name": "[Hist nro=93385] Almacenamiento — REC-453552 (1 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93385,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 457,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36735\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-453552\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-1\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"1\",\n                \"Vencimiento\": \"08/05/2026\",\n                \"CantidadAlmacenada\": 12.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=46). NumeroInterfazEjecucion=93385."
+          }
+        },
+        {
+          "name": "[Hist nro=93394] Almacenamiento — REC-932515 (1 detalle/s)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 93394,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": null,\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": {\n        \"Agenda\": 456,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-181390\",\n        \"Etiqueta\": \"36734\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-932515\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-1\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"1\",\n                \"Vencimiento\": \"08/05/2026\",\n                \"CantidadAlmacenada\": 120.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"08/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    },\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=48). NumeroInterfazEjecucion=93394."
+          }
+        },
+        {
+          "name": "[Hist nro=95738] Ajustes — PRD-490654 qty=-50.0",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Ajustes\",\n    \"NumeroInterfazEjecucion\": 95738,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": {\n        \"Ajustes\": [\n            {\n                \"Aplicacion\": \"INV540\",\n                \"Empresa\": 6005,\n                \"Ubicacion\": \"1BB00200\",\n                \"Funcionario\": 14,\n                \"TipoAjuste\": \"US\",\n                \"Motivo\": \"AM\",\n                \"DescripcionMotivo\": \"PRUEBA1\",\n                \"FechaMotivo\": null,\n                \"Producto\": \"PRD-490654\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"FechaRealizacion\": \"10/05/2026\",\n                \"FechaUltimaModificacion\": null,\n                \"AreaAveria\": \"N\",\n                \"NumeroAjusteStock\": 64042,\n                \"InterfazEjecucion\": null,\n                \"FechaVencimiento\": null,\n                \"Predio\": \"1\",\n                \"CantidadMovimiento\": -50.0,\n                \"Serializado\": null,\n                \"NroLogInventario\": null,\n                \"Atributos\": null\n            }\n        ]\n    },\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": null,\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=60). NumeroInterfazEjecucion=95738."
+          }
+        },
+        {
+          "name": "[Hist nro=95739] Ajustes — PRD-550854 qty=150.0",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Ajustes\",\n    \"NumeroInterfazEjecucion\": 95739,\n    \"ConfirmacionRecepcion\": null,\n    \"ConfirmacionPedido\": null,\n    \"PedidosAnulados\": null,\n    \"Ajustes\": {\n        \"Ajustes\": [\n            {\n                \"Aplicacion\": \"INV540\",\n                \"Empresa\": 6005,\n                \"Ubicacion\": \"1BB00200\",\n                \"Funcionario\": 14,\n                \"TipoAjuste\": \"US\",\n                \"Motivo\": \"AM\",\n                \"DescripcionMotivo\": \"ASD\",\n                \"FechaMotivo\": null,\n                \"Producto\": \"PRD-550854\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"1\",\n                \"FechaRealizacion\": \"10/05/2026\",\n                \"FechaUltimaModificacion\": null,\n                \"AreaAveria\": \"N\",\n                \"NumeroAjusteStock\": 64043,\n                \"InterfazEjecucion\": null,\n                \"FechaVencimiento\": null,\n                \"Predio\": \"1\",\n                \"CantidadMovimiento\": 150.0,\n                \"Serializado\": null,\n                \"NroLogInventario\": null,\n                \"Atributos\": null\n            }\n        ]\n    },\n    \"ConsultaStock\": null,\n    \"ConfirmacionMercaderiaPreparada\": null,\n    \"Almacenamiento\": null,\n    \"ConfirmacionProduccion\": null,\n    \"Test\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload original recibido por WIS (wis_webhook_log id=62). NumeroInterfazEjecucion=95739."
+          }
+        }
+      ]
+    }
+  ]
+}

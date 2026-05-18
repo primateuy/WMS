@@ -85,6 +85,25 @@ class IntegracionWIS(models.Model):
              'manuales de integración quedan inactivos.',
     )
 
+    # Webhook ajustes (spec sección 6.4)
+    picking_type_ajuste_wis_id = fields.Many2one(
+        'stock.picking.type',
+        string='Tipo de operación para ajustes WIS',
+        help='Tipo de operación usado al crear los pickings que reflejan ajustes recibidos '
+             'desde el webhook ajustes (entradas). Para los ajustes negativos (salidas) se '
+             'usa el return_picking_type_id de este tipo.'
+    )
+
+    tipo_ajuste_recuento = fields.Char(
+        string='Código TipoAjuste de recuento físico',
+        help='Valor exacto del campo TipoAjuste que WIS envía cuando el ajuste corresponde a '
+             'un recuento físico. Si el TipoAjuste recibido coincide con este código, el handler '
+             'modifica directamente stock.quant vía action_apply_inventory. Cualquier otro '
+             'TipoAjuste se procesa como movimiento de stock (picking de transferencia interna). '
+             'PENDIENTE: confirmar con WIS el catálogo completo de TipoAjuste y el código exacto '
+             'del recuento físico.'
+    )
+
     _sql_constraints = [
         ('company_unique', 'unique(company_id)', '¡Solo puede existir una configuración por compañía!'),
     ]

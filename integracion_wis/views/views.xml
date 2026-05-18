@@ -59,6 +59,14 @@
           <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
           <field name="ultima_sync_productos" readonly="1"/>
           </group>
+          <group string="Ajustes WIS">
+            <field name="picking_type_ajuste_wis_id"
+                   options="{'no_create': True}"
+                   help="Tipo de operación que se usa al crear pickings desde el webhook 'ajustes'. Para ajustes negativos se utiliza su tipo de devolución."/>
+            <field name="tipo_ajuste_recuento"
+                   placeholder="Pendiente confirmar con WIS"
+                   help="Código exacto del campo TipoAjuste que WIS envía cuando el ajuste es un recuento físico. Otros valores se procesan como movimientos de stock."/>
+          </group>
         </form>
       </field>
     </record>

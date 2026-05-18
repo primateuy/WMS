@@ -61,6 +61,13 @@ class StockPicking(models.Model):
         copy=False,
         readonly=True,
     )
+    wms_descripcion_camion = fields.Char(
+        string="Descripción camión WMS",
+        copy=False,
+        readonly=True,
+        help="Descripción del camión informada por WIS en el webhook confirmacionPedido. "
+             "Campo informativo, no impacta en la lógica.",
+    )
     wms_nro_remito = fields.Char(
         string="Nro. Remito WMS",
         copy=False,

@@ -1,0 +1,40 @@
+{
+    "Id": "Ajustes",
+    "NumeroInterfazEjecucion": 95739,
+    "ConfirmacionRecepcion": null,
+    "ConfirmacionPedido": null,
+    "PedidosAnulados": null,
+    "Ajustes": {
+        "Ajustes": [
+            {
+                "Aplicacion": "INV540",
+                "Empresa": 6005,
+                "Ubicacion": "1BB00200",
+                "Funcionario": 14,
+                "TipoAjuste": "US",
+                "Motivo": "AM",
+                "DescripcionMotivo": "ASD",
+                "FechaMotivo": null,
+                "Producto": "PRD-550854",
+                "Faixa": 1.0,
+                "Identificador": "1",
+                "FechaRealizacion": "10/05/2026",
+                "FechaUltimaModificacion": null,
+                "AreaAveria": "N",
+                "NumeroAjusteStock": 64043,
+                "InterfazEjecucion": null,
+                "FechaVencimiento": null,
+                "Predio": "1",
+                "CantidadMovimiento": 150.0,
+                "Serializado": null,
+                "NroLogInventario": null,
+                "Atributos": null
+            }
+        ]
+    },
+    "ConsultaStock": null,
+    "ConfirmacionMercaderiaPreparada": null,
+    "Almacenamiento": null,
+    "ConfirmacionProduccion": null,
+    "Test": null
+}
