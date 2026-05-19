@@ -518,8 +518,11 @@ Body: {body_str[:500]}"""
                 )
 
         contenedores = data.get('contenedores', [])
-        total_bultos = sum(c.get('cantidadBultos', 0) for c in contenedores)
-        peso_total   = sum(c.get('pesoReal', 0.0)     for c in contenedores)
+        # .get(k, default) NO usa el default cuando el valor es None. WIS manda null en
+        # cantidadBultos/pesoReal cuando no hay dato, así que coercemos con `or` para evitar
+        # TypeError "unsupported operand type(s) for +: 'int' and 'NoneType'".
+        total_bultos = sum((c.get('cantidadBultos') or 0)   for c in contenedores)
+        peso_total   = sum((c.get('pesoReal')       or 0.0) for c in contenedores)
         precintos    = ', '.join(filter(None,
             [c.get('precinto1', '') for c in contenedores] +
             [c.get('precinto2', '') for c in contenedores]
