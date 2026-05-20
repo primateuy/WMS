@@ -362,6 +362,19 @@ Body: {body_str[:500]}"""
 
 
 
+                # Punto 2: marcar origen y campos WIS (location/panel si vienen en payload).
+                picking_wis_vals = {'wms_origen': 'recepcion'}
+                wis_loc = data.get('locationID') or data.get('LocationID') or data.get('location_id')
+                wis_panel = data.get('panelID') or data.get('PanelID') or data.get('panel_id')
+                if wis_loc:
+                    picking_wis_vals['wis_location_id'] = str(wis_loc)
+                if wis_panel:
+                    picking_wis_vals['wis_panel_id'] = str(wis_panel)
+                picking.with_context(skip_wms_integration=True).sudo().write(picking_wis_vals)
+
+                # Punto 4: autocompletar document_type para que la validación no falle por CFE vacío.
+                picking.sudo()._wis_complete_document_type()
+
                 if picking.state == 'assigned':
                     res = picking.with_context(
                         skip_wms_integration=True,
@@ -607,6 +620,7 @@ Body: {body_str[:500]}"""
                 # Spec 2.4 paso 2: registrar datos de transporte
                 picking.with_context(skip_wms_integration=True).write({
                     'wms_estado':            'despachado',
+                    'wms_origen':            'despacho',
                     'wms_fecha_despacho':    fecha_despacho,
                     'wms_transportadora':    str(transportadora) if transportadora else matricula,
                     'wms_descripcion_camion': descripcion_camion,
@@ -618,6 +632,9 @@ Body: {body_str[:500]}"""
                         f"Precintos: {precintos or '—'} | Memo: {memo or '—'}"
                     ),
                 })
+
+                # Punto 4: autocompletar document_type antes de validar (si aplica CFE).
+                picking.sudo()._wis_complete_document_type()
 
                 # Spec 2.4 paso 3 + 2.5: crear paquetes con mapa de cantidades por producto.
                 paquetes_creados = self._crear_paquetes_desde_contenedores(
@@ -712,6 +729,14 @@ Body: {body_str[:500]}"""
         if not hasattr(picking, 'uses_cfe') or not picking.uses_cfe:
             return False
         if getattr(picking, 'cfe_emitido', False):
+            return False
+        # Punto 3: si la location destino está marcada con wis_no_requiere_eremito,
+        # no se envía CFE para este movimiento (movimiento interno sin traslado externo).
+        if getattr(picking, 'wis_skip_eremito', False):
+            _logger.info(
+                "[WIS] %s | omito eRemito de picking=%s por location_dest_id.wis_no_requiere_eremito",
+                origen or 'eRemito', picking.name,
+            )
             return False
         try:
             res = picking._delivery_guide() if hasattr(picking, '_delivery_guide') else False
@@ -941,6 +966,7 @@ Body: {body_str[:500]}"""
                 # Spec 3.3 paso 2: actualizar estado y fecha.
                 picking.with_context(skip_wms_integration=True).write({
                     'wms_estado':            'preparado',
+                    'wms_origen':            'mercaderia_preparada',
                     'wms_fecha_preparacion': fecha_preparacion,
                 })
 
@@ -1129,6 +1155,7 @@ Body: {body_str[:500]}"""
                 # Spec 4.3 paso 3: cancelar el picking
                 picking.with_context(skip_wms_integration=True).write({
                     'wms_estado':           'anulado',
+                    'wms_origen':           'anulacion',
                     'wms_fecha_anulacion':  fecha_anulacion,
                     'wms_motivo_anulacion': motivo,
                 })
@@ -1455,12 +1482,20 @@ Body: {body_str[:500]}"""
         if desc_motivo:
             origin = f"{origin} - {desc_motivo}"
 
+        # Punto 4: partner_id de la company es requerido para que el compute de
+        # l10n_latam_document_type_id se dispare (depende de partner_id + punto_emision_id).
+        company = tipo_op.company_id or request.env.company
+        partner_fallback = company.partner_id.id if company and company.partner_id else False
+
         picking = request.env['stock.picking'].sudo().create({
             'picking_type_id': tipo_op.id,
             'location_id':     tipo_op.default_location_src_id.id,
             'location_dest_id': tipo_op.default_location_dest_id.id,
             'origin':          origin,
             'scheduled_date':  fecha_real,
+            'partner_id':      partner_fallback,
+            # Punto 2: tipo de evento WIS que generó este picking.
+            'wms_origen':      'ajuste',
         })
 
         move = request.env['stock.move'].sudo().create({
@@ -1500,6 +1535,10 @@ Body: {body_str[:500]}"""
 
         picking.with_context(skip_wms_integration=True).sudo().action_confirm()
         picking.with_context(skip_wms_integration=True).sudo().action_assign()
+
+        # Punto 4: forzar el cómputo de l10n_latam_document_type_id ahora que el picking
+        # tiene partner_id + picking_type_id (los onchange de vista no se disparan en create()).
+        picking.sudo()._wis_complete_document_type()
 
         # Si el move tiene move_line, asignar lote y cantidad; sino, crearla.
         if move.move_line_ids:
@@ -1768,6 +1807,19 @@ Body: {body_str[:500]}"""
                 if lote_id:
                     ml_vals['lot_id'] = lote_id
                 request.env['stock.move.line'].sudo().create(ml_vals)
+
+        # Punto 2: marcar origen WIS y propagar location/panel si vienen en payload.
+        almacen_vals = {'wms_origen': 'almacenamiento'}
+        wis_loc = data.get('locationID') or data.get('LocationID') or data.get('location_id')
+        wis_panel = data.get('panelID') or data.get('PanelID') or data.get('panel_id')
+        if wis_loc:
+            almacen_vals['wis_location_id'] = str(wis_loc)
+        if wis_panel:
+            almacen_vals['wis_panel_id'] = str(wis_panel)
+        picking_int.with_context(skip_wms_integration=True).sudo().write(almacen_vals)
+
+        # Punto 4: autocompletar document_type antes de validar (si aplica CFE).
+        picking_int.sudo()._wis_complete_document_type()
 
         # Paso 4: validar el picking interno (sin backorder)
         try:

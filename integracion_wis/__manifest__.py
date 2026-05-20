@@ -16,7 +16,7 @@
     'installable': True,
     'icon': '/integracion_wis/static/description/icon.png',
 
-    'depends': ['base', 'contacts', 'stock', 'account', 'sale_management', 'purchase', 'product', 'stock_barcode'],
+    'depends': ['base', 'contacts', 'stock', 'account', 'sale_management', 'purchase', 'product', 'stock_barcode', 'l10n_uy_einvoice_base', 'l10n_uy_einvoice_uruware'],
 
     'data': [
         'security/ir.model.access.csv',
@@ -27,6 +27,7 @@
         'views/PartnerView.xml',
         'views/StockPickingTypeView.xml',
         'views/StockPickingView.xml',
+        'views/StockLocationView.xml',
         'views/PickingWMSlog.xml',
         'views/PurchaseOrderView.xml',
         'views/WizardStock.xml',

@@ -152,6 +152,39 @@
             },
             "description": "En local validó POLO/INT/00006 a done y dejó 12 quants nuevos en POLO/Existencias. Requiere que el IMP POLO/IMPO/00009 esté en `done` y que aplique el fix de group_id (controllers.py:1622-1670)."
           }
+        },
+        {
+          "name": "Almacenamiento REC-240715 — recepción 12 productos (200x11 + 500x1 = 2700)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/webhook/wis/callback",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "webhook",
+                "wis",
+                "callback"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"Id\": \"Almacenamiento\",\n    \"NumeroInterfazEjecucion\": 999002,\n    \"Almacenamiento\": {\n        \"Agenda\": 999,\n        \"TipoAgente\": \"PRO\",\n        \"CodigoAgente\": \"PRO-TEST\",\n        \"Etiqueta\": \"99999\",\n        \"TipoEtiqueta\": \"WE\",\n        \"Serializado\": \"REC-240715\",\n        \"Detalles\": [\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-334563\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-957388\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-124706\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-511869\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-587552\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-852644\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-372002\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-772021\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-140418\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-580167\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 500.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-943964\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            },\n            {\n                \"Empresa\": 6005,\n                \"Producto\": \"PRD-150623\",\n                \"Faixa\": 1.0,\n                \"Identificador\": \"*\",\n                \"Vencimiento\": null,\n                \"CantidadAlmacenada\": 200.0,\n                \"CantidadDisponible\": 0.0,\n                \"Serializado\": null,\n                \"Ubicacion\": \"1BB00200\",\n                \"FechaOperacion\": \"18/05/2026\",\n                \"Funcionario\": 14\n            }\n        ]\n    }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Payload preparado el 2026-05-19 para la recepción REC-240715 del server de support. 12 detalles, productos PRD-334563..PRD-150623. Total 2700 uds. (11 × 200 + 1 × 500). NumeroInterfazEjecucion=999002. NO ejecutado todavía — disparar manualmente."
+          }
         }
       ]
     },

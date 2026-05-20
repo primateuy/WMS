@@ -4,6 +4,7 @@ from . import wms_integracion_log
 from . import models
 from . import res_partner
 from . import stock_picking
+from . import stock_location
 from . import stock_picking_type
 from . import StockQuantPackage
 from . import Product

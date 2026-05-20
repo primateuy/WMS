@@ -6,6 +6,9 @@
             <field name="name">stock.picking.form.inherit.wms</field>
             <field name="model">stock.picking</field>
             <field name="inherit_id" ref="stock.view_picking_form"/>
+            <!-- Priority alto para que el xpath del botón create_delivery_guide
+                 se aplique DESPUÉS de l10n_uy_einvoice_base.stock.picking.edi.form. -->
+            <field name="priority">100</field>
             <field name="arch" type="xml">
 
                 <!-- IDs WMS junto al origen -->
@@ -13,12 +16,16 @@
                     <field name="idPedidoWMS" readonly="1"/>
                     <field name="codigo_unico" readonly="1"/>
                     <field name="wms_referencia" readonly="1"/>
+                    <field name="wis_location_id" readonly="1"/>
+                    <field name="wis_panel_id" readonly="1"/>
                 </xpath>
 
                 <!-- Badge de estado WMS en el header, solo si fue enviado -->
                 <xpath expr="//header" position="inside">
                     <field name="wms_estado" widget="statusbar"
                            statusbar_visible="sin_enviar,enviado,preparado,despachado"/>
+                    <field name="wms_origen" widget="badge"
+                           invisible="wms_origen == 'manual'"/>
                 </xpath>
 
                 <!-- Pestaña WMS + Logs -->
@@ -31,12 +38,15 @@
                         <group string="Estado general">
                             <group>
                                 <field name="wms_estado"/>
+                                <field name="wms_origen"/>
                                 <field name="wms_fecha_confirmacion" readonly="1"/>
                             </group>
                             <group>
                                 <field name="wms_referencia" readonly="1"/>
                                 <field name="idPedidoWMS" readonly="1"/>
                                 <field name="codigo_unico" readonly="1"/>
+                                <field name="wis_location_id" readonly="1"/>
+                                <field name="wis_panel_id" readonly="1"/>
                             </group>
                         </group>
 
@@ -119,6 +129,16 @@
 
                 </xpath>
 
+                <!-- Punto 3: ocultar el botón "e-Remito" cuando la location destino
+                     tenga el flag activo. wis_skip_eremito está expuesto invisible
+                     para que la expresión del invisible del botón pueda evaluarse. -->
+                <xpath expr="//field[@name='origin']" position="before">
+                    <field name="wis_skip_eremito" invisible="1"/>
+                </xpath>
+                <xpath expr="//header//button[@name='create_delivery_guide']" position="attributes">
+                    <attribute name="invisible">state != 'done' or company_country_code != 'UY' or not uses_cfe or cfe_emitido or wis_skip_eremito</attribute>
+                </xpath>
+
             </field>
         </record>
 
@@ -139,6 +159,16 @@
                     <filter string="Anulados por WMS"
                             name="wms_anulado"
                             domain="[('wms_estado', '=', 'anulado')]"/>
+                    <separator/>
+                    <filter string="Origen: Ajuste WMS"
+                            name="wms_origen_ajuste"
+                            domain="[('wms_origen', '=', 'ajuste')]"/>
+                    <filter string="Origen: Almacenamiento WMS"
+                            name="wms_origen_almacenamiento"
+                            domain="[('wms_origen', '=', 'almacenamiento')]"/>
+                    <filter string="Origen: Recepción WMS"
+                            name="wms_origen_recepcion"
+                            domain="[('wms_origen', '=', 'recepcion')]"/>
                 </xpath>
             </field>
         </record>

@@ -27,7 +27,40 @@ class StockPicking(models.Model):
         copy=False,
         index=True,
     )
- 
+
+    wms_origen = fields.Selection(
+        selection=[
+            ("manual", "Manual"),
+            ("recepcion", "Recepción del WMS"),
+            ("mercaderia_preparada", "Mercadería preparada por WMS"),
+            ("despacho", "Despachado por WMS"),
+            ("anulacion", "Anulado por WMS"),
+            ("ajuste", "Ajuste de inventario WMS"),
+            ("almacenamiento", "Almacenamiento WMS"),
+            ("crossdocking", "Crossdocking"),
+        ],
+        string="Origen WMS",
+        default="manual",
+        tracking=True,
+        copy=False,
+        index=True,
+        help="Tipo de evento WMS que generó o modificó este picking. "
+             "Complementa a wms_estado (ciclo de vida) identificando el origen funcional.",
+    )
+
+    wis_location_id = fields.Char(
+        string="WIS Location ID",
+        copy=False,
+        index=True,
+        help="Identificador de ubicación logística informado por WIS.",
+    )
+    wis_panel_id = fields.Char(
+        string="WIS Panel ID",
+        copy=False,
+        index=True,
+        help="Identificador de panel informado por WIS.",
+    )
+
     wms_referencia = fields.Char(
         string="Referencia WMS",
         copy=False,
@@ -419,11 +452,15 @@ class StockPicking(models.Model):
     def action_confirm(self):
         res = super().action_confirm()
         self._enviar_wis_si_corresponde('action_confirm')
+        # Punto 4: cubre cross-docking generado por otros módulos (los onchange de vista
+        # no corren en creación programática, así que forzamos el compute acá).
+        self._wis_complete_document_type()
         return res
 
     def action_assign(self):
         res = super().action_assign()
         self._enviar_wis_si_corresponde('action_assign')
+        self._wis_complete_document_type()
         return res
 
     def _action_done(self):
@@ -549,6 +586,101 @@ class StockPicking(models.Model):
                     })
                     raise
         return res
+
+
+    # ------------------------------------------------------------------
+    # Punto 3: bypass e-Remito según destino logístico.
+    #
+    # El campo `uses_cfe` en l10n_uy_einvoice_base es related a picking_type_id.uses_cfe
+    # y no se puede sobrescribir a compute desde un _inherit. En su lugar:
+    #
+    #   1) Campo `wis_skip_eremito` (store, depende del flag de la location destino).
+    #      Se usa en la vista para ocultar el botón "e-Remito" y en la lógica.
+    #   2) Override del compute `_compute_l10n_latam_document_type` para no exigir
+    #      tipo de documento.
+    #   3) Override de `create_delivery_guide` para que el envío del CFE/eRemito
+    #      no se ejecute cuando el flag está activo.
+    # ------------------------------------------------------------------
+    wis_skip_eremito = fields.Boolean(
+        string="Salta validación e-Remito (WIS)",
+        compute='_compute_wis_skip_eremito',
+        store=True,
+        help="Computed desde location_dest_id.wis_no_requiere_eremito. "
+             "Si True: se oculta el botón 'e-Remito', no se exige Document Type y "
+             "no se envía el CFE.",
+    )
+
+    @api.depends('location_dest_id.wis_no_requiere_eremito')
+    def _compute_wis_skip_eremito(self):
+        for picking in self:
+            picking.wis_skip_eremito = bool(
+                picking.location_dest_id and picking.location_dest_id.wis_no_requiere_eremito
+            )
+
+    def _wis_skip_eremito(self):
+        """Mantiene la firma para legibilidad; delega en el campo store."""
+        self.ensure_one()
+        return bool(self.wis_skip_eremito)
+
+    @api.depends('wis_skip_eremito')
+    def _compute_l10n_latam_document_type(self):
+        bypass = self.filtered('wis_skip_eremito')
+        normales = self - bypass
+        if normales:
+            super(StockPicking, normales)._compute_l10n_latam_document_type()
+        for picking in bypass:
+            picking.l10n_latam_document_type_id = False
+
+    def create_delivery_guide(self):
+        """Salta el envío del e-Remito para pickings cuya location destino tiene
+        wis_no_requiere_eremito=True. Los demás siguen el flujo normal de l10n_uy."""
+        skip = self.filtered('wis_skip_eremito')
+        normales = self - skip
+        if skip:
+            _logger.info(
+                "[WIS] create_delivery_guide | omitiendo e-Remito para %s pickings "
+                "con location_dest_id.wis_no_requiere_eremito=True: %s",
+                len(skip), skip.mapped('name'),
+            )
+        if normales:
+            return super(StockPicking, normales).create_delivery_guide()
+        return True
+
+    # ------------------------------------------------------------------
+    # Punto 4: autocompletar l10n_latam_document_type_id en pickings programáticos
+    # ------------------------------------------------------------------
+    def _wis_complete_document_type(self):
+        """Forzar recálculo de document_type cuando el picking se creó programáticamente.
+
+        El compute `_compute_l10n_latam_document_type` en l10n_uy_einvoice_base depende de
+        partner_id + punto_emision_id + picking_type_id, pero NO se dispara correctamente
+        cuando el picking se crea desde un controller WIS (los onchange de vista no corren).
+
+        Este helper:
+        1. Asegura que el picking tenga partner_id (cae al partner de la company si falta).
+        2. Invalida el cache del campo y fuerza la lectura para que el compute corra.
+        """
+        for picking in self:
+            if not picking.picking_type_id.uses_cfe:
+                continue
+            if picking.l10n_latam_document_type_id:
+                continue
+            if picking.state not in ('draft', 'assigned', 'confirmed'):
+                continue
+            if not picking.partner_id:
+                company = picking.picking_type_id.company_id or picking.company_id
+                if company and company.partner_id:
+                    picking.with_context(skip_wms_integration=True).write({
+                        'partner_id': company.partner_id.id,
+                    })
+            try:
+                picking.invalidate_recordset(['l10n_latam_document_type_id', 'punto_emision_id'])
+                _ = picking.l10n_latam_document_type_id  # fuerza el read y dispara el compute
+            except Exception as e:
+                _logger.warning(
+                    "[WIS] _wis_complete_document_type | picking=%s no pudo autocompletar: %s",
+                    picking.name, e,
+                )
 
 
 class StockMove(models.Model):

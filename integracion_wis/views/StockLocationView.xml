@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <record id="view_location_form_inherit_wms" model="ir.ui.view">
+            <field name="name">stock.location.form.inherit.wms</field>
+            <field name="model">stock.location</field>
+            <field name="inherit_id" ref="stock.view_location_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//group[@name='additional_info']" position="inside">
+                    <group string="Integración WIS">
+                        <field name="wis_no_requiere_eremito"/>
+                    </group>
+                </xpath>
+            </field>
+        </record>
+
+    </data>
+</odoo>
