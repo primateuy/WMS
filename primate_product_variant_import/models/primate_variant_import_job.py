@@ -264,6 +264,21 @@ class PrimateVariantImportJob(models.Model):
 
 	# ── SQL helpers ──────────────────────────────────────────────────────────
 
+	@staticmethod
+	def _name_lower(value):
+		"""
+		Normaliza a lowercase el nombre de un campo traducible de Odoo.
+		En Odoo 17, los campos con translate=True se almacenan como jsonb
+		({"en_US": "Color", "es_ES": "Color"}). Este helper extrae
+		cualquier valor disponible y lo convierte a minúsculas.
+		"""
+		if isinstance(value, dict):
+			# jsonb: tomar el primer valor disponible
+			return next(iter(value.values()), "").lower()
+		return (value or "").lower()
+
+
+
 	def _sql_resolve_templates(self, tmpl_keys):
 		cr, result  = self.env.cr, {}
 		names, ext_ids = [], []
@@ -290,32 +305,41 @@ class PrimateVariantImportJob(models.Model):
 		if not tmpl_ids:
 			return {}
 		self.env.cr.execute("""
-			SELECT pal.id, pal.product_tmpl_id, pa.id, LOWER(pa.name)
+			SELECT pal.id, pal.product_tmpl_id, pa.id, pa.name
 			FROM product_template_attribute_line pal
 			JOIN product_attribute pa ON pa.id = pal.attribute_id
 			WHERE pal.product_tmpl_id = ANY(%s)
 		""", [tmpl_ids])
-		return {(r[1], r[3]): (r[0], r[2]) for r in self.env.cr.fetchall()}
+		return {
+			(r[1], self._name_lower(r[3])): (r[0], r[2])
+			for r in self.env.cr.fetchall()
+		}
 
 	def _sql_load_values_in_lines(self, line_ids):
 		if not line_ids:
 			return {}
 		self.env.cr.execute("""
-			SELECT rel.product_template_attribute_line_id, LOWER(pav.name), pav.id
+			SELECT rel.product_template_attribute_line_id, pav.name, pav.id
 			FROM product_attribute_value_product_template_attribute_line_rel rel
 			JOIN product_attribute_value pav ON pav.id = rel.product_attribute_value_id
 			WHERE rel.product_template_attribute_line_id = ANY(%s)
 		""", [line_ids])
-		return {(r[0], r[1]): r[2] for r in self.env.cr.fetchall()}
+		return {
+			(r[0], self._name_lower(r[1])): r[2]
+			for r in self.env.cr.fetchall()
+		}
 
 	def _sql_load_global_values(self, attr_ids):
 		if not attr_ids:
 			return {}
 		self.env.cr.execute(
-			"SELECT attribute_id, LOWER(name), id FROM product_attribute_value WHERE attribute_id = ANY(%s)",
+			"SELECT attribute_id, name, id FROM product_attribute_value WHERE attribute_id = ANY(%s)",
 			[attr_ids]
 		)
-		return {(r[0], r[1]): r[2] for r in self.env.cr.fetchall()}
+		return {
+			(r[0], self._name_lower(r[1])): r[2]
+			for r in self.env.cr.fetchall()
+		}
 
 	def _sql_load_ptavs(self, tmpl_ids):
 		if not tmpl_ids:
