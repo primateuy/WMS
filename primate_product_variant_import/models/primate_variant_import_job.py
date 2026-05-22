@@ -384,7 +384,12 @@ class PrimateVariantImportJob(models.Model):
 		"""
 		Si el template tiene 'No crearlas automáticamente', Odoo no genera
 		los PTAVs al agregar valores. Los creamos explícitamente.
+
+		En Odoo 17, product.template.attribute.value requiere attribute_line_id
+		como campo not-null, además de product_tmpl_id, attribute_id y
+		product_attribute_value_id.
 		"""
+		# (tmpl_id, attr_id, val_id, line_id)
 		to_create = []
 		for p in valid_parsed:
 			tmpl_id = p["tmpl_id"]
@@ -396,17 +401,25 @@ class PrimateVariantImportJob(models.Model):
 					 if v[0] == line_id and k[0] == tmpl_id), None
 				)
 				if attr_id and (tmpl_id, attr_id, val_id) not in ptav_map:
-					to_create.append((tmpl_id, attr_id, val_id))
+					to_create.append((tmpl_id, attr_id, val_id, line_id))
 
 		if to_create:
-			unique = list(set(to_create))
+			unique = list({(t, a, v, l) for t, a, v, l in to_create})
 			created = self.env["product.template.attribute.value"].create([
-				{"product_tmpl_id": t, "attribute_id": a, "product_attribute_value_id": v}
-				for t, a, v in unique
+				{
+					"product_tmpl_id":             t,
+					"attribute_id":                a,
+					"product_attribute_value_id":  v,
+					"attribute_line_id":           l,
+				}
+				for t, a, v, l in unique
 			])
-			for rec, (t, a, v) in zip(created, unique):
+			for rec, (t, a, v, l) in zip(created, unique):
 				ptav_map[(t, a, v)] = rec.id
-				_logger.info("PTAV creado explícitamente: tmpl=%d attr=%d val=%d → %d", t, a, v, rec.id)
+				_logger.info(
+					"PTAV creado explícitamente: tmpl=%d attr=%d val=%d line=%d → %d",
+					t, a, v, l, rec.id,
+				)
 
 		return ptav_map
 
