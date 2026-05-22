@@ -4,7 +4,7 @@
         <field name="name">primate.variant.import.job.list</field>
         <field name="model">primate.variant.import.job</field>
         <field name="arch" type="xml">
-            <list string="Historial de Importaciones"
+            <tree string="Historial de Importaciones"
                   decoration-success="state == 'done'"
                   decoration-danger="state == 'error'"
                   decoration-warning="state == 'running'"
@@ -22,7 +22,7 @@
                 <field name="created_count"/>
                 <field name="updated_count"/>
                 <field name="error_count"/>
-            </list>
+            </tree>
         </field>
     </record>
 
