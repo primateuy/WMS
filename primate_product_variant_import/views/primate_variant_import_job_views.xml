@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Vista lista -->
     <record id="primate_variant_import_job_list" model="ir.ui.view">
         <field name="name">primate.variant.import.job.list</field>
         <field name="model">primate.variant.import.job</field>
         <field name="arch" type="xml">
-            <list string="Historial de Importaciones" decoration-success="state == 'done'"
-                  decoration-danger="state == 'error'" decoration-warning="state == 'running'"
+            <list string="Historial de Importaciones"
+                  decoration-success="state == 'done'"
+                  decoration-danger="state == 'error'"
+                  decoration-warning="state == 'running'"
                   decoration-muted="state == 'pending'">
                 <field name="name"/>
                 <field name="create_date"/>
@@ -25,7 +26,6 @@
         </field>
     </record>
 
-    <!-- Vista form -->
     <record id="primate_variant_import_job_form" model="ir.ui.view">
         <field name="name">primate.variant.import.job.form</field>
         <field name="model">primate.variant.import.job</field>
@@ -41,20 +41,19 @@
                     </div>
                     <group>
                         <group string="Información">
-                            <field name="user_id" readonly="1"/>
-                            <field name="create_date" readonly="1"/>
+                            <field name="user_id"        readonly="1"/>
+                            <field name="create_date"    readonly="1"/>
                             <field name="import_file_name" readonly="1"/>
                         </group>
                         <group string="Resultado" invisible="state == 'pending'">
-                            <field name="line_count" readonly="1"/>
+                            <field name="line_count"    readonly="1"/>
                             <field name="created_count" readonly="1"/>
                             <field name="updated_count" readonly="1"/>
-                            <field name="error_count" readonly="1"/>
+                            <field name="error_count"   readonly="1"/>
                         </group>
                     </group>
                     <group string="Detalle" invisible="state in ('pending', 'running')">
-                        <field name="result_info" widget="text" readonly="1"
-                               nolabel="1"
+                        <field name="result_info" widget="text" readonly="1" nolabel="1"
                                style="font-family: monospace; font-size: 0.875rem;
                                       white-space: pre-wrap; min-height: 200px;
                                       background: #f8f9fa; padding: 12px;
@@ -63,18 +62,17 @@
                     </group>
                     <div class="alert alert-warning" role="alert"
                          invisible="state != 'running'">
-                        <i class="fa fa-spinner fa-spin"/> Procesando... actualizá la página para ver el resultado.
+                        <i class="fa fa-spinner fa-spin"/> Procesando...
                     </div>
                     <div class="alert alert-info" role="alert"
                          invisible="state != 'pending'">
-                        <i class="fa fa-clock-o"/> En cola, esperando el próximo ciclo del scheduler.
+                        <i class="fa fa-clock-o"/> En cola.
                     </div>
                 </sheet>
             </form>
         </field>
     </record>
 
-    <!-- Acción lista -->
     <record id="action_primate_variant_import_job" model="ir.actions.act_window">
         <field name="name">Historial de Importaciones</field>
         <field name="res_model">primate.variant.import.job</field>
@@ -82,7 +80,6 @@
         <field name="target">current</field>
     </record>
 
-    <!-- Menú historial en Inventario > Productos -->
     <menuitem id="menu_primate_variant_import_job"
               name="Historial de Importaciones"
               parent="stock.menu_stock_inventory_control"

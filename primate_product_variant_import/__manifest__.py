@@ -1,10 +1,9 @@
 # Copyright 2024 PrimateUY
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
-
 {
     "name": "Product Variant Import from Excel",
-    "summary": "Importa variantes de producto desde un archivo Excel en background.",
-    "version": "17.0.2.0.0",
+    "summary": "Importa variantes de producto desde un archivo Excel.",
+    "version": "17.0.3.0.0",
     "category": "Inventory/Products",
     "author": "PrimateUY",
     "website": "https://github.com/primateuy/WMS/",
