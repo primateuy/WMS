@@ -30,10 +30,10 @@ class PrimateVariantImportJob(models.Model):
 		 ("done", "Completado"), ("error", "Error")],
 		default="pending", readonly=True, string="Estado",
 	)
-	result_info    = fields.Text(string="Resultado",      readonly=True)
+	result_info    = fields.Text(string="Resultado",       readonly=True)
 	user_id        = fields.Many2one("res.users", string="Usuario",
 	                                 default=lambda self: self.env.user, readonly=True)
-	create_date    = fields.Datetime(string="Fecha",          readonly=True)
+	create_date    = fields.Datetime(string="Fecha",           readonly=True)
 	line_count     = fields.Integer(string="Filas procesadas", readonly=True)
 	created_count  = fields.Integer(string="Creadas",          readonly=True)
 	updated_count  = fields.Integer(string="Actualizadas",     readonly=True)
@@ -52,13 +52,22 @@ class PrimateVariantImportJob(models.Model):
 	# ── Punto de entrada ─────────────────────────────────────────────────────
 
 	def process(self):
-		"""Procesa el job de forma sincrónica. Llamado desde el wizard."""
+		"""
+		Procesa el job de forma sincrónica.
+
+		Usa un savepoint para aislar errores de base de datos: si algo falla
+		dentro del procesamiento, PostgreSQL hace rollback al savepoint sin
+		abortar la transacción completa, lo que permite escribir el estado
+		de error sin que la transacción quede en estado fallido.
+		"""
 		self.ensure_one()
 		self.write({"state": "running"})
+
 		try:
-			rows, headers = self._parse_excel()
-			results       = self._import_all(rows, headers)
-			self._write_result(results)
+			with self.env.cr.savepoint():
+				rows, headers = self._parse_excel()
+				results       = self._import_all(rows, headers)
+				self._write_result(results)
 		except Exception as exc:
 			_logger.exception("Error en job %s", self.name)
 			self.write({
@@ -139,7 +148,7 @@ class PrimateVariantImportJob(models.Model):
 		if not parsed:
 			return results
 
-		# ── SQL: resolver templates ──────────────────────────────────────────
+		# SQL: resolver templates
 		tmpl_map = self._sql_resolve_templates([p["tmpl_key"] for p in parsed])
 
 		valid_parsed = []
@@ -158,17 +167,17 @@ class PrimateVariantImportJob(models.Model):
 
 		tmpl_ids = list({p["tmpl_id"] for p in valid_parsed})
 
-		# ── SQL: cargar líneas, valores y PTAVs ──────────────────────────────
+		# SQL: cargar líneas, valores y PTAVs
 		line_map     = self._sql_load_attr_lines(tmpl_ids)
 		all_line_ids = [v[0] for v in line_map.values()]
 		val_in_line  = self._sql_load_values_in_lines(all_line_ids)
 		attr_ids     = list({v[1] for v in line_map.values()})
 		val_global   = self._sql_load_global_values(attr_ids)
 
-		# ── Determinar valores a crear y vincular ────────────────────────────
-		new_links  = {}   # {line_id: set(val_ids)}
-		row_errors = {}   # {row_num: msg}
-		to_create  = []   # [(attr_id, val_name)]  valores nuevos a crear
+		# Determinar valores a crear y vincular
+		new_links  = {}
+		row_errors = {}
+		to_create  = []
 
 		for p in valid_parsed:
 			tmpl_id = p["tmpl_id"]
@@ -197,7 +206,7 @@ class PrimateVariantImportJob(models.Model):
 					to_create.append((attr_id, val_name.strip()))
 					p["resolved"][line_id] = ("PENDING", attr_id, val_name.strip())
 
-		# ── ORM: crear valores de atributo faltantes en batch ────────────────
+		# ORM: crear valores de atributo faltantes en batch
 		if to_create:
 			unique_new = list({(aid, vn) for aid, vn in to_create})
 			created = self.env["product.attribute.value"].create([
@@ -206,7 +215,7 @@ class PrimateVariantImportJob(models.Model):
 			for rec, (aid, vn) in zip(created, unique_new):
 				val_global[(aid, vn.lower())] = rec.id
 
-		# ── Resolver PLACEHOLDERs ────────────────────────────────────────────
+		# Resolver PLACEHOLDERs
 		for p in valid_parsed:
 			if p["row_num"] in row_errors:
 				continue
@@ -218,21 +227,20 @@ class PrimateVariantImportJob(models.Model):
 						p["resolved"][line_id] = val_id
 						new_links.setdefault(line_id, set()).add(val_id)
 
-		# ── ORM: vincular valores a líneas en bulk (1 write por línea) ───────
-		# Dispara _create_variant_ids() una sola vez por template
+		# ORM: vincular valores a líneas en bulk (1 write por línea)
 		for line_id, val_ids in new_links.items():
 			self.env["product.template.attribute.line"].browse(line_id).write(
 				{"value_ids": [(4, vid) for vid in val_ids]}
 			)
 
-		# ── SQL + ORM: asegurar PTAVs (soporta no_create_variants) ──────────
+		# SQL + ORM: asegurar PTAVs (soporta no_create_variants)
 		ptav_map = self._sql_load_ptavs(tmpl_ids)
 		ptav_map = self._ensure_ptavs(valid_parsed, line_map, ptav_map)
 
-		# ── SQL: cargar variantes existentes ─────────────────────────────────
+		# SQL: cargar variantes existentes
 		variant_map = self._sql_load_variants(tmpl_ids)
 
-		# ── FASE 2: crear / actualizar variantes ─────────────────────────────
+		# FASE 2: crear / actualizar variantes
 		for p in valid_parsed:
 			row_num = p["row_num"]
 			if row_num in row_errors:
@@ -393,7 +401,9 @@ class PrimateVariantImportJob(models.Model):
 			)
 			ptav_id = ptav_map.get((tmpl_id, attr_id, val_id)) if attr_id else None
 			if not ptav_id:
-				raise UserError(_("PTAV no encontrado (tmpl=%d attr=%d val=%d).") % (tmpl_id, attr_id or 0, val_id))
+				raise UserError(
+					_("PTAV no encontrado (tmpl=%d attr=%d val=%d).") % (tmpl_id, attr_id or 0, val_id)
+				)
 			ptav_ids.append(ptav_id)
 
 		key = (tmpl_id, frozenset(ptav_ids))
