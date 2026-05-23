@@ -249,7 +249,7 @@ class PrimateVariantImportJob(models.Model):
 				continue
 			for line_id, v in list(p["resolved"].items()):
 				if isinstance(v, tuple) and v[0] == "PENDING":
-					_, attr_id, vn = v
+					_marker, attr_id, vn = v
 					val_id = val_global.get((attr_id, vn.lower()))
 					if val_id:
 						p["resolved"][line_id] = val_id
