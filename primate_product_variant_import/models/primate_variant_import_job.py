@@ -55,14 +55,12 @@ class PrimateVariantImportJob(models.Model):
 		"""
 		Procesa el job de forma sincrónica.
 
-		Usa un savepoint para aislar errores de base de datos: si algo falla
-		dentro del procesamiento, PostgreSQL hace rollback al savepoint sin
-		abortar la transacción completa, lo que permite escribir el estado
-		de error sin que la transacción quede en estado fallido.
+		Usa savepoint para aislar errores DB: si algo falla dentro del
+		procesamiento, PostgreSQL hace rollback al savepoint sin abortar la
+		transacción completa, permitiendo escribir el estado de error.
 		"""
 		self.ensure_one()
 		self.write({"state": "running"})
-
 		try:
 			with self.env.cr.savepoint():
 				rows, headers = self._parse_excel()
@@ -108,6 +106,7 @@ class PrimateVariantImportJob(models.Model):
 
 	@staticmethod
 	def _detect_attr_pairs(headers):
+		"""Devuelve lista de (idx_atributo, idx_valor) a partir de los headers."""
 		pairs = []
 		for i, h in enumerate(headers):
 			if h.startswith(COL_ATTR_PREFIX):
@@ -117,9 +116,31 @@ class PrimateVariantImportJob(models.Model):
 					pairs.append((i, headers.index(expected)))
 		return pairs
 
-	# ── Importación en dos fases con SQL batch ───────────────────────────────
+	@staticmethod
+	def _name_lower(value):
+		"""
+		Normaliza a lowercase un campo que puede ser varchar o jsonb traducible.
+		En Odoo 17, los campos con translate=True se almacenan como jsonb
+		({"en_US": "Color", "es_ES": "Color"}). Extrae el primer valor disponible.
+		"""
+		if isinstance(value, dict):
+			return next(iter(value.values()), "").lower()
+		return (value or "").lower()
+
+	# ── Motor de importación ─────────────────────────────────────────────────
 
 	def _import_all(self, rows, headers):
+		"""
+		FASE 1 — Preparación (SQL batch):
+		  1. Parsea todas las filas
+		  2. Resuelve templates, líneas de atributo y valores via SQL
+		  3. Crea valores de atributo faltantes (ORM batch)
+		  4. Vincula valores a líneas en un solo write por línea
+		  5. Asegura PTAVs existentes (recarga fresca + crea solo los ausentes)
+
+		FASE 2 — Creación/actualización de variantes (ORM):
+		  6. Para cada fila crea o actualiza product.product
+		"""
 		idx_ref    = headers.index(COL_INTERNAL_REF)
 		idx_tmpl   = headers.index(COL_PRODUCT_TMPL)
 		attr_pairs = self._detect_attr_pairs(headers)
@@ -127,6 +148,7 @@ class PrimateVariantImportJob(models.Model):
 		parsed  = []
 		results = []
 
+		# ── Parseo de filas ──────────────────────────────────────────────────
 		for row_num, row in enumerate(rows, start=2):
 			if all(c is None or str(c).strip() == "" for c in row):
 				continue
@@ -148,9 +170,8 @@ class PrimateVariantImportJob(models.Model):
 		if not parsed:
 			return results
 
-		# SQL: resolver templates
-		tmpl_map = self._sql_resolve_templates([p["tmpl_key"] for p in parsed])
-
+		# ── SQL: resolver templates ──────────────────────────────────────────
+		tmpl_map     = self._sql_resolve_templates([p["tmpl_key"] for p in parsed])
 		valid_parsed = []
 		for p in parsed:
 			tid = tmpl_map.get(p["tmpl_key"])
@@ -167,21 +188,24 @@ class PrimateVariantImportJob(models.Model):
 
 		tmpl_ids = list({p["tmpl_id"] for p in valid_parsed})
 
-		# SQL: cargar líneas, valores y PTAVs
+		# ── SQL: cargar líneas y valores ─────────────────────────────────────
 		line_map     = self._sql_load_attr_lines(tmpl_ids)
 		all_line_ids = [v[0] for v in line_map.values()]
 		val_in_line  = self._sql_load_values_in_lines(all_line_ids)
 		attr_ids     = list({v[1] for v in line_map.values()})
 		val_global   = self._sql_load_global_values(attr_ids)
 
-		# Determinar valores a crear y vincular
+		# ── Resolver atributos/valores de cada fila ──────────────────────────
+		# new_links  = {line_id: set(val_ids)}  → valores a vincular a líneas
+		# to_create  = [(attr_id, val_name)]    → valores nuevos a crear
+		# row_errors = {row_num: msg}
 		new_links  = {}
 		row_errors = {}
 		to_create  = []
 
 		for p in valid_parsed:
 			tmpl_id = p["tmpl_id"]
-			p["resolved"] = {}
+			p["resolved"] = {}   # {line_id: val_id}
 
 			for attr_name, val_name in p["av_map"].items():
 				key_line = (tmpl_id, attr_name.lower())
@@ -191,22 +215,26 @@ class PrimateVariantImportJob(models.Model):
 						% (p["row_num"], attr_name, p["tmpl_key"])
 					)
 					break
+
 				line_id, attr_id = line_map[key_line]
 				key_vl = (line_id, val_name.lower())
 				key_vg = (attr_id, val_name.lower())
 
 				if key_vl in val_in_line:
+					# El valor ya está vinculado a la línea
 					p["resolved"][line_id] = val_in_line[key_vl]
 				elif key_vg in val_global:
+					# El valor existe globalmente pero no está vinculado
 					val_id = val_global[key_vg]
 					new_links.setdefault(line_id, set()).add(val_id)
-					val_in_line[key_vl] = val_id
+					val_in_line[key_vl] = val_id   # actualizar caché
 					p["resolved"][line_id] = val_id
 				else:
+					# El valor no existe: crear después
 					to_create.append((attr_id, val_name.strip()))
 					p["resolved"][line_id] = ("PENDING", attr_id, val_name.strip())
 
-		# ORM: crear valores de atributo faltantes en batch
+		# ── ORM: crear valores de atributo faltantes en batch ────────────────
 		if to_create:
 			unique_new = list({(aid, vn) for aid, vn in to_create})
 			created = self.env["product.attribute.value"].create([
@@ -215,7 +243,7 @@ class PrimateVariantImportJob(models.Model):
 			for rec, (aid, vn) in zip(created, unique_new):
 				val_global[(aid, vn.lower())] = rec.id
 
-		# Resolver PLACEHOLDERs
+		# ── Resolver PLACEHOLDERs ────────────────────────────────────────────
 		for p in valid_parsed:
 			if p["row_num"] in row_errors:
 				continue
@@ -227,20 +255,24 @@ class PrimateVariantImportJob(models.Model):
 						p["resolved"][line_id] = val_id
 						new_links.setdefault(line_id, set()).add(val_id)
 
-		# ORM: vincular valores a líneas en bulk (1 write por línea)
+		# ── ORM: vincular valores a líneas en bulk (1 write por línea) ───────
+		# Cada write dispara _create_variant_ids() en el template.
+		# Después de esto los PTAVs pueden haberse creado automáticamente.
 		for line_id, val_ids in new_links.items():
 			self.env["product.template.attribute.line"].browse(line_id).write(
 				{"value_ids": [(4, vid) for vid in val_ids]}
 			)
 
-		# SQL + ORM: asegurar PTAVs (soporta no_create_variants)
-		ptav_map = self._sql_load_ptavs(tmpl_ids)
-		ptav_map = self._ensure_ptavs(valid_parsed, line_map, ptav_map)
+		# ── Asegurar PTAVs ───────────────────────────────────────────────────
+		# Se recarga DESPUÉS de los writes para capturar los PTAVs que Odoo
+		# pudo haber creado automáticamente via _create_variant_ids().
+		# Para templates con "No crearlas automáticamente", los crea explícitamente.
+		ptav_map = self._ensure_ptavs(valid_parsed, line_map)
 
-		# SQL: cargar variantes existentes
+		# ── SQL: cargar variantes existentes ─────────────────────────────────
 		variant_map = self._sql_load_variants(tmpl_ids)
 
-		# FASE 2: crear / actualizar variantes
+		# ── FASE 2: crear / actualizar variantes ─────────────────────────────
 		for p in valid_parsed:
 			row_num = p["row_num"]
 			if row_num in row_errors:
@@ -264,23 +296,9 @@ class PrimateVariantImportJob(models.Model):
 
 	# ── SQL helpers ──────────────────────────────────────────────────────────
 
-	@staticmethod
-	def _name_lower(value):
-		"""
-		Normaliza a lowercase el nombre de un campo traducible de Odoo.
-		En Odoo 17, los campos con translate=True se almacenan como jsonb
-		({"en_US": "Color", "es_ES": "Color"}). Este helper extrae
-		cualquier valor disponible y lo convierte a minúsculas.
-		"""
-		if isinstance(value, dict):
-			# jsonb: tomar el primer valor disponible
-			return next(iter(value.values()), "").lower()
-		return (value or "").lower()
-
-
-
 	def _sql_resolve_templates(self, tmpl_keys):
-		cr, result  = self.env.cr, {}
+		"""Resuelve template keys (nombre o ID externo) en batch."""
+		cr, result     = self.env.cr, {}
 		names, ext_ids = [], []
 		for k in set(tmpl_keys):
 			(ext_ids if "." in k else names).append(k)
@@ -289,7 +307,10 @@ class PrimateVariantImportJob(models.Model):
 				"SELECT name, id FROM product_template WHERE name = ANY(%s) AND active = true",
 				[names]
 			)
-			result.update(dict(cr.fetchall()))
+			# name puede ser jsonb: construir dict con el valor normalizado
+			for raw_name, tid in cr.fetchall():
+				key = next(iter(raw_name.values()), "") if isinstance(raw_name, dict) else (raw_name or "")
+				result[key] = tid
 		if ext_ids:
 			pairs = [k.split(".", 1) for k in ext_ids]
 			cr.execute("""
@@ -302,6 +323,10 @@ class PrimateVariantImportJob(models.Model):
 		return result
 
 	def _sql_load_attr_lines(self, tmpl_ids):
+		"""
+		Carga líneas de atributo para los templates dados.
+		Retorna {(tmpl_id, attr_name_lower): (line_id, attr_id)}
+		"""
 		if not tmpl_ids:
 			return {}
 		self.env.cr.execute("""
@@ -316,6 +341,10 @@ class PrimateVariantImportJob(models.Model):
 		}
 
 	def _sql_load_values_in_lines(self, line_ids):
+		"""
+		Carga valores ya vinculados a las líneas dadas.
+		Retorna {(line_id, val_name_lower): val_id}
+		"""
 		if not line_ids:
 			return {}
 		self.env.cr.execute("""
@@ -330,6 +359,10 @@ class PrimateVariantImportJob(models.Model):
 		}
 
 	def _sql_load_global_values(self, attr_ids):
+		"""
+		Carga todos los valores de los atributos dados.
+		Retorna {(attr_id, val_name_lower): val_id}
+		"""
 		if not attr_ids:
 			return {}
 		self.env.cr.execute(
@@ -341,17 +374,11 @@ class PrimateVariantImportJob(models.Model):
 			for r in self.env.cr.fetchall()
 		}
 
-	def _sql_load_ptavs(self, tmpl_ids):
-		if not tmpl_ids:
-			return {}
-		self.env.cr.execute("""
-			SELECT product_tmpl_id, attribute_id, product_attribute_value_id, id
-			FROM product_template_attribute_value
-			WHERE product_tmpl_id = ANY(%s)
-		""", [tmpl_ids])
-		return {(r[0], r[1], r[2]): r[3] for r in self.env.cr.fetchall()}
-
 	def _sql_load_variants(self, tmpl_ids):
+		"""
+		Carga variantes existentes con sus combinaciones de PTAVs.
+		Retorna {(tmpl_id, frozenset(ptav_ids)): (product_id, default_code)}
+		"""
 		if not tmpl_ids:
 			return {}
 		self.env.cr.execute("""
@@ -378,48 +405,99 @@ class PrimateVariantImportJob(models.Model):
 		)
 		return bool(self.env.cr.fetchone())
 
-	# ── Asegurar PTAVs (soporta no_create_variants) ──────────────────────────
+	# ── Asegurar PTAVs ───────────────────────────────────────────────────────
 
-	def _ensure_ptavs(self, valid_parsed, line_map, ptav_map):
+	def _ensure_ptavs(self, valid_parsed, line_map):
 		"""
-		Si el template tiene 'No crearlas automáticamente', Odoo no genera
-		los PTAVs al agregar valores. Los creamos explícitamente.
+		Garantiza que existen los PTAVs necesarios para todas las filas.
 
-		En Odoo 17, product.template.attribute.value requiere attribute_line_id
-		como campo not-null, además de product_tmpl_id, attribute_id y
-		product_attribute_value_id.
+		Recarga el estado actual de PTAVs desde DB (captura los que Odoo pudo
+		haber creado via _create_variant_ids() en los writes previos).
+		Para los que faltan (templates con 'No crearlas automáticamente'),
+		los crea explícitamente verificando primero contra el constraint
+		(attribute_line_id, product_attribute_value_id) para evitar duplicados.
+
+		Retorna {(tmpl_id, attr_id, val_id): ptav_id}
 		"""
-		# (tmpl_id, attr_id, val_id, line_id)
-		to_create = []
+		# Recargar PTAVs frescos DESPUÉS de los writes en attr_lines
+		tmpl_ids = list({p["tmpl_id"] for p in valid_parsed})
+		self.env.cr.execute("""
+			SELECT product_tmpl_id, attribute_id, product_attribute_value_id,
+			       attribute_line_id, id
+			FROM product_template_attribute_value
+			WHERE product_tmpl_id = ANY(%s)
+		""", [tmpl_ids])
+		ptav_map = {}
+		# También indexamos por (line_id, val_id) para el check de duplicados
+		ptav_by_line_val = {}
+		for tmpl_id, attr_id, val_id, line_id, ptav_id in self.env.cr.fetchall():
+			ptav_map[(tmpl_id, attr_id, val_id)] = ptav_id
+			ptav_by_line_val[(line_id, val_id)]   = ptav_id
+
+		# Determinar qué PTAVs faltan
+		to_create = []   # [(tmpl_id, attr_id, val_id, line_id)]
 		for p in valid_parsed:
 			tmpl_id = p["tmpl_id"]
 			for line_id, val_id in p["resolved"].items():
 				if not isinstance(val_id, int):
 					continue
+				# Obtener attr_id desde line_map
 				attr_id = next(
 					(v[1] for k, v in line_map.items()
-					 if v[0] == line_id and k[0] == tmpl_id), None
+					 if v[0] == line_id and k[0] == tmpl_id),
+					None,
 				)
-				if attr_id and (tmpl_id, attr_id, val_id) not in ptav_map:
+				if not attr_id:
+					continue
+				# Verificar contra ambos índices para máxima seguridad
+				already_exists = (
+					(tmpl_id, attr_id, val_id) in ptav_map
+					or (line_id, val_id) in ptav_by_line_val
+				)
+				if not already_exists:
 					to_create.append((tmpl_id, attr_id, val_id, line_id))
 
 		if to_create:
-			unique = list({(t, a, v, l) for t, a, v, l in to_create})
-			created = self.env["product.template.attribute.value"].create([
-				{
-					"product_tmpl_id":             t,
-					"attribute_id":                a,
-					"product_attribute_value_id":  v,
-					"attribute_line_id":           l,
-				}
-				for t, a, v, l in unique
-			])
-			for rec, (t, a, v, l) in zip(created, unique):
-				ptav_map[(t, a, v)] = rec.id
-				_logger.info(
-					"PTAV creado explícitamente: tmpl=%d attr=%d val=%d line=%d → %d",
-					t, a, v, l, rec.id,
-				)
+			# Deduplicar por (line_id, val_id) — clave del constraint
+			seen      = set()
+			unique    = []
+			for item in to_create:
+				t, a, v, l = item
+				key = (l, v)
+				if key not in seen:
+					seen.add(key)
+					unique.append(item)
+
+			# Verificar una última vez contra DB (por si hubo concurrencia)
+			if unique:
+				self.env.cr.execute("""
+					SELECT attribute_line_id, product_attribute_value_id
+					FROM product_template_attribute_value
+					WHERE (attribute_line_id, product_attribute_value_id) IN %s
+				""", [tuple((l, v) for _, _, v, l in unique)])
+				existing_in_db = {(r[0], r[1]) for r in self.env.cr.fetchall()}
+				unique = [
+					(t, a, v, l) for t, a, v, l in unique
+					if (l, v) not in existing_in_db
+				]
+
+			if unique:
+				created = self.env["product.template.attribute.value"].create([
+					{
+						"product_tmpl_id":            t,
+						"attribute_id":               a,
+						"product_attribute_value_id": v,
+						"attribute_line_id":          l,
+					}
+					for t, a, v, l in unique
+				])
+				for rec, (t, a, v, l) in zip(created, unique):
+					ptav_map[(t, a, v)]    = rec.id
+					ptav_by_line_val[(l, v)] = rec.id
+					_logger.info(
+						"PTAV creado explícitamente: tmpl=%d attr=%d val=%d line=%d → %d",
+						t, a, v, l, rec.id,
+					)
 
 		return ptav_map
 
@@ -434,12 +512,15 @@ class PrimateVariantImportJob(models.Model):
 			if not isinstance(val_id, int):
 				raise UserError(_("Valor no resuelto en línea %d.") % line_id)
 			attr_id = next(
-				(v[1] for k, v in line_map.items() if v[0] == line_id and k[0] == tmpl_id), None
+				(v[1] for k, v in line_map.items()
+				 if v[0] == line_id and k[0] == tmpl_id),
+				None,
 			)
 			ptav_id = ptav_map.get((tmpl_id, attr_id, val_id)) if attr_id else None
 			if not ptav_id:
 				raise UserError(
-					_("PTAV no encontrado (tmpl=%d attr=%d val=%d).") % (tmpl_id, attr_id or 0, val_id)
+					_("PTAV no encontrado (tmpl=%d attr=%d val=%d).")
+					% (tmpl_id, attr_id or 0, val_id)
 				)
 			ptav_ids.append(ptav_id)
 
@@ -448,13 +529,20 @@ class PrimateVariantImportJob(models.Model):
 		if key in variant_map:
 			pid, dcode = variant_map[key]
 			if internal_ref and dcode != internal_ref:
-				self.env["product.product"].browse(pid).write({"default_code": internal_ref})
+				self.env["product.product"].browse(pid).write(
+					{"default_code": internal_ref}
+				)
 				variant_map[key] = (pid, internal_ref)
-				return {"row": row_num, "status": "updated",
-				        "msg": _("Fila %d: actualizada (ref: %s) → %s [id:%d]")
-				               % (row_num, internal_ref, tmpl_key, pid)}
-			return {"row": row_num, "status": "skipped",
-			        "msg": _("Fila %d: sin cambios → %s [id:%d]") % (row_num, tmpl_key, pid)}
+				return {
+					"row": row_num, "status": "updated",
+					"msg": _("Fila %d: actualizada (ref: %s) → %s [id:%d]")
+					       % (row_num, internal_ref, tmpl_key, pid),
+				}
+			return {
+				"row": row_num, "status": "skipped",
+				"msg": _("Fila %d: sin cambios → %s [id:%d]")
+				       % (row_num, tmpl_key, pid),
+			}
 
 		vals = {
 			"product_tmpl_id": tmpl_id,
@@ -465,9 +553,11 @@ class PrimateVariantImportJob(models.Model):
 
 		new = self.env["product.product"].create(vals)
 		variant_map[key] = (new.id, internal_ref)
-		return {"row": row_num, "status": "created",
-		        "msg": _("Fila %d: creada (ref: %s) → %s [id:%d]")
-		               % (row_num, internal_ref or "(sin ref)", tmpl_key, new.id)}
+		return {
+			"row": row_num, "status": "created",
+			"msg": _("Fila %d: creada (ref: %s) → %s [id:%d]")
+			       % (row_num, internal_ref or "(sin ref)", tmpl_key, new.id),
+		}
 
 	# ── Resultado ────────────────────────────────────────────────────────────
 
@@ -494,5 +584,10 @@ class PrimateVariantImportJob(models.Model):
 		})
 
 	def action_view_result(self):
-		return {"type": "ir.actions.act_window", "res_model": self._name,
-		        "res_id": self.id, "view_mode": "form", "target": "current"}
+		return {
+			"type":      "ir.actions.act_window",
+			"res_model": self._name,
+			"res_id":    self.id,
+			"view_mode": "form",
+			"target":    "current",
+		}
