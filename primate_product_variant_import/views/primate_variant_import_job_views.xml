@@ -52,14 +52,15 @@
                             <field name="error_count"   readonly="1"/>
                         </group>
                     </group>
-                    <group string="Detalle" invisible="state in ('pending', 'running')">
+                    <div invisible="state in ('pending', 'running')">
+                        <separator string="Detalle"/>
                         <field name="result_info" widget="text" readonly="1" nolabel="1"
                                style="font-family: monospace; font-size: 0.875rem;
                                       white-space: pre-wrap; min-height: 200px;
                                       background: #f8f9fa; padding: 12px;
                                       border-radius: 4px; border: 1px solid #dee2e6;
                                       display: block; width: 100%;"/>
-                    </group>
+                    </div>
                     <div class="alert alert-warning" role="alert"
                          invisible="state != 'running'">
                         <i class="fa fa-spinner fa-spin"/> Procesando...

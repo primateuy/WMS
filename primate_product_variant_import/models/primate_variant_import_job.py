@@ -511,18 +511,25 @@ class PrimateVariantImportJob(models.Model):
 		for line_id, val_id in p["resolved"].items():
 			if not isinstance(val_id, int):
 				raise UserError(_("Valor no resuelto en línea %d.") % line_id)
-			attr_id = next(
-				(v[1] for k, v in line_map.items()
-				 if v[0] == line_id and k[0] == tmpl_id),
-				None,
-			)
-			ptav_id = ptav_map.get((tmpl_id, attr_id, val_id)) if attr_id else None
-			if not ptav_id:
+
+			# Lookup directo en DB por (attribute_line_id, product_attribute_value_id)
+			# que es la clave del constraint único del modelo.
+			# Evita desincronías del ptav_map en memoria.
+			self.env.cr.execute("""
+				SELECT id FROM product_template_attribute_value
+				WHERE attribute_line_id = %s
+				  AND product_attribute_value_id = %s
+				LIMIT 1
+			""", [line_id, val_id])
+			row = self.env.cr.fetchone()
+			if not row:
 				raise UserError(
-					_("PTAV no encontrado (tmpl=%d attr=%d val=%d).")
-					% (tmpl_id, attr_id or 0, val_id)
+					_("PTAV no encontrado para línea=%d valor=%d en template '%s'. "
+					  "Verificá que el atributo y valor estén correctamente "
+					  "configurados en el template.")
+					% (line_id, val_id, tmpl_key)
 				)
-			ptav_ids.append(ptav_id)
+			ptav_ids.append(row[0])
 
 		key = (tmpl_id, frozenset(ptav_ids))
 
