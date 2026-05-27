@@ -755,7 +755,7 @@ class IntegracionWIS(models.Model):
         nro_pedido = vals.codigo_unico if vals.codigo_unico else f"P{hash_short}"
 
         pedido = {
-            "tipoExpedicion": "WSF" if tipo == 'NORM' else "WIS",
+            "tipoExpedicion": vals.picking_type_id.tipo_expedicion_wis or ("WSF" if tipo == 'NORM' else "WIS"),
             "nroPedido": nro_pedido,
             "comparteContenedorEntrega": vals.name,
             "codigoAgente": codigo_agente,

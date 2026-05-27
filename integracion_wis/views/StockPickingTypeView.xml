@@ -14,6 +14,7 @@
                         <group>
                             <field name="integracion_wms"/>
                             <field name="tipo_pedido_wis" invisible="not integracion_wms"/>
+                            <field name="tipo_expedicion_wis" invisible="not integracion_wms"/>
                             <field name="tipo_agente_wis" invisible="not integracion_wms"/>
                             <field name="metodo_creacion_wis" invisible="not integracion_wms"/>
                             <field name="estado_disparo_wis" invisible="not integracion_wms"/>

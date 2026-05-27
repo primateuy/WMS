@@ -21,6 +21,12 @@ class StockPickingType(models.Model):
         help='Tipo de pedido WIS para este tipo de entrega.',
     )
 
+    tipo_expedicion_wis = fields.Char(
+        string='Tipo de Expedición WIS',
+        help='Tipo de expedición que se envía a WIS en el pedido (campo "tipoExpedicion"). '
+             'Si se deja vacío, se usa el valor por defecto: "WSF" para pedidos NORM y "WIS" para el resto.',
+    )
+
     tipo_agente_wis = fields.Selection(
         selection=[
             ('CLI', 'Cliente (CLI)'),
