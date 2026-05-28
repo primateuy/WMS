@@ -1255,8 +1255,8 @@ class PurchaseOrder(models.Model):
             if main_warehouse.id == alm.id:
                 esPrincipal = True;
             
-            if not alm.crossdocking_reception_type_id:
-                raise ValidationError(f"El almacén '{alm.name}' no tiene definido el tipo de operación para 'Recepción Crossdocking'.")
+            # if not alm.crossdocking_reception_type_id:
+            #     raise ValidationError(f"El almacén '{alm.name}' no tiene definido el tipo de operación para 'Recepción Crossdocking'.")
             
             if not main_warehouse.crossdocking_type_id:
                 raise ValidationError("No se ha definido el tipo de picking de 'Crossdocking' en el almacén principal.")
