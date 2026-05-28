@@ -24,7 +24,8 @@ class WMSIntegracionLog(models.Model):
     resultado = fields.Selection([
         ('exito', 'Éxito'),
         ('error', 'Error'),
-        ('pendiente', 'Pendiente')
+        ('pendiente', 'Pendiente'),
+        ('omitido', 'Omitido')
     ], string='Resultado')
     detalle = fields.Text(string='Detalle')
     payload_webhook = fields.Text(string='Payload recibido de WIS')

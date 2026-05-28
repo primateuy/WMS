@@ -381,6 +381,129 @@ def test_mercaderia_preparada_basico(rpc, base_url):
     return f"picking {pick_id} marcado como preparado"
 
 
+def test_paquetes_creados_en_preparada_y_reusados_en_confirmacion(rpc, base_url):
+    """Valida el cambio: los paquetes se crean en confirmacionMercaderiaPreparada
+    cuando el payload trae contenedores, y una confirmacionPedido posterior con
+    los mismos contenedores REUSA esos paquetes (no duplica) y no re-asigna
+    move_lines ya asignadas (idempotencia del helper).
+    """
+    pt_id = rpc.create("stock.picking.type", {
+        "name": "E2E Prep+Conf Test",
+        "code": "outgoing",
+        "sequence_code": f"E2EPC{int(time.time() * 1000) % 100000}/",
+        "default_location_src_id": rpc.ref("stock.stock_location_stock"),
+        "warehouse_id": rpc.search_read("stock.warehouse", [], ["id"], 1)[0]["id"],
+        "metodo_preparacion_wis": True,
+        "metodo_cancelacion_wis": True,
+    })
+    prod_id = rpc.create("product.product", {
+        "name": "E2E Prod Prep+Conf",
+        "type": "product",
+        "codigo_unico": f"E2E-PCF-{int(time.time() * 1000)}",
+    })
+    # Stock para que action_assign genere move_lines reservadas
+    quant_id = rpc.create("stock.quant", {
+        "product_id": prod_id,
+        "location_id": rpc.ref("stock.stock_location_stock"),
+        "inventory_quantity": 5,
+    }, context={"inventory_mode": True})
+    rpc.execute("stock.quant", "action_apply_inventory", [quant_id])
+
+    partner_id = rpc.create("res.partner", {
+        "name": "E2E Partner Prep+Conf",
+        "codigo_unico_cliente": f"CLI-PCF-{int(time.time() * 1000)}",
+    })
+    codigo_unico = f"PCF-{int(time.time() * 1000)}"
+    pick_id = rpc.create("stock.picking", {
+        "picking_type_id": pt_id,
+        "location_id": rpc.ref("stock.stock_location_stock"),
+        "location_dest_id": rpc.ref("stock.stock_location_customers"),
+        "partner_id": partner_id,
+        "codigo_unico": codigo_unico,
+        "wms_estado": "enviado",
+    }, context={"skip_wms_integration": True})
+    rpc.create("stock.move", {
+        "name": "E2E Move Prep+Conf",
+        "picking_id": pick_id,
+        "product_id": prod_id,
+        "product_uom": rpc.read("product.product", [prod_id], ["uom_id"])[0]["uom_id"][0],
+        "product_uom_qty": 2,
+        "location_id": rpc.ref("stock.stock_location_stock"),
+        "location_dest_id": rpc.ref("stock.stock_location_customers"),
+    }, context={"skip_wms_integration": True})
+    rpc.execute("stock.picking", "action_confirm", [pick_id])
+    rpc.execute("stock.picking", "action_assign", [pick_id])
+
+    cod_prod = rpc.read("product.product", [prod_id], ["codigo_unico"])[0]["codigo_unico"]
+    barcode_pkg = f"BCPCF-{int(time.time() * 1000)}"
+    id_ext = f"EXTPCF-{int(time.time() * 1000)}"
+    contenedor = {
+        "CodigoBarras": barcode_pkg,
+        "IdExternoContenedor": id_ext,
+        "Detalles": [{"Producto": cod_prod, "CantidadPreparada": 2.0}],
+    }
+
+    # --- Fase 1: confirmacionMercaderiaPreparada con contenedores per-pedido ---
+    res1 = post_webhook(base_url, {
+        "Id": "confirmacionMercaderiaPreparada",
+        "confirmacionMercaderiaPreparada": {
+            "FechaPreparacion": "02/05/2026 14:00",
+            "Pedidos": [{"Pedido": codigo_unico, "Contenedores": [contenedor]}],
+        },
+    })
+    assert res1.get("status") == 200, res1
+    pdata = rpc.read("stock.picking", [pick_id], ["wms_estado", "wms_fecha_preparacion"])[0]
+    assert pdata["wms_estado"] == "preparado", f"tras preparada esperaba 'preparado', vino {pdata}"
+    # Paquete creado en la PREPARACIÓN, no en confirmacionPedido
+    pkgs1 = rpc.search_read("stock.quant.package", [["name", "=", barcode_pkg]], ["id", "wis_id_externo"])
+    assert len(pkgs1) == 1, f"esperaba 1 paquete tras preparada, hay {len(pkgs1)}: {pkgs1}"
+    pkg_id_inicial = pkgs1[0]["id"]
+    assert pkgs1[0]["wis_id_externo"] == id_ext, pkgs1
+    # move_lines asignadas al paquete
+    mls1 = rpc.search_read("stock.move.line", [["picking_id", "=", pick_id]], ["id", "result_package_id"])
+    assert mls1, "no hay move_lines tras action_assign"
+    asignadas = [m for m in mls1 if m["result_package_id"] and m["result_package_id"][0] == pkg_id_inicial]
+    assert asignadas, f"ningún move_line quedó asignado al paquete {pkg_id_inicial}: {mls1}"
+    # Snapshot del mapeo move_line -> paquete antes de confirmacionPedido
+    snapshot = {m["id"]: (m["result_package_id"][0] if m["result_package_id"] else None) for m in mls1}
+
+    # --- Fase 2: confirmacionPedido con los MISMOS contenedores ---
+    res2 = post_webhook(base_url, {
+        "Id": "confirmacionPedido",
+        "confirmacionPedido": {
+            "FechaCierre": "03/05/2026 10:00",
+            "DescripcionCamion": "Camion PCF",
+            "Transportadora": "Trans-PCF",
+            "Pedidos": [{"Pedido": codigo_unico}],
+            "Contenedores": [contenedor],
+        },
+    })
+    assert res2.get("status") == 200, res2
+    pdata2 = rpc.read("stock.picking", [pick_id], ["state", "wms_estado", "wms_descripcion_camion"])[0]
+    assert pdata2["state"] == "done", f"tras confirmacion: state={pdata2['state']}"
+    assert pdata2["wms_estado"] == "despachado", pdata2
+    assert pdata2["wms_descripcion_camion"] == "Camion PCF", pdata2
+    # Idempotencia: NO se duplicó el paquete, mismo id
+    pkgs2 = rpc.search_read("stock.quant.package", [["name", "=", barcode_pkg]], ["id"])
+    assert len(pkgs2) == 1, f"esperaba 1 paquete (no duplicado), hay {len(pkgs2)}: {pkgs2}"
+    assert pkgs2[0]["id"] == pkg_id_inicial, (
+        f"paquete cambió: era {pkg_id_inicial}, ahora {pkgs2[0]['id']}"
+    )
+    # Idempotencia: move_lines preexistentes mantienen su result_package_id
+    mls2 = rpc.search_read("stock.move.line", [["picking_id", "=", pick_id]], ["id", "result_package_id"])
+    for m in mls2:
+        prev = snapshot.get(m["id"])
+        if prev is None:
+            continue  # move_line nuevo creado por button_validate, no comparable
+        cur = m["result_package_id"][0] if m["result_package_id"] else None
+        assert cur == prev, f"move_line {m['id']} cambió de paquete: {prev} -> {cur}"
+
+    return (
+        f"preparada creó pkg id={pkg_id_inicial}; confirmacion lo reusó "
+        f"(idempotente, sin duplicar, sin re-asignar move_lines)"
+    )
+
+
 def test_pedidos_anulados_basico(rpc, base_url):
     pt_id = rpc.create("stock.picking.type", {
         "name": "E2E Anular Test",
@@ -940,6 +1063,7 @@ TESTS = [
     test_confirmacion_recepcion_ignora_auto,
     test_confirmacion_pedido_basico,
     test_mercaderia_preparada_basico,
+    test_paquetes_creados_en_preparada_y_reusados_en_confirmacion,
     test_pedidos_anulados_basico,
     test_ajustes_movimiento,
     test_almacenamiento_basico,

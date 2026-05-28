@@ -877,10 +877,10 @@ Body: {body_str[:500]}"""
         if not pedidos:
             raise ValueError("El payload no contiene pedidos.")
 
-        # Campos opcionales informativos. El spec dice que sólo Pedidos[].Pedido y
-        # FechaPreparacion son obligatorios; el resto (matricula, contenedores) puede
-        # llegar pero pertenece formalmente a confirmacionPedido — se preserva
-        # compatibilidad sin propagarlo a campos de despacho.
+        # Campos opcionales: además de Pedidos[].Pedido y FechaPreparacion
+        # (obligatorios), el spec permite enviar contenedores en este evento. Si
+        # vienen, se crean los paquetes acá (en la preparación), y cuando llegue
+        # después confirmacionPedido el helper los reusa por idempotencia.
         fecha_preparacion_raw = (
             data.get('fechaPreparacion', '')
             or data.get('fechaFacturacion', '')
@@ -943,7 +943,7 @@ Body: {body_str[:500]}"""
                         f"'{picking.picking_type_id.name}' no acepta preparaciones desde WMS."
                     ),
                     'picking_id': picking.id,
-                    'resultado': 'exito',
+                    'resultado': 'omitido',
                     'detalle': f"Pedido WIS: {nombre_pedido}",
                 })
                 continue
@@ -970,6 +970,21 @@ Body: {body_str[:500]}"""
                     'wms_fecha_preparacion': fecha_preparacion,
                 })
 
+                # Si el payload trae contenedores, crear los paquetes acá (en la
+                # preparación). confirmacionPedido va a llamar al mismo helper más
+                # tarde y los reutiliza por idempotencia (search por name +
+                # `if ml.result_package_id: continue`).
+                contenedores_prep = (
+                    pedido_data.get('contenedores')
+                    or data.get('contenedores')
+                    or []
+                )
+                paquetes_creados = []
+                if contenedores_prep:
+                    paquetes_creados = self._crear_paquetes_desde_contenedores(
+                        picking, contenedores_prep
+                    )
+
                 # Spec 3.3 paso 3: emitir eRemito si corresponde.
                 self._intentar_emitir_eremito(
                     picking, origen='confirmacionMercaderiaPreparada'
@@ -987,10 +1002,20 @@ Body: {body_str[:500]}"""
                     'texto': (
                         f"confirmacionMercaderiaPreparada: picking {picking.name} "
                         f"marcado como preparado."
+                        + (
+                            f" {len(paquetes_creados)} paquete(s) creados/reusados."
+                            if contenedores_prep else ""
+                        )
                     ),
                     'picking_id': picking.id,
                     'resultado': 'exito',
-                    'detalle': f"Fecha preparación: {fecha_preparacion}",
+                    'detalle': (
+                        f"Fecha preparación: {fecha_preparacion}"
+                        + (
+                            f" | Contenedores: {len(contenedores_prep)}"
+                            if contenedores_prep else ""
+                        )
+                    ),
                     'payload_webhook': json.dumps(pedido_data, ensure_ascii=False, indent=2),
                 })
 
@@ -1088,7 +1113,7 @@ Body: {body_str[:500]}"""
                         f"'{picking.picking_type_id.name}' no acepta cancelaciones desde WMS."
                     ),
                     'picking_id': picking.id,
-                    'resultado': 'exito',
+                    'resultado': 'omitido',
                     'detalle': f"Pedido WIS: {nombre_pedido}",
                 })
                 continue
