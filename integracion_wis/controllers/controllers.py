@@ -553,19 +553,54 @@ Body: {body_str[:500]}"""
                 continue
 
             # Spec 2.4 paso 1: buscar por codigo_unico, luego name, luego idPedidoWMS.
+            # Acepta pickings en state='done' SOLO si su wms_estado es 'preparado'
+            # (= confirmacionMercaderiaPreparada los validó). Si están en done con
+            # otro wms_estado (ej. 'despachado', 'enviado'), se bloquea con error
+            # claro — no se permite re-confirmar.
             pickings_todos = request.env['stock.picking'].sudo().search(
                 [('codigo_unico', '=', nombre_pedido)]
             )
-            pickings_activos = pickings_todos.filtered(
-                lambda p: p.wms_estado != 'sin_enviar' and p.state not in ('done', 'cancel')
+            pickings_validos = pickings_todos.filtered(
+                lambda p: p.wms_estado != 'sin_enviar' and p.state != 'cancel'
+            )
+            pickings_activos = pickings_validos.filtered(
+                lambda p: p.state != 'done'
+            )
+            pickings_done_preparado = pickings_validos.filtered(
+                lambda p: p.state == 'done' and p.wms_estado == 'preparado'
+            )
+            pickings_done_otro = pickings_validos.filtered(
+                lambda p: p.state == 'done' and p.wms_estado != 'preparado'
             )
             picking = False
+            # Prioridad 1: un único picking activo (assigned/confirmed/waiting).
             if len(pickings_activos) == 1:
                 picking = pickings_activos
-            elif len(pickings_activos) > 1:
-                nombres = ', '.join(pickings_activos.mapped('name'))
+            # Prioridad 2: sin activos + 1 picking en done con wms_estado='preparado'
+            # (la preparada lo validó, ahora solo se aplican metadatos de transporte).
+            elif not pickings_activos and len(pickings_done_preparado) == 1:
+                picking = pickings_done_preparado
+            # Bloqueo: el picking está en done pero NO con wms_estado='preparado'
+            # (probablemente 'despachado' o 'enviado'). No permitir re-confirmación.
+            elif not pickings_activos and not pickings_done_preparado and pickings_done_otro:
+                nombres = ', '.join(pickings_done_otro.mapped('name'))
+                estados = ', '.join(sorted(set(pickings_done_otro.mapped('wms_estado'))))
+                _logger.warning(
+                    "[WIS] confirmacionPedido | picking(s) con codigo_unico='%s' "
+                    "están en done pero wms_estado no es 'preparado' (actual: %s): %s",
+                    nombre_pedido, estados, nombres,
+                )
+                errores.append(
+                    f"Picking(s) con codigo_unico='{nombre_pedido}' están en "
+                    f"done pero su wms_estado no es 'preparado' (actual: {estados}): "
+                    f"{nombres}. No se permite confirmar."
+                )
+                continue
+            elif len(pickings_activos) > 1 or len(pickings_done_preparado) > 1:
+                conflicto = pickings_activos | pickings_done_preparado
+                nombres = ', '.join(conflicto.mapped('name'))
                 _logger.error(
-                    "[WIS] confirmacionPedido | Múltiples pickings activos con codigo_unico='%s': %s",
+                    "[WIS] confirmacionPedido | Múltiples pickings con codigo_unico='%s': %s",
                     nombre_pedido, nombres,
                 )
                 request.env['wms.integracion.log'].sudo().create({
@@ -573,7 +608,7 @@ Body: {body_str[:500]}"""
                     'nivel': 'error',
                     'modelo': 'stock.picking',
                     'texto': (
-                        f"confirmacionPedido: múltiples pickings activos para '{nombre_pedido}'. "
+                        f"confirmacionPedido: múltiples pickings para '{nombre_pedido}'. "
                         f"Intervención manual requerida."
                     ),
                     'picking_id': False,
@@ -581,7 +616,7 @@ Body: {body_str[:500]}"""
                     'detalle': f"Pickings en conflicto: {nombres}",
                 })
                 errores.append(
-                    f"Múltiples pickings activos para '{nombre_pedido}': {nombres}. "
+                    f"Múltiples pickings para '{nombre_pedido}': {nombres}. "
                     f"Intervención manual requerida."
                 )
                 continue
@@ -598,12 +633,22 @@ Body: {body_str[:500]}"""
                 errores.append(f"No se encontró picking para pedido '{nombre_pedido}'.")
                 continue
 
-            if picking.state == 'done':
-                errores.append(f"Picking '{picking.name}' ya está validado, se omite.")
-                continue
             if picking.state == 'cancel':
                 errores.append(f"Picking '{picking.name}' está cancelado, no se puede despachar.")
                 continue
+
+            # Si el picking ya está en 'done' (probablemente porque
+            # confirmacionMercaderiaPreparada lo validó antes), permitimos que
+            # confirmacionPedido aplique igualmente los metadatos de transporte.
+            # El bloque de button_validate más abajo está condicionado a
+            # state == 'assigned', así que no se intenta re-validar.
+            if picking.state == 'done':
+                _logger.info(
+                    "[WIS] confirmacionPedido | picking %s ya está en done "
+                    "(validado por confirmacionMercaderiaPreparada). Aplicando solo "
+                    "metadatos de transporte.",
+                    picking.name,
+                )
 
             if picking.wms_estado in ('despachado', 'anulado'):
                 errores.append(
@@ -998,15 +1043,40 @@ Body: {body_str[:500]}"""
                     picking, origen='confirmacionMercaderiaPreparada'
                 )
 
-                # Validar el picking para dejarlo en estado 'done', alineado con el
-                # comportamiento de los otros handlers (confirmacionPedido y
-                # confirmacionRecepcion). Antes del fix el picking quedaba en
-                # 'assigned' (listo) y había que validarlo manualmente.
+                # Validar el picking para dejarlo en estado 'done', replicando EXACTAMENTE
+                # el patrón de _handle_confirmacion_pedido (línea 644+):
+                # 1) Setear qty_done en las move_lines (sino button_validate devuelve un
+                #    wizard 'Immediate Transfer' o no hace nada).
+                # 2) Verificar state=='assigned' antes de validar.
+                # 3) Si button_validate devuelve un dict (wizard backorder), procesarlo
+                #    con process_cancel_backorder — porque devolver dict NO levanta
+                #    excepción, el picking quedaba en 'assigned' silenciosamente.
                 try:
-                    picking.with_context(
-                        skip_wms_integration=True,
-                        skip_backorder=True,
-                    ).button_validate()
+                    # Paso 1: asignar cantidad por defecto a las move_lines sin qty_done
+                    for move_line in picking.move_line_ids:
+                        if move_line.qty_done == 0:
+                            move_line.sudo().qty_done = (
+                                move_line.quantity_product_uom
+                                or move_line.qty_done
+                                or move_line.move_id.product_uom_qty
+                            )
+
+                    # Paso 2: validar solo si el picking está listo
+                    if picking.state == 'assigned':
+                        res = picking.with_context(
+                            skip_wms_integration=True,
+                            skip_backorder=True,
+                        ).button_validate()
+
+                        # Paso 3: manejar wizard de backorder si button_validate lo devuelve
+                        if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                            backorder_wiz = (
+                                request.env['stock.backorder.confirmation']
+                                .with_context(**res.get('context', {}))
+                                .sudo()
+                                .create({})
+                            )
+                            backorder_wiz.process_cancel_backorder()
                 except Exception as e:
                     _logger.warning(
                         "[WIS] confirmacionMercaderiaPreparada | no se pudo "
