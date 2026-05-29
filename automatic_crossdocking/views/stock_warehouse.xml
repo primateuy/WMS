@@ -11,6 +11,8 @@
                     <field name="crossdocking_location_id" colspan="2"/>
                     <field name="crossdocking_reception_type_id" colspan="2"/>
                     <field name="crossdocking_type_id" colspan="2"/>
+                    <field name="intermediate_crossdock_location_id" colspan="2"/>
+                    <field name="intermediate_crossdock_picking_type_id" colspan="2"/>
                 </xpath>
             </field>
         </record>

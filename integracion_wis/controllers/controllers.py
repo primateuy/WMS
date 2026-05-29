@@ -985,10 +985,34 @@ Body: {body_str[:500]}"""
                         picking, contenedores_prep
                     )
 
+                # Autocompletar document_type y partner (consistente con los otros
+                # handlers: confirmacionRecepcion, confirmacionPedido, almacenamiento).
+                # Si el picking no tiene partner_id, lo completa con el partner de la
+                # company del picking_type. Si ya tiene uno (ej. asignado por el módulo
+                # de crossdocking con la dirección de la sucursal destino), lo respeta —
+                # así la dirección de entrega en el e-Remito es la correcta del picking.
+                picking.sudo()._wis_complete_document_type()
+
                 # Spec 3.3 paso 3: emitir eRemito si corresponde.
                 self._intentar_emitir_eremito(
                     picking, origen='confirmacionMercaderiaPreparada'
                 )
+
+                # Validar el picking para dejarlo en estado 'done', alineado con el
+                # comportamiento de los otros handlers (confirmacionPedido y
+                # confirmacionRecepcion). Antes del fix el picking quedaba en
+                # 'assigned' (listo) y había que validarlo manualmente.
+                try:
+                    picking.with_context(
+                        skip_wms_integration=True,
+                        skip_backorder=True,
+                    ).button_validate()
+                except Exception as e:
+                    _logger.warning(
+                        "[WIS] confirmacionMercaderiaPreparada | no se pudo "
+                        "validar picking=%s: %s. Estado actual: %s",
+                        picking.name, e, picking.state,
+                    )
 
                 _logger.info(
                     "Picking %s marcado como 'preparado' por WMS (fecha=%s)",

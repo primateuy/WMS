@@ -327,10 +327,38 @@ class PurchaseOrder(models.Model):
                 if not main_warehouse.crossdocking_type_id or not main_warehouse.crossdocking_location_id or not main_warehouse.crossdocking_reception_type_id:
                     raise ValidationError("No se ha asignado operación para el crossdocking en el centro logístico")
 
+                # Paso intermedio opcional (chain de 4 pasos en lugar de 3): si la sucursal
+                # define `intermediate_crossdock_location_id`, se crea un picking extra antes
+                # del crossdockingPicking. El chain queda:
+                #   POLO/Entrada → intermediate_crossdock_location_id → crossdocking_location_id → destino
+                # Si esos campos quedan vacíos, comportamiento idéntico al anterior (3 pasos).
+                crossdock_origin_location = self._get_or_create_entrance_location()
+                if warehouse.intermediate_crossdock_location_id:
+                    if not warehouse.intermediate_crossdock_picking_type_id:
+                        raise ValidationError(
+                            f"El almacén '{warehouse.name}' tiene una 'Ubicación Intermedia "
+                            f"Crossdocking' definida pero le falta el 'Tipo de Operación "
+                            f"Intermedio Crossdocking'."
+                        )
+                    intermediatePicking = self._prepare_picking()
+                    intermediatePicking.update({
+                        'location_dest_id': warehouse.intermediate_crossdock_location_id.id,
+                        'location_id': crossdock_origin_location.id,
+                        'origin': f"{self.name} - Crossdock Intermedio {location.complete_name}",
+                        'picking_type_id': warehouse.intermediate_crossdock_picking_type_id.id,
+                        'partner_id': warehouse.partner_id.id,
+                    })
+                    interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
+                    all_pickings |= interpick
+                    intermediate_moves = self._create_equitable_moves_for_picking(interpick, location, lines_data)
+                    all_moves |= intermediate_moves
+                    # El crossdockingPicking pasa a salir desde la ubicación intermedia.
+                    crossdock_origin_location = warehouse.intermediate_crossdock_location_id
+
                 crossdockingPicking = self._prepare_picking();
                 crossdockingPicking.update({
                     'location_dest_id': warehouse.crossdocking_location_id.id,
-                    'location_id': self._get_or_create_entrance_location().id,
+                    'location_id': crossdock_origin_location.id,
                     'origin': f"{self.name} - Crossdock Equitativo {location.complete_name}",
                     'picking_type_id': main_warehouse.crossdocking_type_id.id,
                     'partner_id': warehouse.partner_id.id,
@@ -1263,10 +1291,35 @@ class PurchaseOrder(models.Model):
 
             if not esPrincipal:
 
+                # Paso intermedio opcional (chain de 4 pasos): si la sucursal `alm` define
+                # `intermediate_crossdock_location_id`, se inserta un picking extra antes
+                # del crossdockingPicking. Mismo patrón que en _create_equitable_*.
+                crossdock_origin_location = self._get_or_create_entrance_location()
+                if alm.intermediate_crossdock_location_id:
+                    if not alm.intermediate_crossdock_picking_type_id:
+                        raise ValidationError(
+                            f"El almacén '{alm.name}' tiene una 'Ubicación Intermedia "
+                            f"Crossdocking' definida pero le falta el 'Tipo de Operación "
+                            f"Intermedio Crossdocking'."
+                        )
+                    intermediatePicking = self._prepare_picking()
+                    intermediatePicking.update({
+                        'location_dest_id': alm.intermediate_crossdock_location_id.id,
+                        'location_id': crossdock_origin_location.id,
+                        'origin': f"{self.name} - Crossdock Intermedio {ubi.complete_name}",
+                        'picking_type_id': alm.intermediate_crossdock_picking_type_id.id,
+                        'partner_id': alm.partner_id.id,
+                    })
+                    interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
+                    all_pickings |= interpick
+                    intermediate_moves = self._create_crossdock_moves_for_picking(interpick, ubi, itm)
+                    all_moves |= intermediate_moves
+                    crossdock_origin_location = alm.intermediate_crossdock_location_id
+
                 crossdockingPicking = self._prepare_picking();
                 crossdockingPicking.update({
                     'location_dest_id': alm.crossdocking_location_id.id,
-                    'location_id': self._get_or_create_entrance_location().id,
+                    'location_id': crossdock_origin_location.id,
                     'origin': f"{self.name} - Crossdock Equitativo {ubi.complete_name}",
                     'picking_type_id': main_warehouse.crossdocking_type_id.id,
                     'partner_id': alm.partner_id.id,
