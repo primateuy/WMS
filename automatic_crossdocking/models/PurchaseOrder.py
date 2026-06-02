@@ -270,6 +270,31 @@ class PurchaseOrder(models.Model):
   
 
     
+    def _wis_propagar_codigo_a_intermedio(self, interpick):
+        """Propaga `codigo_unico` e `idPedidoWMS` de la recepción crossdock al
+        picking intermedio interno, para trazabilidad WIS.
+
+        El paso intermedio es interno y NO se envía a WIS; solo hereda el
+        identificador de la operación WIS anterior (la recepción), que para este
+        punto ya fue enviada y tiene su código (ver `_create_main_reception_picking`).
+
+        Guarda por `_fields`: si `integracion_wis` no está instalado, los campos no
+        existen y la propagación se omite sin romper.
+        """
+        if 'codigo_unico' not in interpick._fields:
+            return
+        # La recepción crossdock del PO se identifica por su `origin`.
+        reception = self.picking_ids.filtered(
+            lambda p: 'Recepción Crossdock' in (p.origin or '')
+            and p.state != 'cancel' and p.codigo_unico
+        )[:1]
+        if not reception:
+            return
+        interpick.with_context(skip_wms_integration=True).write({
+            'codigo_unico': reception.codigo_unico,
+            'idPedidoWMS': reception.idPedidoWMS,
+        })
+
     def _create_equitable_distribution_pickings(self, crossdock_lines):
         """
         Crea pickings para distribución equitativa entre almacenes.
@@ -350,6 +375,8 @@ class PurchaseOrder(models.Model):
                     })
                     interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
                     all_pickings |= interpick
+                    # Hereda el código WIS de la recepción (operación interna, sin envío a WIS).
+                    self._wis_propagar_codigo_a_intermedio(interpick)
                     intermediate_moves = self._create_equitable_moves_for_picking(interpick, location, lines_data)
                     all_moves |= intermediate_moves
                     # El crossdockingPicking pasa a salir desde la ubicación intermedia.
@@ -1312,6 +1339,8 @@ class PurchaseOrder(models.Model):
                     })
                     interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
                     all_pickings |= interpick
+                    # Hereda el código WIS de la recepción (operación interna, sin envío a WIS).
+                    self._wis_propagar_codigo_a_intermedio(interpick)
                     intermediate_moves = self._create_crossdock_moves_for_picking(interpick, ubi, itm)
                     all_moves |= intermediate_moves
                     crossdock_origin_location = alm.intermediate_crossdock_location_id
