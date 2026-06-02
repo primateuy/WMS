@@ -724,8 +724,6 @@ class IntegracionWIS(models.Model):
         if not vals:
             raise ValidationError("No se ha encontrado información del pedido");
 
-        hash_obj = hashlib.md5(vals.name.encode())
-        hash_short = hash_obj.hexdigest()[:8].upper()
         detalles = [];
         for prod in vals.move_ids:
             if not prod.product_id.codigo_unico:
@@ -752,7 +750,8 @@ class IntegracionWIS(models.Model):
         tipo_agente = vals.picking_type_id.tipo_agente_wis or 'CLI'
         codigo_agente = (_partner.codigo_unico_cliente if tipo_agente == 'CLI' else _partner.codigo_unico_proveedor) if _partner else ''
 
-        nro_pedido = vals.codigo_unico if vals.codigo_unico else f"P{hash_short}"
+        # Código único estandarizado: siempre W-<id del picking> (salvo que ya tenga uno).
+        nro_pedido = vals.codigo_unico or f"W-{vals.id}"
 
         pedido = {
             "tipoExpedicion": vals.picking_type_id.tipo_expedicion_wis or ("WSF" if tipo == 'NORM' else "WIS"),
@@ -815,7 +814,8 @@ class IntegracionWIS(models.Model):
                     'cantidadReferencia': move.product_uom_qty
                 })
 
-            numeroRandom = random.randint(100000, 999999)
+            # Código único estandarizado: siempre W-<id del picking> (salvo que ya tenga uno).
+            codigo = picking.codigo_unico or f"W-{picking.id}"
             _tipo_ag_dev = picking.picking_type_id.tipo_agente_wis or 'CLI'
             _partner_dev = picking._get_wis_partner()
             _cod_ag_dev = ''
@@ -825,7 +825,7 @@ class IntegracionWIS(models.Model):
                 'empresa': self.empresa_id,
                 'dsReferencia': f"DEVOLUCIÓN DE CLIENTE DESDE ODOO: {picking.name}",
                 'referencias': [{
-                    'referencia': 'DEV-' + str(numeroRandom),
+                    'referencia': codigo,
                     'tipoReferencia': 'OD',  # Order Delivery Return
                     'codigoAgente': _cod_ag_dev,
                     'tipoAgente': _tipo_ag_dev,
@@ -843,7 +843,7 @@ class IntegracionWIS(models.Model):
                 method="POST"
             )
 
-            response['codigoUnico'] = f'DEV-{numeroRandom}'
+            response['codigoUnico'] = codigo
             return response
 
     def insertarReferenciaRecepcion(self, picking):
@@ -895,7 +895,8 @@ class IntegracionWIS(models.Model):
 
             colocarFecha = True if fecha_venc else False;
 
-        numeroRandom = random.randint(100000, 999999)
+        # Código único estandarizado: siempre W-<id del picking> (salvo que ya tenga uno).
+        codigo = picking.codigo_unico or f"W-{picking.id}"
         tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
         _partner_rec = picking._get_wis_partner()
         codigo_agente = (_partner_rec.codigo_unico_cliente if tipo_agente == 'CLI' else _partner_rec.codigo_unico_proveedor) if _partner_rec else ''
@@ -932,7 +933,7 @@ class IntegracionWIS(models.Model):
             'empresa': self.empresa_id,
             'dsReferencia': f"RECEPCIÓN DESDE ODOO: {picking.name}",
             'referencias': [{
-                'referencia': 'REC-' + str(numeroRandom),
+                'referencia': codigo,
                 'tipoReferencia': 'OC',
                 'fechaVencimientoOrden': picking.date_done.isoformat() if (colocarFecha and picking.date_done) else None,
                 'codigoAgente': codigo_agente,
@@ -950,7 +951,7 @@ class IntegracionWIS(models.Model):
             method="POST"
         )
 
-        response['codigoUnico'] = f'REC-{numeroRandom}'
+        response['codigoUnico'] = codigo
         return response
 
     def actualizarReferenciaRecepcion(self, picking):
