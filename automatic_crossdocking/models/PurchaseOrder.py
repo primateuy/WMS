@@ -290,9 +290,17 @@ class PurchaseOrder(models.Model):
         )[:1]
         if not reception:
             return
+        # `wms_estado='no_integrado'` aísla completamente al intermedio de WIS conservando
+        # el código para trazabilidad. Es un paso interno que NO debe comunicarse con WIS:
+        #  - Envío (insert): los hooks saltan porque `wms_estado != 'sin_enviar'`.
+        #  - Actualización (actualizarReferenciaRecepcion): saltan porque `!= 'enviado'`.
+        #  - Webhooks entrantes: los filtros de controllers.py excluyen 'no_integrado'
+        #    (importante porque el intermedio comparte el codigo_unico de la recepción).
+        # No usar 'enviado': implicaría que se integró y reactivaría los hooks de actualización.
         interpick.with_context(skip_wms_integration=True).write({
             'codigo_unico': reception.codigo_unico,
             'idPedidoWMS': reception.idPedidoWMS,
+            'wms_estado': 'no_integrado',
         })
 
     def _create_equitable_distribution_pickings(self, crossdock_lines):

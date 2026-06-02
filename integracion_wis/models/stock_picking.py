@@ -20,6 +20,7 @@ class StockPicking(models.Model):
             ("preparado", "Preparado por WMS"),
             ("despachado", "Despachado por WMS"),
             ("anulado", "Anulado por WMS"),
+            ("no_integrado", "No integrado con WMS"),
         ],
         string="Estado WMS",
         default="sin_enviar",

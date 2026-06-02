@@ -206,7 +206,7 @@ Body: {body_str[:500]}"""
                 [('codigo_unico', '=', numero_referencia)]
             )
             pickings_activos = pickings_todos.filtered(
-                lambda p: p.wms_estado != 'sin_enviar' and p.state not in ('done', 'cancel')
+                lambda p: p.wms_estado not in ('sin_enviar', 'no_integrado') and p.state not in ('done', 'cancel')
             )
 
             # Fallback por name (spec 1.4 paso 1): si no se encontró por codigo_unico,
@@ -561,7 +561,7 @@ Body: {body_str[:500]}"""
                 [('codigo_unico', '=', nombre_pedido)]
             )
             pickings_validos = pickings_todos.filtered(
-                lambda p: p.wms_estado != 'sin_enviar' and p.state != 'cancel'
+                lambda p: p.wms_estado not in ('sin_enviar', 'no_integrado') and p.state != 'cancel'
             )
             pickings_activos = pickings_validos.filtered(
                 lambda p: p.state != 'done'
