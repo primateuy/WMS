@@ -276,27 +276,31 @@ class PurchaseOrder(models.Model):
         integran ya tienen su código en ese punto).
 
         `cadena`: lista ordenada de pickings, ej. [recepción, intermedio, crosspick].
-        (La recepción de sucursal NO se incluye → queda sin código, por diseño.)
 
-        Regla por cada eslabón (a partir del 2do):
-        - Si el picking INTEGRA con WIS (`picking_type_id.integracion_wms`): no se toca,
-          ya generó su propio código distinto al enviarse.
-        - Si NO integra (paso interno) y no tiene código: hereda el del eslabón anterior
-          y se marca `wms_estado='no_integrado'` (aislado de WIS: no se envía, no se
-          actualiza, y los webhooks entrantes lo excluyen).
+        Regla por cada eslabón (a partir del 2do): hereda el código del eslabón anterior
+        SOLO si su tipo de operación tiene `adquiere_codigo_unico_wms=True` (Opción 2:
+        cada paso decide explícitamente si adquiere el código del anterior). Al adquirirlo
+        queda como operación interna: `wms_estado='no_integrado'` (aislado de WIS: no se
+        envía, no se actualiza, y los webhooks entrantes lo excluyen). Los tipos NO marcados
+        no se tocan (ej. la recepción de sucursal queda sin código).
 
         Ejemplo config actual: recepción=W-R-<id> (propio) → intermedio=W-P-<id> (propio,
-        integra) → crosspick hereda el W-P-<id> del intermedio (no integra).
+        integra) → crosspick (tipo con `adquiere_codigo_unico_wms`) hereda el W-P-<id> del
+        intermedio.
 
-        Guarda por `_fields`: si `integracion_wis` no está instalado, se omite sin romper.
+        Guarda por `_fields`: si `integracion_wis` no está instalado, el campo `codigo_unico`
+        (y `adquiere_codigo_unico_wms`) no existen → se omite sin romper.
         """
         eslabones = [p for p in cadena if p]
         for idx in range(1, len(eslabones)):
             prev, cur = eslabones[idx - 1], eslabones[idx]
             if 'codigo_unico' not in cur._fields:
                 continue
-            # Integra con WIS o ya tiene código propio → no heredar.
-            if cur.picking_type_id.integracion_wms or cur.codigo_unico:
+            # Solo hereda si el tipo está marcado para adquirir el código del paso anterior.
+            if not cur.picking_type_id.adquiere_codigo_unico_wms:
+                continue
+            # Ya tiene código propio (ej. backorder) → no pisar.
+            if cur.codigo_unico:
                 continue
             if not prev.codigo_unico:
                 continue

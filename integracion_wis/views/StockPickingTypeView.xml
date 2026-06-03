@@ -13,6 +13,9 @@
                     <page string="Integración WMS" name="wms_integration">
                         <group>
                             <field name="integracion_wms"/>
+                            <!-- Aplica a operaciones internas (NO se gatea por integracion_wms):
+                                 el picking adquiere el código del paso anterior. -->
+                            <field name="adquiere_codigo_unico_wms"/>
                             <field name="tipo_pedido_wis" invisible="not integracion_wms"/>
                             <field name="tipo_expedicion_wis" invisible="not integracion_wms"/>
                             <field name="tipo_agente_wis" invisible="not integracion_wms"/>

@@ -497,6 +497,58 @@ Body: {body_str[:500]}"""
                 f"Errores: {' | '.join(errores)}"
             )
 
+    def _wis_validar_operaciones_internas(self, codigo_unico, origen='confirmacionPedido'):
+        """Valida (button_validate → 'done') las operaciones INTERNAS de Odoo que comparten
+        el `codigo_unico` — los pickings `no_integrado` a los que se les propagó el código
+        del paso WIS anterior (ej. el crosspick del crossdock). Se llama DESPUÉS de validar
+        el picking que integra, para que el stock siga fluyendo por la cadena interna.
+
+        Estas operaciones NO se comunican con WIS (son internas); por eso no las dispara un
+        webhook propio. Se las acompaña a 'done' cuando el paso WIS al que pertenecen se
+        confirma. Cada una se reserva (action_assign), se le setea qty_done y se valida,
+        manejando el wizard de backorder si aparece. Una falla se loggea sin cortar el flujo.
+        """
+        internas = request.env['stock.picking'].sudo().search([
+            ('codigo_unico', '=', codigo_unico),
+            ('wms_estado', '=', 'no_integrado'),
+            ('state', 'not in', ('done', 'cancel')),
+        ], order='id')
+        for pick in internas:
+            try:
+                if pick.state not in ('assigned',):
+                    pick.action_assign()
+                for move_line in pick.move_line_ids:
+                    if move_line.qty_done == 0:
+                        move_line.sudo().qty_done = (
+                            move_line.quantity_product_uom
+                            or move_line.qty_done
+                            or move_line.move_id.product_uom_qty
+                        )
+                if pick.state == 'assigned':
+                    res = pick.with_context(
+                        skip_wms_integration=True,
+                        skip_backorder=True,
+                    ).button_validate()
+                    if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                        request.env['stock.backorder.confirmation'].with_context(
+                            **res.get('context', {})
+                        ).sudo().create({}).process_cancel_backorder()
+                    _logger.info(
+                        "[WIS] %s | operación interna %s (codigo_unico=%s) validada a 'done'.",
+                        origen, pick.name, codigo_unico,
+                    )
+                else:
+                    _logger.warning(
+                        "[WIS] %s | operación interna %s no quedó 'assigned' (state=%s); "
+                        "no se pudo validar automáticamente.",
+                        origen, pick.name, pick.state,
+                    )
+            except Exception as e:
+                _logger.warning(
+                    "[WIS] %s | no se pudo validar la operación interna %s: %s",
+                    origen, pick.name, e,
+                )
+
     def _handle_confirmacion_pedido(self, data):
         """Spec sección 2: WIS despachó físicamente un pedido.
 
@@ -708,6 +760,11 @@ Body: {body_str[:500]}"""
                             .create({})
                         )
                         backorder_wiz.process_cancel_backorder()
+
+                # Validar las operaciones internas de Odoo (no_integrado) que comparten
+                # este código — se les propagó el código de este paso WIS y deben quedar
+                # validadas al confirmarse el pedido, para que el stock siga la cadena.
+                self._wis_validar_operaciones_internas(nombre_pedido, origen='confirmacionPedido')
 
                 _logger.info(
                     "Picking %s despachado y validado por WMS. "
@@ -954,8 +1011,12 @@ Body: {body_str[:500]}"""
                 continue
 
             # Spec 3.3 paso 1: buscar por codigo_unico, luego name.
+            # Excluir 'no_integrado': operaciones internas (ej. crosspick) que comparten
+            # el código del paso WIS anterior; no deben resolver los webhooks entrantes
+            # (sino, por _order=id desc, search limit=1 devolvía el crosspick interno).
             picking = request.env['stock.picking'].sudo().search(
-                [('codigo_unico', '=', nombre_pedido)], limit=1
+                [('codigo_unico', '=', nombre_pedido),
+                 ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))], limit=1
             )
             if not picking:
                 picking = request.env['stock.picking'].sudo().search(
@@ -1175,8 +1236,11 @@ Body: {body_str[:500]}"""
                     )
 
             # Spec 4.3 paso 1: buscar por codigo_unico, luego name, luego idPedidoWMS.
+            # Excluir 'no_integrado' (operaciones internas que comparten el código del
+            # paso WIS anterior): la anulación debe resolver al picking que integra.
             picking = request.env['stock.picking'].sudo().search(
-                [('codigo_unico', '=', nombre_pedido)], limit=1
+                [('codigo_unico', '=', nombre_pedido),
+                 ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))], limit=1
             )
             if not picking:
                 picking = request.env['stock.picking'].sudo().search(
@@ -1741,8 +1805,11 @@ Body: {body_str[:500]}"""
             raise ValueError(f"Almacenamiento '{serializado}' sin detalles.")
 
         # Paso 1: buscar picking de recepción
+        # Excluir 'no_integrado' (operaciones internas que comparten el código del paso
+        # WIS anterior): el almacenamiento debe resolver al picking que integra.
         picking_imp = request.env['stock.picking'].sudo().search(
-            [('codigo_unico', '=', serializado)], limit=1
+            [('codigo_unico', '=', serializado),
+             ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))], limit=1
         )
         if not picking_imp:
             picking_imp = request.env['stock.picking'].sudo().search(

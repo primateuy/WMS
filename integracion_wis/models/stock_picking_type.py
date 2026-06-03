@@ -72,3 +72,12 @@ class StockPickingType(models.Model):
              'Si está inactivo (por defecto), el backorder hereda el código WIS del picking original '
              'y WIS sigue la operación con su saldo remanente.'
     )
+
+    adquiere_codigo_unico_wms = fields.Boolean(
+        string='Adquiere código único WMS',
+        default=False,
+        help='Si está activo, los pickings de este tipo NO generan su propio código WIS: '
+             'adquieren (heredan) el código de la operación anterior en la cadena y quedan como '
+             'operación interna (wms_estado="no_integrado", sin comunicarse con WIS). '
+             'Ej.: la transferencia interna de crossdocking toma el código del paso entrada→salida.'
+    )
