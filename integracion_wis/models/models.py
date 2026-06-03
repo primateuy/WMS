@@ -750,8 +750,8 @@ class IntegracionWIS(models.Model):
         tipo_agente = vals.picking_type_id.tipo_agente_wis or 'CLI'
         codigo_agente = (_partner.codigo_unico_cliente if tipo_agente == 'CLI' else _partner.codigo_unico_proveedor) if _partner else ''
 
-        # Código único estandarizado: siempre W-<id del picking> (salvo que ya tenga uno).
-        nro_pedido = vals.codigo_unico or f"W-{vals.id}"
+        # Código único estandarizado por tipo: W-P-<id del picking> (pedido).
+        nro_pedido = vals.codigo_unico or f"W-P-{vals.id}"
 
         pedido = {
             "tipoExpedicion": vals.picking_type_id.tipo_expedicion_wis or ("WSF" if tipo == 'NORM' else "WIS"),
@@ -814,8 +814,8 @@ class IntegracionWIS(models.Model):
                     'cantidadReferencia': move.product_uom_qty
                 })
 
-            # Código único estandarizado: siempre W-<id del picking> (salvo que ya tenga uno).
-            codigo = picking.codigo_unico or f"W-{picking.id}"
+            # Código único estandarizado por tipo: W-D-<id del picking> (devolución).
+            codigo = picking.codigo_unico or f"W-D-{picking.id}"
             _tipo_ag_dev = picking.picking_type_id.tipo_agente_wis or 'CLI'
             _partner_dev = picking._get_wis_partner()
             _cod_ag_dev = ''
@@ -895,8 +895,8 @@ class IntegracionWIS(models.Model):
 
             colocarFecha = True if fecha_venc else False;
 
-        # Código único estandarizado: siempre W-<id del picking> (salvo que ya tenga uno).
-        codigo = picking.codigo_unico or f"W-{picking.id}"
+        # Código único estandarizado por tipo: W-R-<id del picking> (recepción).
+        codigo = picking.codigo_unico or f"W-R-{picking.id}"
         tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
         _partner_rec = picking._get_wis_partner()
         codigo_agente = (_partner_rec.codigo_unico_cliente if tipo_agente == 'CLI' else _partner_rec.codigo_unico_proveedor) if _partner_rec else ''

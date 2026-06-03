@@ -270,38 +270,41 @@ class PurchaseOrder(models.Model):
   
 
     
-    def _wis_propagar_codigo_a_intermedio(self, interpick):
-        """Propaga `codigo_unico` e `idPedidoWMS` de la recepción crossdock al
-        picking intermedio interno, para trazabilidad WIS.
+    def _wis_propagar_codigos_cadena(self, cadena):
+        """Propaga `codigo_unico`/`idPedidoWMS` HACIA ADELANTE en la cadena de crossdock,
+        para trazabilidad WIS. DEBE llamarse DESPUÉS del `action_confirm` (los pickings que
+        integran ya tienen su código en ese punto).
 
-        El paso intermedio es interno y NO se envía a WIS; solo hereda el
-        identificador de la operación WIS anterior (la recepción), que para este
-        punto ya fue enviada y tiene su código (ver `_create_main_reception_picking`).
+        `cadena`: lista ordenada de pickings, ej. [recepción, intermedio, crosspick].
+        (La recepción de sucursal NO se incluye → queda sin código, por diseño.)
 
-        Guarda por `_fields`: si `integracion_wis` no está instalado, los campos no
-        existen y la propagación se omite sin romper.
+        Regla por cada eslabón (a partir del 2do):
+        - Si el picking INTEGRA con WIS (`picking_type_id.integracion_wms`): no se toca,
+          ya generó su propio código distinto al enviarse.
+        - Si NO integra (paso interno) y no tiene código: hereda el del eslabón anterior
+          y se marca `wms_estado='no_integrado'` (aislado de WIS: no se envía, no se
+          actualiza, y los webhooks entrantes lo excluyen).
+
+        Ejemplo config actual: recepción=W-R-<id> (propio) → intermedio=W-P-<id> (propio,
+        integra) → crosspick hereda el W-P-<id> del intermedio (no integra).
+
+        Guarda por `_fields`: si `integracion_wis` no está instalado, se omite sin romper.
         """
-        if 'codigo_unico' not in interpick._fields:
-            return
-        # La recepción crossdock del PO se identifica por su `origin`.
-        reception = self.picking_ids.filtered(
-            lambda p: 'Recepción Crossdock' in (p.origin or '')
-            and p.state != 'cancel' and p.codigo_unico
-        )[:1]
-        if not reception:
-            return
-        # `wms_estado='no_integrado'` aísla completamente al intermedio de WIS conservando
-        # el código para trazabilidad. Es un paso interno que NO debe comunicarse con WIS:
-        #  - Envío (insert): los hooks saltan porque `wms_estado != 'sin_enviar'`.
-        #  - Actualización (actualizarReferenciaRecepcion): saltan porque `!= 'enviado'`.
-        #  - Webhooks entrantes: los filtros de controllers.py excluyen 'no_integrado'
-        #    (importante porque el intermedio comparte el codigo_unico de la recepción).
-        # No usar 'enviado': implicaría que se integró y reactivaría los hooks de actualización.
-        interpick.with_context(skip_wms_integration=True).write({
-            'codigo_unico': reception.codigo_unico,
-            'idPedidoWMS': reception.idPedidoWMS,
-            'wms_estado': 'no_integrado',
-        })
+        eslabones = [p for p in cadena if p]
+        for idx in range(1, len(eslabones)):
+            prev, cur = eslabones[idx - 1], eslabones[idx]
+            if 'codigo_unico' not in cur._fields:
+                continue
+            # Integra con WIS o ya tiene código propio → no heredar.
+            if cur.picking_type_id.integracion_wms or cur.codigo_unico:
+                continue
+            if not prev.codigo_unico:
+                continue
+            cur.with_context(skip_wms_integration=True).write({
+                'codigo_unico': prev.codigo_unico,
+                'idPedidoWMS': prev.idPedidoWMS,
+                'wms_estado': 'no_integrado',
+            })
 
     def _create_equitable_distribution_pickings(self, crossdock_lines):
         """
@@ -329,6 +332,7 @@ class PurchaseOrder(models.Model):
         if not location_distribution:
             return
         
+        cadenas_wis = []  # pares (intermedio, crosspick) para propagar códigos WIS tras el confirm
         for location, lines_data in location_distribution.items():
             if not lines_data:
                 continue
@@ -366,6 +370,7 @@ class PurchaseOrder(models.Model):
                 #   POLO/Entrada → intermediate_crossdock_location_id → crossdocking_location_id → destino
                 # Si esos campos quedan vacíos, comportamiento idéntico al anterior (3 pasos).
                 crossdock_origin_location = self._get_or_create_entrance_location()
+                interpick = False
                 if warehouse.intermediate_crossdock_location_id:
                     if not warehouse.intermediate_crossdock_picking_type_id:
                         raise ValidationError(
@@ -383,8 +388,6 @@ class PurchaseOrder(models.Model):
                     })
                     interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
                     all_pickings |= interpick
-                    # Hereda el código WIS de la recepción (operación interna, sin envío a WIS).
-                    self._wis_propagar_codigo_a_intermedio(interpick)
                     intermediate_moves = self._create_equitable_moves_for_picking(interpick, location, lines_data)
                     all_moves |= intermediate_moves
                     # El crossdockingPicking pasa a salir desde la ubicación intermedia.
@@ -407,6 +410,10 @@ class PurchaseOrder(models.Model):
 
                 picking_moves = self._create_equitable_moves_for_picking(crosspick, location, lines_data);
                 all_moves |= picking_moves;
+
+                # Cadena para propagar códigos WIS tras el confirm: el crosspick (interno)
+                # heredará el código del intermedio (o de la recepción si no hay intermedio).
+                cadenas_wis.append((interpick, crosspick))
 
 
 
@@ -464,7 +471,13 @@ class PurchaseOrder(models.Model):
             
             forward_pickings = self.env['stock.picking']._get_impacted_pickings(all_moves)
             (all_pickings | forward_pickings).action_confirm()
-            
+
+            # Tras el confirm, los pickings que integran ya tienen su código WIS.
+            # Propagar hacia adelante en cada cadena recepción→intermedio→crosspick.
+            recepcion_wis = self._get_main_reception_picking()
+            for interpick, crosspick in cadenas_wis:
+                self._wis_propagar_codigos_cadena([recepcion_wis, interpick, crosspick])
+
             # for picking in all_pickings:
             #     if picking.state != 'confirmed':
             #         try:
@@ -1298,7 +1311,8 @@ class PurchaseOrder(models.Model):
         
         if not warehouse_distribution:
             return
-        
+
+        cadenas_wis = []  # pares (intermedio, crosspick) para propagar códigos WIS tras el confirm
         for ubi, itm in warehouse_distribution.items():
 
             alm = itm[0]['warehouse'];
@@ -1330,6 +1344,7 @@ class PurchaseOrder(models.Model):
                 # `intermediate_crossdock_location_id`, se inserta un picking extra antes
                 # del crossdockingPicking. Mismo patrón que en _create_equitable_*.
                 crossdock_origin_location = self._get_or_create_entrance_location()
+                interpick = False
                 if alm.intermediate_crossdock_location_id:
                     if not alm.intermediate_crossdock_picking_type_id:
                         raise ValidationError(
@@ -1347,8 +1362,6 @@ class PurchaseOrder(models.Model):
                     })
                     interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
                     all_pickings |= interpick
-                    # Hereda el código WIS de la recepción (operación interna, sin envío a WIS).
-                    self._wis_propagar_codigo_a_intermedio(interpick)
                     intermediate_moves = self._create_crossdock_moves_for_picking(interpick, ubi, itm)
                     all_moves |= intermediate_moves
                     crossdock_origin_location = alm.intermediate_crossdock_location_id
@@ -1368,6 +1381,10 @@ class PurchaseOrder(models.Model):
 
                 picking_moves = self._create_crossdock_moves_for_picking(crosspick, ubi, itm);
                 all_moves |= picking_moves;
+
+                # Cadena para propagar códigos WIS tras el confirm (crosspick interno
+                # hereda el código del intermedio, o de la recepción si no hay intermedio).
+                cadenas_wis.append((interpick, crosspick))
 
 
 
@@ -1445,7 +1462,13 @@ class PurchaseOrder(models.Model):
                         move.write({
                             'quantity': 0,
                         })
-                        
+
+            # Tras el confirm, los pickings que integran ya tienen su código WIS.
+            # Propagar hacia adelante en cada cadena recepción→intermedio→crosspick.
+            recepcion_wis = self._get_main_reception_picking()
+            for interpick, crosspick in cadenas_wis:
+                self._wis_propagar_codigos_cadena([recepcion_wis, interpick, crosspick])
+
            
 
     
