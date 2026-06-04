@@ -350,7 +350,7 @@ class StockPicking(models.Model):
                 record.partner_id.name if record.partner_id else 'VACIO',
                 record.wms_estado,
             )
-            if not record.picking_type_id.integracion_wms:
+            if not record.picking_type_id.integracion_wms or record.picking_type_id.adquiere_codigo_unico_wms:
                 continue
             if not record.move_ids:
                 continue
@@ -377,6 +377,11 @@ class StockPicking(models.Model):
                     _logger.info("[WIS] create | picking=%s enviado a WMS", record.name)
             except Exception as e:
                 _logger.exception("[WIS] create | error en picking=%s: %s", record.name, e)
+        # Adquisición DESDE LA CREACIÓN: si el picking que adquiere ya tiene su predecesor
+        # con código al crearse, hereda acá mismo. Si el predecesor aún no tiene código
+        # (ej. cadenas por procurement que se arman hacia atrás), los hooks de ciclo de vida
+        # (confirm/assign/done) completan la adquisición cuando el upstream ya lo tenga.
+        records._wis_adquirir_codigo_si_corresponde()
         return records
 
     def _create_backorder(self):
@@ -414,7 +419,7 @@ class StockPicking(models.Model):
                 record.partner_id.name if record.partner_id else 'SIN PARTNER',
                 record.wms_estado, estado_obj,
             )
-            if not record.picking_type_id.integracion_wms:
+            if not record.picking_type_id.integracion_wms or record.picking_type_id.adquiere_codigo_unico_wms:
                 continue
             if not record.move_ids:
                 continue
@@ -450,9 +455,56 @@ class StockPicking(models.Model):
                     'detalle': f"Hook: {hook_name} | Estado: {record.state} | Tipo: {record.picking_type_id.name if record.picking_type_id else 'N/A'}",
                 })
 
+    def _wis_adquirir_codigo_si_corresponde(self):
+        """Para pickings cuyo tipo tiene `adquiere_codigo_unico_wms=True`: adquieren el
+        `codigo_unico`/`idPedidoWMS` del picking PREDECESOR en la cadena de movimientos
+        (`move_orig_ids`) y quedan `no_integrado` (operación interna, sin comunicarse con WIS).
+
+        Genérico para cualquier flujo encadenado por rutas (venta mayorista, reabastecimiento,
+        2-step delivery, etc.). El crossdock NO usa esto (sus moves son make_to_stock, sin
+        `move_orig`): para crossdock la propagación la hace el módulo automatic_crossdocking
+        con su cadena explícita.
+
+        Se llama en los eventos de ciclo de vida (confirm/assign/done): reintenta hasta que el
+        predecesor tenga su código (el downstream recién queda listo cuando el upstream se
+        valida/envía, momento en que ya lo tiene). Solo adquiere si hay UN predecesor
+        inequívoco con código (si hay 0 o varios distintos, no toca nada y loggea).
+        """
+        if self.env.context.get('skip_wms_integration'):
+            return
+        for record in self:
+            if not record.picking_type_id.adquiere_codigo_unico_wms:
+                continue
+            if record.codigo_unico or record.state in ('done', 'cancel'):
+                continue
+            if not record.move_ids:
+                continue
+            preds = record.move_ids.move_orig_ids.picking_id.filtered(
+                lambda p: p.id != record.id and p.codigo_unico
+            )
+            codigos = set(preds.mapped('codigo_unico'))
+            if len(codigos) != 1:
+                if len(codigos) > 1:
+                    _logger.warning(
+                        "[WIS] adquirir | picking=%s: predecesores con códigos distintos %s; "
+                        "no se adquiere (ambiguo).", record.name, codigos,
+                    )
+                continue
+            origen = preds.sorted('id')[:1]
+            record.with_context(skip_wms_integration=True).write({
+                'codigo_unico': origen.codigo_unico,
+                'idPedidoWMS': origen.idPedidoWMS,
+                'wms_estado': 'no_integrado',
+            })
+            _logger.info(
+                "[WIS] adquirir | picking=%s adquirió codigo_unico=%s de %s.",
+                record.name, origen.codigo_unico, origen.name,
+            )
+
     def action_confirm(self):
         res = super().action_confirm()
         self._enviar_wis_si_corresponde('action_confirm')
+        self._wis_adquirir_codigo_si_corresponde()
         # Punto 4: cubre cross-docking generado por otros módulos (los onchange de vista
         # no corren en creación programática, así que forzamos el compute acá).
         self._wis_complete_document_type()
@@ -461,6 +513,7 @@ class StockPicking(models.Model):
     def action_assign(self):
         res = super().action_assign()
         self._enviar_wis_si_corresponde('action_assign')
+        self._wis_adquirir_codigo_si_corresponde()
         self._wis_complete_document_type()
         return res
 
@@ -478,7 +531,7 @@ class StockPicking(models.Model):
                 record.partner_id.name if record.partner_id else 'SIN PARTNER',
                 record.wms_estado,
             )
-            if not record.picking_type_id.integracion_wms:
+            if not record.picking_type_id.integracion_wms or record.picking_type_id.adquiere_codigo_unico_wms:
                 continue
             if not record.move_ids:
                 continue
@@ -498,6 +551,7 @@ class StockPicking(models.Model):
                     _logger.info("[WIS] _action_done | picking=%s enviado a WMS", record.name)
             except Exception as e:
                 _logger.exception("[WIS] _action_done | error en picking=%s: %s", record.name, e)
+        self._wis_adquirir_codigo_si_corresponde()
         return res
 
     def write(self, vals):
@@ -546,7 +600,7 @@ class StockPicking(models.Model):
                 )
                 if nuevo_state == 'done':
                     continue  # manejado por _action_done
-                if not record.picking_type_id.integracion_wms:
+                if not record.picking_type_id.integracion_wms or record.picking_type_id.adquiere_codigo_unico_wms:
                     continue
                 if not record.move_ids:
                     continue
@@ -700,7 +754,7 @@ class StockMove(models.Model):
             if not picking or picking.id in pickings_vistos:
                 continue
             pickings_vistos.add(picking.id)
-            if not picking.picking_type_id.integracion_wms:
+            if not picking.picking_type_id.integracion_wms or picking.picking_type_id.adquiere_codigo_unico_wms:
                 continue
             if not picking.move_ids:
                 continue
