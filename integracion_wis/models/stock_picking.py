@@ -137,10 +137,15 @@ class StockPicking(models.Model):
 
 
     idPedidoWMS = fields.Char(
-        string='ID Pedido WMS', help="Identificador del pedido en el sistema WMS.")
+        string='ID Pedido WMS', help="Identificador del pedido en el sistema WMS.",
+        copy=False)
 
     codigo_unico = fields.Char(
-        string = "Código WMS identificatorio"
+        string = "Código WMS identificatorio",
+        copy=False,
+        # copy=False: sin esto, al crear una devolución (que copia el picking original) el
+        # retorno heredaba el codigo_unico de la operación original, y el guard
+        # `if record.codigo_unico: continue` saltaba el envío -> nunca se generaba el W-D-.
     )
 
     wms_nro_caja = fields.Char(
