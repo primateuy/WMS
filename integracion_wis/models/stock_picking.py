@@ -557,6 +557,20 @@ class StockPicking(models.Model):
     def write(self, vals):
         res = super(StockPicking, self).write(vals)
 
+        # Cuando un picking obtiene su `codigo_unico` (por envío a WIS o por adquisición),
+        # propagar HACIA ADELANTE a sus sucesores flagged en la cadena de movimientos. Cubre
+        # los flujos por procurement (ej. reabastecimiento) donde el sucesor ya está creado
+        # —con su `move_orig`— pero todavía SIN código en el momento en que el predecesor recién
+        # lo obtiene (el `create`-hook del sucesor corrió demasiado temprano). Se llama con
+        # contexto limpio aunque este write venga con `skip_wms_integration` (el código se setea
+        # con skip). Cascada automática: cada sucesor que adquiere reescribe su `codigo_unico`,
+        # lo que vuelve a entrar acá y propaga al siguiente eslabón. Sin loop: si ya tiene código,
+        # `_wis_adquirir_codigo_si_corresponde` no vuelve a tocarlo.
+        if vals.get('codigo_unico'):
+            sucesores = self.move_ids.move_dest_ids.picking_id.filtered(lambda p: p.id not in self.ids)
+            if sucesores:
+                sucesores.with_context(skip_wms_integration=False)._wis_adquirir_codigo_si_corresponde()
+
         if (not self.env.context.get('skip_wms_integration') and
                 self.env['integracion_wis.integracion_wis']._comunicacion_habilitada() and
                 'scheduled_date' in vals):
@@ -781,6 +795,20 @@ class StockMove(models.Model):
                     _logger.info("[WIS] _action_confirm | picking=%s enviado a WMS", picking.name)
             except Exception as e:
                 _logger.exception("[WIS] _action_confirm | error en picking=%s: %s", picking.name, e)
+        # Tras confirmar (cadena de moves ya enlazada), intentar la adquisición en los pickings
+        # flagged: si su predecesor ya tiene código en este punto, adquieren sin esperar a que se
+        # los procese (ej. cadenas por procurement donde el upstream ya se codificó en el run).
+        res.picking_id._wis_adquirir_codigo_si_corresponde()
+        return res
+
+    def _action_assign(self, *args, **kwargs):
+        res = super()._action_assign(*args, **kwargs)
+        # La adquisición de código se dispara también acá porque la AUTO-asignación de un
+        # picking aguas abajo (cuando su predecesor se valida) ocurre a nivel move, NO por
+        # `picking.action_assign()`. En ese momento el predecesor ya está hecho y codificado,
+        # así que el picking flagged adquiere su código (y el `write` cascada al siguiente).
+        if not self.env.context.get('skip_wms_integration'):
+            self.picking_id._wis_adquirir_codigo_si_corresponde()
         return res
 
     def write(self, vals):
