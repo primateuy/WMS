@@ -354,6 +354,8 @@ def test_mercaderia_preparada_basico(rpc, base_url):
         "location_id": rpc.ref("stock.stock_location_stock"),
         "location_dest_id": rpc.ref("stock.stock_location_customers"),
         "codigo_unico": codigo_unico,
+        # WIS solo prepara pedidos que fueron enviados; el matcher excluye 'sin_enviar'.
+        "wms_estado": "enviado",
     }, context={"skip_wms_integration": True})
     rpc.create("stock.move", {
         "name": "E2E Move Prep",
@@ -524,6 +526,8 @@ def test_pedidos_anulados_basico(rpc, base_url):
         "location_id": rpc.ref("stock.stock_location_stock"),
         "location_dest_id": rpc.ref("stock.stock_location_customers"),
         "codigo_unico": codigo_unico,
+        # WIS solo anula pedidos que fueron enviados; el matcher excluye 'sin_enviar'.
+        "wms_estado": "enviado",
     }, context={"skip_wms_integration": True})
     rpc.create("stock.move", {
         "name": "E2E Move Anular",
@@ -707,6 +711,8 @@ def test_almacenamiento_basico(rpc, base_url):
         "partner_id": partner_id,
         "codigo_unico": codigo_imp,
         "group_id": group_id,
+        # La recepción IMPO fue enviada a WIS; el matcher de almacenamiento excluye 'sin_enviar'.
+        "wms_estado": "enviado",
     }, context={"skip_wms_integration": True})
     rpc.create("stock.move", {
         "name": "E2E IMPO move",

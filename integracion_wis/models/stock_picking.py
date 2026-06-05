@@ -1,6 +1,6 @@
 from odoo import models, fields, api
 import requests
-from odoo.exceptions import ValidationError
+from odoo.exceptions import ValidationError, UserError
 import base64;
 import gzip;
 
@@ -21,6 +21,7 @@ class StockPicking(models.Model):
             ("despachado", "Despachado por WMS"),
             ("anulado", "Anulado por WMS"),
             ("no_integrado", "No integrado con WMS"),
+            ("en_proceso_cancelacion", "En proceso de cancelación"),
         ],
         string="Estado WMS",
         default="sin_enviar",
@@ -133,6 +134,15 @@ class StockPicking(models.Model):
         string="Motivo anulación WMS",
         copy=False,
         readonly=True,
+    )
+
+    wms_nro_preparacion = fields.Char(
+        string="Nro. Preparación WMS",
+        copy=False,
+        readonly=True,
+        help="Número de preparación que asigna WIS internamente. Necesario para anular "
+             "pedidos de salida vía /Preparacion/AnularPickingPedidoPendiente. Se captura "
+             "cuando WIS lo informa en el webhook de mercadería preparada.",
     )
 
 
@@ -522,6 +532,82 @@ class StockPicking(models.Model):
         self._wis_complete_document_type()
         return res
 
+    def action_cancel(self):
+        """Spec 1: cancelación Odoo → WIS (SALIENTE). Antes de cancelar en Odoo, notifica la
+        anulación a WIS según el tipo de operación:
+          - Recepciones (code='incoming'): /AnulacionReferenciaRecepcion/Update (solo codigo_unico).
+          - Pedidos de salida: /Preparacion/AnularPickingPedidoPendiente (requiere wms_nro_preparacion).
+
+        Si WIS acepta -> wms_estado='anulado' y se cancela en Odoo. Si WIS rechaza -> el picking
+        queda 'en_proceso_cancelacion' (bloqueo operativo) y se aborta la cancelación con UserError.
+
+        NO interviene si el picking no integra, no tiene código, o ya está anulado/despachado —
+        esto último cubre la anulación ENTRANTE (`_handle_pedidos_anulados`), que setea
+        wms_estado='anulado' ANTES de llamar action_cancel(), evitando re-notificar a WIS.
+        """
+        if self.env.context.get('skip_wms_integration'):
+            return super().action_cancel()
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return super().action_cancel()
+
+        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+        for picking in self:
+            if (not picking.picking_type_id.integracion_wms
+                    or not picking.codigo_unico
+                    or picking.wms_estado in ('sin_enviar', 'no_integrado')):
+                continue  # flujo estándar de Odoo (no integrado)
+            if picking.wms_estado in ('anulado', 'despachado'):
+                continue  # ya anulado (ej. anulación entrante) o despachado -> dejar pasar
+            if not datosAPI:
+                continue
+
+            es_recepcion = picking.picking_type_id.code == 'incoming'
+            # Pedido de salida sin número de preparación: WIS no puede anularlo todavía.
+            # (Pendiente de confirmar con Polo Oeste cómo provee 'preparacion'.) No se intenta
+            # la llamada ni se marca 'en_proceso_cancelacion' -> solo se bloquea con aviso.
+            if not es_recepcion and not picking.wms_nro_preparacion:
+                raise UserError(
+                    f"No se puede cancelar el pedido de salida {picking.name} en WIS: falta el "
+                    f"número de preparación que asigna WIS (wms_nro_preparacion). Pendiente de "
+                    f"confirmar con Polo Oeste. La operación no se canceló."
+                )
+
+            try:
+                if es_recepcion:
+                    datosAPI.anularReferenciaRecepcion(picking)
+                else:
+                    datosAPI.anularPedido(picking)
+                # WIS aceptó (sin excepción) -> marcar anulado y seguir con el flujo estándar.
+                picking.with_context(skip_wms_integration=True).write({
+                    'wms_estado': 'anulado',
+                    'wms_origen': 'anulacion',
+                    'wms_fecha_anulacion': fields.Datetime.now(),
+                    'wms_motivo_anulacion': 'Cancelado desde Odoo',
+                })
+                _logger.info("[WIS] action_cancel | picking=%s anulado en WIS y cancelado en Odoo", picking.name)
+            except Exception as e:
+                # WIS rechazó la cancelación -> bloqueo operativo.
+                picking.with_context(skip_wms_integration=True).write({
+                    'wms_estado': 'en_proceso_cancelacion',
+                })
+                self.env['wms.integracion.log'].sudo().create({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'error',
+                    'modelo': 'stock.picking',
+                    'texto': f"action_cancel: WIS rechazó la cancelación de {picking.name}: {str(e)}",
+                    'picking_id': picking.id,
+                    'resultado': 'error',
+                    'detalle': f"Tipo: {picking.picking_type_id.name} | codigo_unico: {picking.codigo_unico}",
+                })
+                _logger.warning("[WIS] action_cancel | WIS rechazó cancelación de %s: %s", picking.name, e)
+                raise UserError(
+                    f"No es posible cancelar el picking {picking.name} porque WIS no aceptó la "
+                    f"cancelación: {str(e)}\n\n"
+                    f"El picking quedó marcado como 'En proceso de cancelación'. "
+                    f"Contactar a Polo Oeste para resolver."
+                )
+        return super().action_cancel()
+
     def _action_done(self):
         res = super(StockPicking, self)._action_done()
         if self.env.context.get('skip_wms_integration'):
@@ -724,36 +810,79 @@ class StockPicking(models.Model):
     # Punto 4: autocompletar l10n_latam_document_type_id en pickings programáticos
     # ------------------------------------------------------------------
     def _wis_complete_document_type(self):
-        """Forzar recálculo de document_type cuando el picking se creó programáticamente.
+        """Autocompletar `l10n_latam_document_type_id` (e-Remito) en pickings programáticos.
 
-        El compute `_compute_l10n_latam_document_type` en l10n_uy_einvoice_base depende de
-        partner_id + punto_emision_id + picking_type_id, pero NO se dispara correctamente
-        cuando el picking se crea desde un controller WIS (los onchange de vista no corren).
+        Problema: el compute base `_compute_l10n_latam_document_type` (l10n_uy_einvoice_base)
+        SOLO actúa sobre pickings en estado `draft` o `assigned` (filtro de línea 222). En el
+        flujo de cross-docking, el picking que debe emitir el e-Remito (tipo con `uses_cfe=True`)
+        queda en estado **`waiting`** (está esperando el movimiento aguas arriba de la cadena),
+        por lo que el compute base lo ignora y el Document Type nunca se sugiere — aunque el
+        picking YA tenga partner/dirección de entrega y punto de emisión correctos.
 
-        Este helper:
-        1. Asegura que el picking tenga partner_id (cae al partner de la company si falta).
-        2. Invalida el cache del campo y fuerza la lectura para que el compute corra.
+        Este helper replica la MISMA búsqueda del compute base y asigna el documento
+        directamente, sin depender del estado del picking. A diferencia del compute base,
+        NUNCA lanza UserError: si no encuentra exactamente una relación, deja el campo vacío
+        y loguea un warning (no debe bloquear el flujo de stock ni la integración WIS).
+
+        Cubre cualquier estado no final (todo salvo `done`/`cancel`), de modo que "cuando el
+        stock.picking tenga que viajar a UCFE y se cree, quede con el tipo de documento
+        siempre que corresponda".
         """
+        latam_obj = self.env['l10n_latam.document.type']
         for picking in self:
             if not picking.picking_type_id.uses_cfe:
                 continue
+            # Respetar el bypass de e-Remito: si la location destino tiene
+            # wis_no_requiere_eremito=True, NO se exige Document Type (consistente con
+            # el override de _compute_l10n_latam_document_type, que lo deja en False).
+            if picking.wis_skip_eremito:
+                continue
             if picking.l10n_latam_document_type_id:
                 continue
-            if picking.state not in ('draft', 'assigned', 'confirmed'):
+            if picking.state in ('done', 'cancel'):
                 continue
+            # 1. Asegurar partner_id (cae al partner de la company si falta).
             if not picking.partner_id:
                 company = picking.picking_type_id.company_id or picking.company_id
                 if company and company.partner_id:
                     picking.with_context(skip_wms_integration=True).write({
                         'partner_id': company.partner_id.id,
                     })
-            try:
-                picking.invalidate_recordset(['l10n_latam_document_type_id', 'punto_emision_id'])
-                _ = picking.l10n_latam_document_type_id  # fuerza el read y dispara el compute
-            except Exception as e:
+            # 2. Asegurar punto_emision_id (lo toma del tipo de operación si el compute
+            #    store no lo dejó seteado, p.ej. por orden de precompute en creación).
+            if not picking.punto_emision_id and picking.picking_type_id.dgi_sucursal_id:
+                punto = picking.picking_type_id.punto_emision_id
+                if punto:
+                    picking.with_context(skip_wms_integration=True).write({
+                        'punto_emision_id': punto.id,
+                    })
+            if not (picking.partner_id and picking.punto_emision_id):
+                continue
+            # 3. Replicar el search del compute base y asignar (sin lanzar nunca).
+            dgi_indicador = '8' if picking.picking_type_id.code == 'incoming' else 'na'
+            relacion = latam_obj.search([
+                ('internal_type', '=', 'stock_picking'),
+                ('company_id', '=', picking.company_id.id),
+                ('punto_emision_id', '=', picking.punto_emision_id.id),
+                ('dgi_indicador_facturacion', '=', dgi_indicador),
+                ('electronic_document', '=', True),
+                ('l10n_latam_identification_type_id', '=',
+                 picking.partner_id.l10n_latam_identification_type_id.id),
+            ])
+            if len(relacion) == 1:
+                picking.with_context(skip_wms_integration=True).write({
+                    'l10n_latam_document_type_id': relacion.id,
+                })
+                _logger.info(
+                    "[WIS] document_type | picking=%s (estado=%s) -> %s asignado.",
+                    picking.name, picking.state, relacion.display_name,
+                )
+            else:
                 _logger.warning(
-                    "[WIS] _wis_complete_document_type | picking=%s no pudo autocompletar: %s",
-                    picking.name, e,
+                    "[WIS] document_type | picking=%s: %s relaciones para "
+                    "punto_emision=%s ident=%s ind=%s; se deja vacío.",
+                    picking.name, len(relacion), picking.punto_emision_id.id,
+                    picking.partner_id.l10n_latam_identification_type_id.name, dgi_indicador,
                 )
 
 
@@ -804,6 +933,9 @@ class StockMove(models.Model):
         # flagged: si su predecesor ya tiene código en este punto, adquieren sin esperar a que se
         # los procese (ej. cadenas por procurement donde el upstream ya se codificó en el run).
         res.picking_id._wis_adquirir_codigo_si_corresponde()
+        # Autocompletar el e-Remito: el crossdock confirma a nivel move y deja el picking que
+        # viaja a UCFE en estado 'waiting', donde el compute base no asigna el Document Type.
+        res.picking_id._wis_complete_document_type()
         return res
 
     def _action_assign(self, *args, **kwargs):
@@ -814,6 +946,7 @@ class StockMove(models.Model):
         # así que el picking flagged adquiere su código (y el `write` cascada al siguiente).
         if not self.env.context.get('skip_wms_integration'):
             self.picking_id._wis_adquirir_codigo_si_corresponde()
+            self.picking_id._wis_complete_document_type()
         return res
 
     def write(self, vals):

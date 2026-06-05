@@ -81,3 +81,13 @@ class StockPickingType(models.Model):
              'operación interna (wms_estado="no_integrado", sin comunicarse con WIS). '
              'Ej.: la transferencia interna de crossdocking toma el código del paso entrada→salida.'
     )
+
+    conciliar_al_anular = fields.Boolean(
+        string='Conciliar stock al anular (WMS)',
+        default=False,
+        help='Si está activo, cuando WIS anula un pedido de este tipo (webhook pedidosAnulados) '
+             'se dispara una conciliación de stock acotada a los productos anulados, '
+             'inmediatamente después de cancelar el picking. Activar en tipos donde una anulación '
+             'puede generar diferencias reales de stock (abastecimientos a tiendas, entregas '
+             'mayoristas). NO activar en recepciones.'
+    )

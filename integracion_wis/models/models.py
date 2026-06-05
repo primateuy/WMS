@@ -992,9 +992,63 @@ class IntegracionWIS(models.Model):
             method="POST"
         )
 
+    def anularReferenciaRecepcion(self, picking):
+        """Spec 1.4: anula una referencia de recepción en WIS (cancelación saliente Odoo→WIS).
+        Endpoint: POST /AnulacionReferenciaRecepcion/Update. Identifica la operación por su
+        `codigo_unico`. Lanza excepción si WIS responde error (la maneja `action_cancel`).
+        """
+        partner = picking._get_wis_partner()
+        tipo_agente = picking.picking_type_id.tipo_agente_wis or 'PRO'
+        codigo_agente = ''
+        if partner:
+            codigo_agente = (partner.codigo_unico_proveedor if tipo_agente == 'PRO'
+                             else partner.codigo_unico_cliente) or ''
+        body = {
+            'empresa': self.empresa_id,
+            'dsReferencia': f'Anulación desde Odoo: {picking.name}',
+            'referencias': [{
+                'referencia': picking.codigo_unico,
+                'tipoReferencia': 'OC',
+                'codigoAgente': codigo_agente,
+                'tipoAgente': tipo_agente,
+            }],
+        }
+        return self.consultarAPI(
+            link='/AnulacionReferenciaRecepcion/Update',
+            body=body,
+            params=None,
+            method='POST',
+        )
+
+    def anularPedido(self, picking):
+        """Spec 1.4: anula un pedido de salida pendiente en WIS (cancelación saliente).
+        Endpoint: POST /Preparacion/AnularPickingPedidoPendiente. Requiere el número de
+        preparación que asigna WIS (`picking.wms_nro_preparacion`).
+
+        PENDIENTE Polo Oeste: confirmar la estructura exacta del body y si la anulación se
+        puede hacer solo con `nroPedido` (sin `preparacion`). Hasta entonces, `action_cancel`
+        bloquea con UserError cuando `wms_nro_preparacion` está vacío (no llega acá sin número).
+        """
+        if not picking.wms_nro_preparacion:
+            raise UserError(
+                f"Falta el número de preparación de WIS para anular el pedido de salida "
+                f"{picking.name}."
+            )
+        body = {
+            'empresa': self.empresa_id,
+            'nroPedido': picking.codigo_unico,
+            'preparacion': picking.wms_nro_preparacion,
+        }
+        return self.consultarAPI(
+            link='/Preparacion/AnularPickingPedidoPendiente',
+            body=body,
+            params=None,
+            method='POST',
+        )
+
     def consultar(self):
         _logger.info("ESTO ES SOLO UNA PRUEBA");
-        return True; 
+        return True;
     
     
     

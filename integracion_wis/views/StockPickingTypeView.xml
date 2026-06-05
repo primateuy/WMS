@@ -24,6 +24,7 @@
                             <field name="metodo_cancelacion_wis" invisible="not integracion_wms"/>
                             <field name="metodo_preparacion_wis" invisible="not integracion_wms"/>
                             <field name="integra_parciales" invisible="not integracion_wms"/>
+                            <field name="conciliar_al_anular" invisible="not integracion_wms"/>
                         </group>
                     </page>
                 </xpath>

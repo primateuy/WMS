@@ -1069,11 +1069,23 @@ Body: {body_str[:500]}"""
                 continue
 
             try:
+                # Número de preparación que asigna WIS (necesario para anular pedidos de
+                # salida, ver Spec 1). La clave exacta del payload está PENDIENTE de confirmar
+                # con Polo Oeste; se prueban varias y se preserva el valor existente si no viene.
+                nro_preparacion = (
+                    pedido_data.get('numeroPreparacion')
+                    or pedido_data.get('preparacion')
+                    or pedido_data.get('nroPreparacion')
+                    or data.get('numeroPreparacion')
+                    or picking.wms_nro_preparacion
+                    or ''
+                )
                 # Spec 3.3 paso 2: actualizar estado y fecha.
                 picking.with_context(skip_wms_integration=True).write({
                     'wms_estado':            'preparado',
                     'wms_origen':            'mercaderia_preparada',
                     'wms_fecha_preparacion': fecha_preparacion,
+                    'wms_nro_preparacion':   nro_preparacion,
                 })
 
                 # Si el payload trae contenedores, crear los paquetes acá (en la
@@ -1104,32 +1116,82 @@ Body: {body_str[:500]}"""
                     picking, origen='confirmacionMercaderiaPreparada'
                 )
 
-                # Validar el picking para dejarlo en estado 'done', replicando EXACTAMENTE
-                # el patrón de _handle_confirmacion_pedido (línea 644+):
-                # 1) Setear qty_done en las move_lines (sino button_validate devuelve un
-                #    wizard 'Immediate Transfer' o no hace nada).
-                # 2) Verificar state=='assigned' antes de validar.
-                # 3) Si button_validate devuelve un dict (wizard backorder), procesarlo
-                #    con process_cancel_backorder — porque devolver dict NO levanta
-                #    excepción, el picking quedaba en 'assigned' silenciosamente.
-                try:
-                    # Paso 1: asignar cantidad por defecto a las move_lines sin qty_done
-                    for move_line in picking.move_line_ids:
-                        if move_line.qty_done == 0:
-                            move_line.sudo().qty_done = (
-                                move_line.quantity_product_uom
-                                or move_line.qty_done
-                                or move_line.move_id.product_uom_qty
-                            )
+                # CANTIDADES PARCIALES (Problema 2): es en ESTA instancia
+                # (confirmacionMercaderiaPreparada) donde WIS informa lo efectivamente
+                # preparado por producto, y sobre lo cual se emite el e-Remito. Odoo debe
+                # entregar ESA cantidad, no la demanda completa. Antes esta lógica vivía en
+                # confirmacionPedido; se trasladó acá porque ahora la preparada es la
+                # instancia que informa las cantidades reales.
+                #
+                # Fuente: contenedores[].detalles[].cantidadPreparada (se suma por producto).
+                #   - Si lo preparado < demanda -> se valida lo preparado y se genera un
+                #     BACKORDER con el remanente (queda una orden parcial pendiente, para
+                #     validar a futuro o anular).
+                #   - Si el payload NO trae contenedores con cantidades -> se valida la
+                #     demanda completa (comportamiento previo, decisión del usuario).
+                mapa_preparado = {}
+                for contenedor in contenedores_prep:
+                    for det in (contenedor.get('detalles') or []):
+                        cod = det.get('producto', '')
+                        cant = det.get('cantidadPreparada', 0) or 0
+                        if not cod or cant <= 0:
+                            continue
+                        mapa_preparado[cod] = mapa_preparado.get(cod, 0) + cant
 
-                    # Paso 2: validar solo si el picking está listo
+                es_parcial = False
+                try:
+                    if mapa_preparado:
+                        # Aplicar la cantidad preparada por producto a cada move (orden
+                        # ascendente de id para consumir primero los moves más antiguos del
+                        # mismo producto). Lo no informado/faltante queda en 0 -> backorder.
+                        cant_restante_por_cod = dict(mapa_preparado)
+                        for move in picking.move_ids.sorted('id'):
+                            cod = move.product_id.codigo_unico
+                            disponible = cant_restante_por_cod.get(cod, 0)
+                            aplicar = min(disponible, move.product_uom_qty)
+                            cant_restante_por_cod[cod] = disponible - aplicar
+                            if aplicar < move.product_uom_qty:
+                                es_parcial = True
+                                _logger.info(
+                                    "[WIS] preparada parcial | picking=%s producto=%s "
+                                    "demanda=%s preparado=%s",
+                                    picking.name, move.product_id.name,
+                                    move.product_uom_qty, aplicar,
+                                )
+                            # Distribuir 'aplicar' entre las move_lines reservadas del move.
+                            restante = aplicar
+                            for ml in move.move_line_ids:
+                                cap = ml.quantity_product_uom or move.product_uom_qty
+                                if restante <= 0:
+                                    ml.sudo().qty_done = 0
+                                elif restante >= cap:
+                                    ml.sudo().qty_done = cap
+                                    restante -= cap
+                                else:
+                                    ml.sudo().qty_done = restante
+                                    restante = 0
+                            # Remanente sin move_line donde ubicarlo: sumarlo al primero.
+                            if restante > 0 and move.move_line_ids:
+                                primera = move.move_line_ids[0]
+                                primera.sudo().qty_done = primera.qty_done + restante
+                    else:
+                        # Sin info de preparado: validar la demanda completa (como hasta hoy).
+                        for move_line in picking.move_line_ids:
+                            if move_line.qty_done == 0:
+                                move_line.sudo().qty_done = (
+                                    move_line.quantity_product_uom
+                                    or move_line.qty_done
+                                    or move_line.move_id.product_uom_qty
+                                )
+
+                    # Validar solo si el picking está listo. NO pasamos skip_backorder:
+                    # si es parcial necesitamos que aparezca el wizard de backorder para
+                    # generar la orden con el remanente (skip_backorder lo descartaría).
                     if picking.state == 'assigned':
                         res = picking.with_context(
                             skip_wms_integration=True,
-                            skip_backorder=True,
                         ).button_validate()
 
-                        # Paso 3: manejar wizard de backorder si button_validate lo devuelve
                         if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
                             backorder_wiz = (
                                 request.env['stock.backorder.confirmation']
@@ -1137,7 +1199,14 @@ Body: {body_str[:500]}"""
                                 .sudo()
                                 .create({})
                             )
-                            backorder_wiz.process_cancel_backorder()
+                            if es_parcial:
+                                backorder_wiz.process()  # crea el backorder con el remanente
+                                _logger.info(
+                                    "[WIS] preparada | backorder generado para picking=%s "
+                                    "(remanente no preparado).", picking.name,
+                                )
+                            else:
+                                backorder_wiz.process_cancel_backorder()
                 except Exception as e:
                     _logger.warning(
                         "[WIS] confirmacionMercaderiaPreparada | no se pudo "
@@ -1188,6 +1257,44 @@ Body: {body_str[:500]}"""
             )
 
     
+    def _conciliar_productos_anulados(self, codigos_productos, picking_origen):
+        """Spec 2.4: dispara una conciliación de stock acotada a los productos indicados,
+        inmediatamente después de procesar una anulación de WIS.
+
+        Reutiliza `conciliarStockProducto` (en integracion_wis.integracion_wis), que consulta
+        el stock en WIS (cantidad_wis=None) y ajusta en Odoo si la diferencia supera el umbral
+        configurado. conciliacion_id=None -> no escribe en logs.conciliacion.stock; el resultado
+        se registra en wms.integracion.log. Una falla por producto se loggea sin cortar el resto.
+        """
+        datosAPI = request.env['integracion_wis.integracion_wis'].sudo().search([], limit=1)
+        if not datosAPI:
+            return
+        for codigo in codigos_productos:
+            variante = request.env['product.product'].sudo().search(
+                [('codigo_unico', '=', codigo)], limit=1
+            )
+            if not variante:
+                _logger.warning("[WIS] conciliar_anulados | producto no encontrado: %s", codigo)
+                continue
+            try:
+                datosAPI.conciliarStockProducto(variante)
+                _logger.info(
+                    "[WIS] conciliar_anulados | conciliado %s (codigo_unico=%s)",
+                    variante.display_name, codigo,
+                )
+            except Exception as e:
+                _logger.exception(
+                    "[WIS] conciliar_anulados | error conciliando %s: %s", codigo, e
+                )
+                request.env['wms.integracion.log'].sudo().create({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'error',
+                    'modelo': 'stock.picking',
+                    'texto': f"Error en conciliación post-anulación para {codigo}: {str(e)}",
+                    'picking_id': picking_origen.id,
+                    'resultado': 'error',
+                })
+
     def _handle_pedidos_anulados(self, data):
         """Spec sección 4: WIS anuló uno o más pedidos.
 
@@ -1342,7 +1449,10 @@ Body: {body_str[:500]}"""
                     'wms_fecha_anulacion':  fecha_anulacion,
                     'wms_motivo_anulacion': motivo,
                 })
-                picking.sudo().action_cancel()
+                # WIS ya canceló (anulación ENTRANTE): cancelar en Odoo SIN re-notificar a WIS.
+                # `skip_wms_integration` hace que el override de action_cancel (Spec 1, saliente)
+                # corte al inicio y no llame a la API de anulación.
+                picking.sudo().with_context(skip_wms_integration=True).action_cancel()
 
                 picking.sudo().message_post(
                     body=Markup(
@@ -1384,6 +1494,23 @@ Body: {body_str[:500]}"""
                     ),
                     'payload_webhook': json.dumps(pedido_data, ensure_ascii=False, indent=2),
                 })
+
+                # Spec 2.3: conciliación de stock acotada a los productos anulados (solo si el
+                # tipo de operación lo tiene activado). Evita arrastrar diferencias hasta la
+                # conciliación nocturna.
+                if picking.picking_type_id.conciliar_al_anular:
+                    # dict.fromkeys -> dedup preservando orden (un producto en varias líneas
+                    # se concilia una sola vez).
+                    productos_anulados = list(dict.fromkeys(
+                        det.get('producto') for det in detalles
+                        if det.get('producto') and (det.get('cantidadAnulada', 0) or 0) > 0
+                    ))
+                    if productos_anulados:
+                        _logger.info(
+                            "[WIS] pedidosAnulados | conciliando %s producto(s) anulado(s): %s",
+                            len(productos_anulados), productos_anulados,
+                        )
+                        self._conciliar_productos_anulados(productos_anulados, picking)
 
             except Exception as e:
                 _logger.exception(
@@ -1854,36 +1981,36 @@ Body: {body_str[:500]}"""
         # se propaga toda la cadena IMPO→INT.
         group = picking_imp.group_id
         purchase = picking_imp.purchase_id  # solo para mensajes de log
-        if not group:
-            msg = (
-                f"almacenamiento: picking de recepción '{picking_imp.name}' sin "
-                f"grupo de abastecimiento (group_id)."
-            )
-            _logger.error("[WIS] %s", msg)
-            request.env['wms.integracion.log'].sudo().create({
-                'fecha': fields.Datetime.now(),
-                'nivel': 'error',
-                'modelo': 'stock.picking',
-                'texto': msg,
-                'picking_id': picking_imp.id,
-                'resultado': 'error',
-                'detalle': '',
-            })
-            raise ValueError(msg)
 
-        pickings_int = request.env['stock.picking'].sudo().search([
-            ('group_id', '=', group.id),
-            ('picking_type_id.code', '=', 'internal'),
-            ('state', 'in', ('waiting', 'confirmed', 'assigned')),
-            ('location_id', '=', picking_imp.location_dest_id.id),
-        ], order='id desc')
-        # Si hay más de uno, tomar el de mayor ID (spec 5.4 paso 2).
-        picking_int = pickings_int[:1]
+        # Lookup PRIMARIO: por group_id (procurement group). Se propaga toda la cadena
+        # IMPO→INT en compras y en recepciones de tienda por ruta. Si hay más de uno, el de
+        # mayor ID (spec 5.4 paso 2).
+        picking_int = request.env['stock.picking']
+        if group:
+            picking_int = request.env['stock.picking'].sudo().search([
+                ('group_id', '=', group.id),
+                ('picking_type_id.code', '=', 'internal'),
+                ('state', 'in', ('waiting', 'confirmed', 'assigned')),
+                ('location_id', '=', picking_imp.location_dest_id.id),
+            ], order='id desc')[:1]
+
+        # Spec 3 — FALLBACK por la cadena de movimientos (move_dest): en flujos por ruta
+        # (ej. recepción desde tiendas) la recepción RECV está encadenada al INT aunque el
+        # group_id no se haya propagado / esté vacío. No aplica a compras (moves make_to_stock
+        # sin move_dest) → no cambia ese flujo, solo agrega cobertura.
         if not picking_int:
-            ref_oc = purchase.name if purchase else group.name
+            picking_int = picking_imp.move_ids.move_dest_ids.picking_id.filtered(
+                lambda p: p.picking_type_id.code == 'internal'
+                and p.state in ('waiting', 'confirmed', 'assigned')
+                and p.location_id.id == picking_imp.location_dest_id.id
+            ).sorted('id')[-1:]
+
+        if not picking_int:
+            ref = purchase.name if purchase else (group.name if group else '—')
             msg = (
-                f"almacenamiento: no se encontró picking interno (Entrada→Existencias) "
-                f"para grupo '{group.name}' (OC '{ref_oc}') en estado pendiente."
+                f"almacenamiento: no se encontró picking interno (Entrada→Existencias) para "
+                f"la recepción '{picking_imp.name}' (ref '{ref}'), ni por group_id ni por la "
+                f"cadena de movimientos."
             )
             _logger.error("[WIS] %s", msg)
             request.env['wms.integracion.log'].sudo().create({
@@ -1893,7 +2020,7 @@ Body: {body_str[:500]}"""
                 'texto': msg,
                 'picking_id': picking_imp.id,
                 'resultado': 'error',
-                'detalle': f"Grupo: {group.name} | OC: {ref_oc} | Recepción: {picking_imp.name}",
+                'detalle': f"Grupo: {group.name if group else '(vacío)'} | Recepción: {picking_imp.name}",
             })
             raise ValueError(msg)
 
@@ -2048,7 +2175,7 @@ Body: {body_str[:500]}"""
             'modelo': 'stock.picking',
             'texto': (
                 f"almacenamiento: picking interno {picking_int.name} validado "
-                f"(recepción origen: {picking_imp.name}, OC: {purchase.name})."
+                f"(recepción origen: {picking_imp.name}, ref: {purchase.name or (group.name if group else '—')})."
             ),
             'picking_id': picking_int.id,
             'resultado': 'exito',
