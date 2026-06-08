@@ -662,6 +662,16 @@ class StockPicking(models.Model):
             if sucesores:
                 sucesores.with_context(skip_wms_integration=False)._wis_adquirir_codigo_si_corresponde()
 
+        # Al enviar a WIS (wms_estado -> 'enviado'), fijar wis_cantidad_original en los moves
+        # UNA SOLA VEZ. Es la base para validar/auditar anulaciones parciales contra la demanda
+        # original. Todos los puntos de envío escriben wms_estado='enviado', así que esto los cubre.
+        if vals.get('wms_estado') == 'enviado':
+            for record in self:
+                for m in record.move_ids.filtered(
+                        lambda mv: not mv.wis_cantidad_original and mv.product_uom_qty):
+                    m.with_context(skip_wms_integration=True).write(
+                        {'wis_cantidad_original': m.product_uom_qty})
+
         if (not self.env.context.get('skip_wms_integration') and
                 self.env['integracion_wis.integracion_wis']._comunicacion_habilitada() and
                 'scheduled_date' in vals):
@@ -889,6 +899,20 @@ class StockPicking(models.Model):
 class StockMove(models.Model):
     _inherit = 'stock.move'
 
+    # Anulaciones parciales de demanda (WIS): se reduce product_uom_qty por evento y se
+    # acumula lo anulado, conservando la cantidad original para validación/trazabilidad.
+    wis_cantidad_original = fields.Float(
+        string="Cantidad original WIS",
+        readonly=True, copy=False,
+        help="Cantidad demandada al momento de enviar la operación a WIS. Se setea una "
+             "sola vez (cuando el picking pasa a 'enviado') y es la base para validar y "
+             "auditar las anulaciones parciales de demanda.")
+    wis_cantidad_anulada = fields.Float(
+        string="Cantidad anulada WIS",
+        readonly=True, copy=False, default=0.0,
+        help="Cantidad acumulada anulada por WIS sobre este movimiento (anulaciones "
+             "parciales de demanda). Valor inicial 0; solo la integración lo modifica.")
+
     def _action_confirm(self, merge=True, merge_into=False):
         res = super()._action_confirm(merge=merge, merge_into=merge_into)
         if self.env.context.get('skip_wms_integration'):
@@ -951,7 +975,9 @@ class StockMove(models.Model):
 
     def write(self, vals):
         res = super().write(vals)
-        if 'product_uom_qty' in vals:
+        # skip_wms_integration corta la notificación a WIS: cubre los cambios de demanda
+        # ORIGINADOS por WIS (ej. anulación parcial), que no deben re-notificarse a WIS.
+        if 'product_uom_qty' in vals and not self.env.context.get('skip_wms_integration'):
             for move in self:
                 picking = move.picking_id
                 if not picking or picking.wms_estado != 'enviado' or not picking.picking_type_id.integracion_wms:

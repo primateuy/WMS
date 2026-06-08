@@ -81,6 +81,9 @@ Body: {body_str[:500]}"""
             pascal_id = event_id[0].upper() + event_id[1:] if event_id else ''
             raw_data = payload.get(event_id) or payload.get(pascal_id) or ({} if event_id else payload)
             handler_data = self._normalize_keys(raw_data)
+            # NumeroInterfazEjecucion va en el payload raíz; lo dejamos accesible a los handlers
+            # (lo usa la auditoría de anulaciones parciales). El controller se instancia por request.
+            self._wis_numero_interfaz = numero_interfaz
             handler(handler_data)
             response = {'status': 200}
             self._create_log(payload, response, event_id, 'exito', numero_interfaz)
@@ -1296,12 +1299,17 @@ Body: {body_str[:500]}"""
                 })
 
     def _handle_pedidos_anulados(self, data):
-        """Spec sección 4: WIS anuló uno o más pedidos.
+        """Spec 'Gestión de Anulaciones Parciales de Demanda' (v1.1): WIS anula cantidades
+        de demanda sobre operaciones pendientes.
 
-        Cancela el picking correspondiente vía action_cancel() y registra el detalle
-        por producto en el log del picking (Producto + CantidadAnulada + Motivo +
-        FechaAlta + Aplicacion). Verifica picking_type_id.metodo_cancelacion_wis;
-        si False, warning y continuar sin error.
+        - Con Detalles[].CantidadAnulada > 0: anulación PARCIAL por producto (reduce
+          product_uom_qty, libera/reajusta la reserva, acumula wis_cantidad_anulada). Si tras
+          procesar todas las líneas quedan en 0, se cancela la operación completa.
+        - Sin cantidades (sin detalles o todas en 0): anulación TOTAL (compat. histórica).
+
+        Verifica picking_type_id.metodo_cancelacion_wis (si False, warning y continuar). No
+        re-notifica a WIS (skip_wms_integration). Mapeo por producto (codigo_unico); múltiples
+        moves del mismo producto se consumen en orden ascendente de ID.
         """
         from datetime import datetime
 
@@ -1407,110 +1415,27 @@ Body: {body_str[:500]}"""
                 )
                 continue
 
+            # Agrupar cantidades anuladas por producto (codigo_unico). El payload anula a
+            # nivel de producto, no de línea (ver sección 6 de la spec).
+            mapa_anular = {}
+            for det in detalles:
+                prod = det.get('producto')
+                cant = det.get('cantidadAnulada', 0) or 0
+                if prod and cant > 0:
+                    mapa_anular[prod] = mapa_anular.get(prod, 0) + cant
+
+            numero_interfaz = getattr(self, '_wis_numero_interfaz', 0)
             try:
-                # Spec 4.3 paso 2: registrar el detalle por producto en el log del picking.
-                lineas_detalle_html = ""
-                for det in detalles:
-                    prod_cod = det.get('producto', '')
-                    cant = det.get('cantidadAnulada', 0)
-                    motivo_lin = det.get('motivo', '')
-                    fecha_lin = det.get('fechaAlta', '')
-                    aplicacion = det.get('aplicacion', '')
-                    lineas_detalle_html += (
-                        f"<tr>"
-                        f"<td style='padding:4px 8px;'>{prod_cod}</td>"
-                        f"<td style='padding:4px 8px;'>{cant}</td>"
-                        f"<td style='padding:4px 8px;'>{motivo_lin}</td>"
-                        f"<td style='padding:4px 8px;'>{fecha_lin}</td>"
-                        f"<td style='padding:4px 8px;'>{aplicacion}</td>"
-                        f"</tr>"
-                    )
-                    request.env['wms.integracion.log'].sudo().create({
-                        'fecha': fields.Datetime.now(),
-                        'nivel': 'warning',
-                        'modelo': 'stock.picking',
-                        'texto': (
-                            f"pedidosAnulados (detalle): {prod_cod} cant={cant} "
-                            f"motivo='{motivo_lin}' aplicacion='{aplicacion}'"
-                        ),
-                        'picking_id': picking.id,
-                        'resultado': 'exito',
-                        'detalle': (
-                            f"Producto: {prod_cod} | CantidadAnulada: {cant} | "
-                            f"FechaAlta: {fecha_lin} | Aplicacion: {aplicacion} | "
-                            f"CodigoAgente: {codigo_agente}"
-                        ),
-                    })
-
-                # Spec 4.3 paso 3: cancelar el picking
-                picking.with_context(skip_wms_integration=True).write({
-                    'wms_estado':           'anulado',
-                    'wms_origen':           'anulacion',
-                    'wms_fecha_anulacion':  fecha_anulacion,
-                    'wms_motivo_anulacion': motivo,
-                })
-                # WIS ya canceló (anulación ENTRANTE): cancelar en Odoo SIN re-notificar a WIS.
-                # `skip_wms_integration` hace que el override de action_cancel (Spec 1, saliente)
-                # corte al inicio y no llame a la API de anulación.
-                picking.sudo().with_context(skip_wms_integration=True).action_cancel()
-
-                picking.sudo().message_post(
-                    body=Markup(
-                        f"<b>WMS — Pedido anulado</b><br/>"
-                        f"Fecha de anulación: {fecha_anulacion}<br/>"
-                        f"Motivo agregado: {motivo}<br/>"
-                        f"Código agente: {codigo_agente or '—'}<br/>"
-                        f"<br/>"
-                        f"<table style='border-collapse:collapse; width:100%;'>"
-                        f"<thead><tr style='background:#f0f0f0;'>"
-                        f"<th style='text-align:left; padding:4px 8px;'>Producto</th>"
-                        f"<th style='text-align:left; padding:4px 8px;'>Cantidad anulada</th>"
-                        f"<th style='text-align:left; padding:4px 8px;'>Motivo</th>"
-                        f"<th style='text-align:left; padding:4px 8px;'>Fecha</th>"
-                        f"<th style='text-align:left; padding:4px 8px;'>Aplicación</th>"
-                        f"</tr></thead>"
-                        f"<tbody>{lineas_detalle_html}</tbody>"
-                        f"</table>"
-                    ),
-                    subtype_xmlid='mail.mt_note',
-                )
-
-                _logger.warning(
-                    "Picking %s ANULADO por WMS. Motivo: %s", picking.name, motivo
-                )
-
-                request.env['wms.integracion.log'].sudo().create({
-                    'fecha': fields.Datetime.now(),
-                    'nivel': 'warning',
-                    'modelo': 'stock.picking',
-                    'texto': (
-                        f"pedidosAnulados: picking {picking.name} cancelado por WMS."
-                    ),
-                    'picking_id': picking.id,
-                    'resultado': 'exito',
-                    'detalle': (
-                        f"Motivo: {motivo} | Fecha anulación: {fecha_anulacion} | "
-                        f"Líneas: {len(detalles)} | CodigoAgente: {codigo_agente}"
-                    ),
-                    'payload_webhook': json.dumps(pedido_data, ensure_ascii=False, indent=2),
-                })
-
-                # Spec 2.3: conciliación de stock acotada a los productos anulados (solo si el
-                # tipo de operación lo tiene activado). Evita arrastrar diferencias hasta la
-                # conciliación nocturna.
-                if picking.picking_type_id.conciliar_al_anular:
-                    # dict.fromkeys -> dedup preservando orden (un producto en varias líneas
-                    # se concilia una sola vez).
-                    productos_anulados = list(dict.fromkeys(
-                        det.get('producto') for det in detalles
-                        if det.get('producto') and (det.get('cantidadAnulada', 0) or 0) > 0
-                    ))
-                    if productos_anulados:
-                        _logger.info(
-                            "[WIS] pedidosAnulados | conciliando %s producto(s) anulado(s): %s",
-                            len(productos_anulados), productos_anulados,
-                        )
-                        self._conciliar_productos_anulados(productos_anulados, picking)
+                if mapa_anular:
+                    # Anulación PARCIAL de demanda (puede terminar en cancelación total si
+                    # todas las líneas quedan en 0).
+                    self._anular_picking_parcial(
+                        picking, mapa_anular, motivo, fecha_anulacion, codigo_agente,
+                        detalles, pedido_data, numero_interfaz, errores)
+                else:
+                    # Sin cantidades informadas -> cancelación TOTAL (comportamiento histórico).
+                    self._anular_picking_total(
+                        picking, motivo, fecha_anulacion, codigo_agente, detalles, pedido_data)
 
             except Exception as e:
                 _logger.exception(
@@ -1535,6 +1460,251 @@ Body: {body_str[:500]}"""
                 f"Se procesaron {len(pedidos) - len(errores)}/{len(pedidos)} pedidos. "
                 f"Errores: {' | '.join(errores)}"
             )
+
+    def _log_anulacion_error(self, picking, msg, pedido_data):
+        """Registra un error de línea de anulación (VAL-02/VAL-03) sin abortar el pedido."""
+        _logger.warning("[WIS] pedidosAnulados | %s", msg)
+        request.env['wms.integracion.log'].sudo().create({
+            'fecha': fields.Datetime.now(),
+            'nivel': 'error',
+            'modelo': 'stock.picking',
+            'texto': f"pedidosAnulados: {msg}",
+            'picking_id': picking.id,
+            'resultado': 'error',
+            'detalle': json.dumps(pedido_data, ensure_ascii=False),
+        })
+
+    def _anular_picking_total(self, picking, motivo, fecha_anulacion, codigo_agente,
+                              detalles, pedido_data):
+        """Anulación TOTAL de la operación (sin cantidades parciales informadas): cancela el
+        picking completo y registra el detalle. No re-notifica a WIS (skip_wms_integration)."""
+        lineas_detalle_html = ""
+        for det in detalles:
+            prod_cod = det.get('producto', '')
+            cant = det.get('cantidadAnulada', 0)
+            motivo_lin = det.get('motivo', '')
+            fecha_lin = det.get('fechaAlta', '')
+            aplicacion = det.get('aplicacion', '')
+            lineas_detalle_html += (
+                f"<tr>"
+                f"<td style='padding:4px 8px;'>{prod_cod}</td>"
+                f"<td style='padding:4px 8px;'>{cant}</td>"
+                f"<td style='padding:4px 8px;'>{motivo_lin}</td>"
+                f"<td style='padding:4px 8px;'>{fecha_lin}</td>"
+                f"<td style='padding:4px 8px;'>{aplicacion}</td>"
+                f"</tr>"
+            )
+            request.env['wms.integracion.log'].sudo().create({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'warning',
+                'modelo': 'stock.picking',
+                'texto': (
+                    f"pedidosAnulados (detalle): {prod_cod} cant={cant} "
+                    f"motivo='{motivo_lin}' aplicacion='{aplicacion}'"
+                ),
+                'picking_id': picking.id,
+                'resultado': 'exito',
+                'detalle': (
+                    f"Producto: {prod_cod} | CantidadAnulada: {cant} | "
+                    f"FechaAlta: {fecha_lin} | Aplicacion: {aplicacion} | "
+                    f"CodigoAgente: {codigo_agente}"
+                ),
+            })
+
+        picking.with_context(skip_wms_integration=True).write({
+            'wms_estado':           'anulado',
+            'wms_origen':           'anulacion',
+            'wms_fecha_anulacion':  fecha_anulacion,
+            'wms_motivo_anulacion': motivo,
+        })
+        # WIS ya canceló (anulación ENTRANTE): cancelar en Odoo SIN re-notificar a WIS.
+        picking.sudo().with_context(skip_wms_integration=True).action_cancel()
+
+        picking.sudo().message_post(
+            body=Markup(
+                f"<b>WMS — Pedido anulado (total)</b><br/>"
+                f"Fecha de anulación: {fecha_anulacion}<br/>"
+                f"Motivo agregado: {motivo}<br/>"
+                f"Código agente: {codigo_agente or '—'}<br/><br/>"
+                f"<table style='border-collapse:collapse; width:100%;'>"
+                f"<thead><tr style='background:#f0f0f0;'>"
+                f"<th style='text-align:left; padding:4px 8px;'>Producto</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Cantidad anulada</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Motivo</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Fecha</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Aplicación</th>"
+                f"</tr></thead>"
+                f"<tbody>{lineas_detalle_html}</tbody>"
+                f"</table>"
+            ),
+            subtype_xmlid='mail.mt_note',
+        )
+
+        _logger.warning("Picking %s ANULADO (total) por WMS. Motivo: %s", picking.name, motivo)
+
+        request.env['wms.integracion.log'].sudo().create({
+            'fecha': fields.Datetime.now(),
+            'nivel': 'warning',
+            'modelo': 'stock.picking',
+            'texto': f"pedidosAnulados: picking {picking.name} cancelado por WMS.",
+            'picking_id': picking.id,
+            'resultado': 'exito',
+            'detalle': (
+                f"Motivo: {motivo} | Fecha anulación: {fecha_anulacion} | "
+                f"Líneas: {len(detalles)} | CodigoAgente: {codigo_agente}"
+            ),
+            'payload_webhook': json.dumps(pedido_data, ensure_ascii=False, indent=2),
+        })
+
+        if picking.picking_type_id.conciliar_al_anular:
+            productos_anulados = list(dict.fromkeys(
+                det.get('producto') for det in detalles
+                if det.get('producto') and (det.get('cantidadAnulada', 0) or 0) > 0
+            ))
+            if productos_anulados:
+                _logger.info("[WIS] pedidosAnulados | conciliando %s producto(s): %s",
+                             len(productos_anulados), productos_anulados)
+                self._conciliar_productos_anulados(productos_anulados, picking)
+
+    def _anular_picking_parcial(self, picking, mapa_anular, motivo, fecha_anulacion,
+                                codigo_agente, detalles, pedido_data, numero_interfaz, errores):
+        """Anulación PARCIAL de demanda: reduce product_uom_qty por producto (consumo
+        secuencial entre moves en orden de ID), reajusta la reserva y, si toda la operación
+        queda en 0, la cancela. No re-notifica a WIS (skip_wms_integration).
+
+        Errores de línea (VAL-02/VAL-03) se loguean y se continúa con el resto (no abortan el
+        pedido ni devuelven 500)."""
+        def qty_proc(m):
+            # Cantidad ya procesada/registrada manualmente (no anulable). En Odoo 17 lo 'hecho'
+            # es la cantidad picked; lo reservado-no-picked NO cuenta como procesado.
+            return m.quantity if m.picked else 0.0
+
+        reservado_antes = sum(picking.move_ids.move_line_ids.mapped('quantity'))
+
+        auditoria = []            # filas por producto para el chatter (sección 9)
+        productos_afectados = []
+
+        for producto_cod, cant_anular in mapa_anular.items():
+            moves = picking.move_ids.filtered(
+                lambda m: m.product_id.codigo_unico == producto_cod
+                and m.state not in ('done', 'cancel')).sorted('id')
+            if not moves:  # VAL-02
+                self._log_anulacion_error(
+                    picking, f"VAL-02: producto '{producto_cod}' sin move activo en "
+                             f"{picking.name}.", pedido_data)
+                continue
+
+            capacidad_total = sum(max(m.product_uom_qty - qty_proc(m), 0.0) for m in moves)
+            if cant_anular > capacidad_total + 1e-6:  # VAL-03 / VAL-04
+                self._log_anulacion_error(
+                    picking, f"VAL-03: cantidad anulada {cant_anular} supera el saldo anulable "
+                             f"{capacidad_total} del producto '{producto_cod}' en {picking.name}. "
+                             f"No se procesa esa línea.", pedido_data)
+                continue
+
+            original = sum(m.wis_cantidad_original or 0.0 for m in moves)
+            restante = cant_anular
+            for m in moves:
+                if restante <= 0:
+                    break
+                cap = max(m.product_uom_qty - qty_proc(m), 0.0)
+                aplicar = min(restante, cap)
+                if aplicar <= 0:
+                    continue
+                # Paso 2.3/2.4: reducir demanda + acumular lo anulado. skip_wms_integration evita
+                # re-notificar a WIS (la anulación vino DE WIS) y libera la reserva del move.
+                m.with_context(skip_wms_integration=True).write({
+                    'product_uom_qty':      m.product_uom_qty - aplicar,
+                    'wis_cantidad_anulada': m.wis_cantidad_anulada + aplicar,
+                })
+                restante -= aplicar
+
+            productos_afectados.append(producto_cod)
+            auditoria.append({
+                'producto':      producto_cod,
+                'original':      original,
+                'evento':        cant_anular,
+                'acumulada':     sum(moves.mapped('wis_cantidad_anulada')),
+                'nueva_demanda': sum(moves.mapped('product_uom_qty')),
+            })
+
+        # Decisión: re-reservar el saldo restante (libera lo anulado, mantiene reservado el resto).
+        picking.with_context(skip_wms_integration=True).action_assign()
+
+        reservado_despues = sum(picking.move_ids.move_line_ids.mapped('quantity'))
+        reserva_liberada = max(reservado_antes - reservado_despues, 0.0)
+
+        # RN-04: si todos los moves activos quedaron en 0, cancelar la operación completa.
+        moves_activos = picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel'))
+        cancelado = bool(moves_activos) and all(m.product_uom_qty <= 0 for m in moves_activos)
+        if cancelado:
+            picking.with_context(skip_wms_integration=True).write({
+                'wms_estado':           'anulado',
+                'wms_origen':           'anulacion',
+                'wms_fecha_anulacion':  fecha_anulacion,
+                'wms_motivo_anulacion': motivo,
+            })
+            picking.sudo().with_context(skip_wms_integration=True).action_cancel()
+
+        # Chatter (sección 9): auditoría por producto.
+        filas_html = ""
+        for a in auditoria:
+            filas_html += (
+                f"<tr>"
+                f"<td style='padding:4px 8px;'>{a['producto']}</td>"
+                f"<td style='padding:4px 8px;'>{a['original']:g}</td>"
+                f"<td style='padding:4px 8px;'>{a['evento']:g}</td>"
+                f"<td style='padding:4px 8px;'>{a['acumulada']:g}</td>"
+                f"<td style='padding:4px 8px;'>{a['nueva_demanda']:g}</td>"
+                f"</tr>"
+            )
+        estado_txt = ("Operación CANCELADA (todas las líneas en 0)." if cancelado
+                      else "Operación VIGENTE con saldo pendiente.")
+        picking.sudo().message_post(
+            body=Markup(
+                f"<b>WMS — Anulación parcial de demanda</b><br/>"
+                f"Fecha: {fecha_anulacion}<br/>"
+                f"Ref. WIS (NumeroInterfazEjecucion): {numero_interfaz or '—'}<br/>"
+                f"Motivo: {motivo}<br/>"
+                f"Código agente: {codigo_agente or '—'}<br/>"
+                f"Reserva liberada: {reserva_liberada:g}<br/>"
+                f"<b>{estado_txt}</b><br/><br/>"
+                f"<table style='border-collapse:collapse; width:100%;'>"
+                f"<thead><tr style='background:#f0f0f0;'>"
+                f"<th style='text-align:left; padding:4px 8px;'>Producto</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Cant. original</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Anulada (evento)</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Anulada (acum.)</th>"
+                f"<th style='text-align:left; padding:4px 8px;'>Nueva demanda</th>"
+                f"</tr></thead>"
+                f"<tbody>{filas_html}</tbody>"
+                f"</table>"
+            ),
+            subtype_xmlid='mail.mt_note',
+        )
+
+        request.env['wms.integracion.log'].sudo().create({
+            'fecha': fields.Datetime.now(),
+            'nivel': 'warning',
+            'modelo': 'stock.picking',
+            'texto': (f"pedidosAnulados (parcial): picking {picking.name} "
+                      f"{'cancelado (todo en 0)' if cancelado else 'con saldo vigente'}."),
+            'picking_id': picking.id,
+            'resultado': 'exito',
+            'detalle': (
+                f"Productos: {', '.join(productos_afectados) or '—'} | "
+                f"Reserva liberada: {reserva_liberada:g} | NumeroInterfaz: {numero_interfaz}"
+            ),
+            'payload_webhook': json.dumps(pedido_data, ensure_ascii=False, indent=2),
+        })
+
+        _logger.info("[WIS] pedidosAnulados parcial | picking=%s productos=%s cancelado=%s",
+                     picking.name, productos_afectados, cancelado)
+
+        # Paso 5: conciliación (independiente de si fue parcial o total).
+        if picking.picking_type_id.conciliar_al_anular and productos_afectados:
+            self._conciliar_productos_anulados(
+                list(dict.fromkeys(productos_afectados)), picking)
 
     def _handle_ajustes(self, data):
         """Spec sección 6: ajustes de stock generados por WIS sin relación a un picking.
