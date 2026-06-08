@@ -27,6 +27,15 @@ class PurchaseOrderType(models.Model):
         ('ceil', 'Redondeo a múltiplo superior')
     ], default='nearest', string="Metódo de Redondeo");
 
+    picking_type_id = fields.Many2one(
+        comodel_name='stock.picking.type',
+        string="Tipo de Operación de Recepción",
+        domain="[('code', '=', 'incoming')]",
+        ondelete='set null',
+        help="Operación logística de recepción que se asigna automáticamente a la Orden de "
+             "Compra al seleccionar este Tipo de Orden. Si se deja vacío, la OC conserva su "
+             "operación por defecto (comportamiento estándar).")
+
 
     def write(self, vals):
         res = super(PurchaseOrderType, self).write(vals)
@@ -67,20 +76,36 @@ class PurchaseOrder(models.Model):
     @api.onchange('order_type')
     def _onchange_order_type(self):
         res = super(PurchaseOrder, self)._onchange_order_type() if hasattr(super(PurchaseOrder, self), '_onchange_order_type') else {}
-        
+
         if self.order_type and hasattr(self.order_type, 'crossdock_enabled'):
-            
+
             self.crossdock_enabled = self.order_type.crossdock_enabled
             self.crossdock_percentage = self.order_type.crossdock_percentage
             self.distribution_rounding_method = self.order_type.distribution_rounding_method
-            
+
             for line in self.order_line:
                 line.use_crossdock = self.order_type.crossdock_enabled
                 line.line_crossdock_percentage = self.order_type.crossdock_percentage / 100
-                
-                
-        
+
+        # Tipo de Operación de Recepción asociado al Tipo de Orden: si el tipo define una,
+        # se completa automáticamente la operación de la OC. Si no define ninguna, no se
+        # toca (la OC conserva la operación actual/por defecto — comportamiento estándar).
+        if self.order_type and self.order_type.picking_type_id:
+            self.picking_type_id = self.order_type.picking_type_id.id
+
         return res
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        # Auto-completar la operación de recepción también en creación programática
+        # (import/API/cron): si el Tipo de Orden define picking_type_id y no se pasó uno
+        # explícito en los vals, se aplica el del tipo (respeta una elección explícita).
+        for vals in vals_list:
+            if vals.get('order_type') and not vals.get('picking_type_id'):
+                order_type = self.env['purchase.order.type'].browse(vals['order_type'])
+                if order_type.picking_type_id:
+                    vals['picking_type_id'] = order_type.picking_type_id.id
+        return super().create(vals_list)
     
     @api.onchange('crossdock_enabled', 'crossdock_percentage')
     def _onchange_crossdock_settings(self):

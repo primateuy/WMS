@@ -8,6 +8,7 @@
             <field name="inherit_id" ref="purchase_order_type.view_purchase_order_type_form"/>
             <field name="arch" type="xml">
                 <xpath expr="//field[@name='incoterm_id']" position="after">
+                    <field name="picking_type_id"/>
                     <field name="crossdock_enabled"/>
                     <field name="crossdock_percentage"/>
                     <field name="distribution_rounding_method"/>
