@@ -1,6 +1,7 @@
 from odoo import models, fields, api
 import requests
 from odoo.exceptions import ValidationError, UserError
+from markupsafe import Markup
 import base64;
 import gzip;
 
@@ -629,17 +630,51 @@ class StockPicking(models.Model):
             except Exception as e:
                 _logger.exception(
                     "[WIS] e-Remito | falla al emitir para picking=%s: %s", picking.name, e)
+                self._wis_registrar_falla_eremito(picking, str(e))
                 raise UserError(
                     f"No se puede completar el picking {picking.name}: falló la emisión del "
                     f"e-Remito (CFE), obligatoria antes de pasar a 'Hecho'.\n\n"
                     f"Detalle: {e}\n\nResolver la emisión del CFE y reintentar."
                 )
             if not picking.cfe_emitido:
+                self._wis_registrar_falla_eremito(
+                    picking, "create_delivery_guide() no dejó cfe_emitido=True (sin excepción).")
                 raise UserError(
                     f"No se puede completar el picking {picking.name}: el e-Remito (CFE) no "
                     f"quedó emitido y es obligatorio antes de pasar a 'Hecho'. "
                     f"Resolver la emisión del CFE y reintentar."
                 )
+
+    def _wis_registrar_falla_eremito(self, picking, detalle):
+        """Deja constancia EN EL CHATTER del picking + wms.integracion.log de que NO se pudo
+        emitir el e-Remito (CFE), para que al abrir el picking se vea el motivo por el que no
+        pasó a 'Hecho'. Se registra en la misma transacción: en el flujo WIS (operaciones
+        internas / webhooks) la excepción se captura aguas arriba y el commit conserva el
+        mensaje; en validación manual el operador ve además el error en pantalla. Nunca rompe
+        (envuelto en try/except)."""
+        try:
+            picking.sudo().message_post(
+                body=Markup(
+                    "<b>⚠️ e-Remito (CFE) NO emitido</b><br/>"
+                    "El picking NO pasó a <b>Hecho</b> porque no se pudo emitir el e-Remito, "
+                    "que es obligatorio.<br/>"
+                    "Motivo: %s<br/>"
+                    "Resolver la emisión del CFE y reintentar la validación."
+                ) % (detalle or '—'),
+                subtype_xmlid='mail.mt_note',
+            )
+            self.env['wms.integracion.log'].sudo().create({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'error',
+                'modelo': 'stock.picking',
+                'texto': f"e-Remito NO emitido para {picking.name}: validación bloqueada.",
+                'picking_id': picking.id,
+                'resultado': 'error',
+                'detalle': detalle,
+            })
+        except Exception as e:
+            _logger.exception(
+                "[WIS] no se pudo registrar la falla de e-Remito en %s: %s", picking.name, e)
 
     def _action_done(self):
         # e-Remito SIEMPRE antes de 'done' (indispensable): cubre las validaciones que corren
