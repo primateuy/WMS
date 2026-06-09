@@ -292,7 +292,7 @@ class StockPicking(models.Model):
         if tipo in TIPOS_DEVOLUCION:
             return datosAPI.insertarDevolucion(self)
 
-        if (tipo == 'OCI' or self.sale_id) and self.picking_type_id.code == 'incoming':
+        if self.picking_type_id.code == 'incoming':
             return datosAPI.insertarReferenciaRecepcion(self)
 
         if tipo == 'EC':
