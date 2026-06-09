@@ -9,6 +9,10 @@ class WisWebhookLog(models.Model):
     fecha = fields.Date(string='Fecha', default=fields.Date.today, required=True)
     hora = fields.Char(string='Hora', required=True)
     numero_interfaz_ejecucion = fields.Integer(string='Nro. Interfaz Ejecución')
+    codigo_unico = fields.Char(
+        string='Código WMS', index=True,
+        help="Código(s) WMS identificado(s) en el payload: pedido / nroPedido / codigoUnico / "
+             "referencia / serializado. Ej.: W-P-1772.")
     request = fields.Text(string='Request')
     tipo = fields.Char(string='Tipo')
     respuesta = fields.Text(string='Respuesta')

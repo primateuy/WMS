@@ -1,4 +1,5 @@
 import json
+import re
 import hmac
 import hashlib
 import base64
@@ -29,6 +30,7 @@ Body: {body_str[:500]}"""
             request.env['wis.webhook.log'].sudo().create({
                 'fecha': fields.Date.today(),
                 'hora': time.strftime('%H:%M:%S'),
+                'codigo_unico': self._extraer_codigo_wis(body_str),
                 'request': debug_msg,
                 'respuesta': 'Webhook recibido',
                 'tipo': 'ENTRADA_DEBUG',
@@ -129,6 +131,56 @@ Body: {body_str[:500]}"""
 
         return hmac.compare_digest(computed, signature_bytes)
 
+    # Claves donde WIS/Odoo ponen el código identificatorio del pedido/referencia.
+    _CLAVES_CODIGO_WIS = {
+        'pedido', 'nropedido', 'codigounico', 'referencia', 'numeroreferencia', 'serializado',
+    }
+    # Regex para sacar el código de texto crudo NO-JSON (ej. el log 'ENTRADA_DEBUG' guarda el
+    # request como "WEBHOOK RECIBIDO... Body: {...}", no un JSON parseable).
+    _PATRON_CODIGO_WIS = re.compile(
+        r'"(?:pedido|nroPedido|codigoUnico|referencia|numeroReferencia|serializado)"'
+        r'\s*:\s*"([^"]+)"',
+        re.IGNORECASE,
+    )
+
+    def _extraer_codigo_wis(self, *fuentes):
+        """Busca el/los código(s) WMS en los payloads dados (dict/list/str-JSON/str-crudo).
+
+        Reconoce las claves del código identificatorio del pedido/referencia (case-insensitive,
+        cubre PascalCase entrante y respuestas): pedido, nroPedido, codigoUnico, referencia,
+        numeroReferencia, serializado. Si el string no es JSON parseable, cae a regex sobre el
+        texto crudo. Devuelve los códigos únicos separados por coma."""
+        encontrados = []
+
+        def add(val):
+            val = str(val).strip()
+            if val and val not in encontrados:
+                encontrados.append(val)
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if (isinstance(k, str) and k.lower() in self._CLAVES_CODIGO_WIS
+                            and isinstance(v, (str, int)) and str(v).strip()):
+                        add(v)
+                    else:
+                        walk(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    walk(item)
+
+        for fuente in fuentes:
+            if isinstance(fuente, str):
+                try:
+                    walk(json.loads(fuente))
+                except Exception:
+                    # No es JSON limpio -> regex sobre el texto crudo.
+                    for m in self._PATRON_CODIGO_WIS.findall(fuente):
+                        add(m)
+            else:
+                walk(fuente)
+        return ', '.join(encontrados)
+
     def _create_log(self, data, respuesta, tipo, estado='exito', numero_interfaz=0):
         try:
             if isinstance(data, str):
@@ -144,6 +196,7 @@ Body: {body_str[:500]}"""
                 'fecha': fields.Date.today(),
                 'hora': time.strftime('%H:%M:%S'),
                 'numero_interfaz_ejecucion': numero_interfaz or 0,
+                'codigo_unico': self._extraer_codigo_wis(data, respuesta),
                 'request': request_str,
                 'respuesta': respuesta_str,
                 'tipo': tipo,

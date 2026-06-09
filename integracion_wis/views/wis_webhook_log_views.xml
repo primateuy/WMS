@@ -8,6 +8,7 @@
                 <field name="fecha"/>
                 <field name="hora"/>
                 <field name="numero_interfaz_ejecucion" string="Nro. Interfaz"/>
+                <field name="codigo_unico" string="Código WMS" optional="show"/>
                 <field name="tipo"/>
                 <field name="estado" widget="badge" decoration-danger="estado == 'error'" decoration-success="estado == 'exito'"/>
             </tree>
@@ -25,6 +26,7 @@
                             <field name="fecha" readonly="1"/>
                             <field name="hora" readonly="1"/>
                             <field name="numero_interfaz_ejecucion" readonly="1"/>
+                            <field name="codigo_unico" string="Código WMS" readonly="1"/>
                             <field name="tipo" readonly="1"/>
                         </group>
                         <group>
