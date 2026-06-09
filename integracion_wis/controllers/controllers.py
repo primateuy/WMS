@@ -681,13 +681,18 @@ Body: {body_str[:500]}"""
                 lambda p: p.state == 'done' and p.wms_estado != 'preparado'
             )
             picking = False
-            # Prioridad 1: un único picking activo (assigned/confirmed/waiting).
-            if len(pickings_activos) == 1:
-                picking = pickings_activos
-            # Prioridad 2: sin activos + 1 picking en done con wms_estado='preparado'
-            # (la preparada lo validó, ahora solo se aplican metadatos de transporte).
-            elif not pickings_activos and len(pickings_done_preparado) == 1:
+            # Prioridad 1: el picking PREPARADO (done + wms_estado='preparado'). confirmacionPedido
+            # confirma el DESPACHO de lo que la preparada ya preparó/validó. Esto es clave cuando la
+            # preparada fue PARCIAL (ej. crossdock: demanda 100/200/300 vs preparado 11/22/33): ahí
+            # quedó el preparado en done + un BACKORDER con el saldo (que hereda código + 'enviado').
+            # Hay que confirmar el PREPARADO, NO el saldo activo — sino se despacharía el saldo y se
+            # contaminaría su paquete.
+            if len(pickings_done_preparado) == 1:
                 picking = pickings_done_preparado
+            # Prioridad 2: sin preparado + 1 activo (ej. anulación parcial: el saldo activo ES la
+            # operación a despachar; o flujo sin mercaderiaPreparada previa).
+            elif not pickings_done_preparado and len(pickings_activos) == 1:
+                picking = pickings_activos
             # Bloqueo: el picking está en done pero NO con wms_estado='preparado'
             # (probablemente 'despachado' o 'enviado'). No permitir re-confirmación.
             elif not pickings_activos and not pickings_done_preparado and pickings_done_otro:
@@ -789,33 +794,41 @@ Body: {body_str[:500]}"""
                 # Punto 4: autocompletar document_type antes de validar (si aplica CFE).
                 picking.sudo()._wis_complete_document_type()
 
-                # Spec 2.4 paso 3 + 2.5: crear paquetes con mapa de cantidades por producto.
-                paquetes_creados = self._crear_paquetes_desde_contenedores(
-                    picking, contenedores
-                )
+                # GUARD: si el picking YA fue validado por mercaderiaPreparada (state='done'), NO
+                # se re-arman paquetes ni se re-setean cantidades ni se re-valida: la preparada ya
+                # definió las cantidades reales y armó el paquete. confirmacionPedido solo confirma
+                # el despacho (metadatos + e-Remito + operaciones internas). Re-procesar acá pisaría
+                # lo que hizo la preparada (sobre todo en parciales/crossdock). Si NO viene de una
+                # preparada (state='assigned'), se hace el flujo normal (armar paquete + validar).
+                paquetes_creados = []
+                if picking.state != 'done':
+                    # Spec 2.4 paso 3 + 2.5: crear paquetes con mapa de cantidades por producto.
+                    paquetes_creados = self._crear_paquetes_desde_contenedores(
+                        picking, contenedores
+                    )
 
-                # Asignar cantidad por defecto a las move_lines sin qty_done
-                for move_line in picking.move_line_ids:
-                    if move_line.qty_done == 0:
-                        move_line.sudo().qty_done = (
-                            move_line.quantity_product_uom or move_line.qty_done or move_line.move_id.product_uom_qty
-                        )
+                    # Asignar cantidad por defecto a las move_lines sin qty_done
+                    for move_line in picking.move_line_ids:
+                        if move_line.qty_done == 0:
+                            move_line.sudo().qty_done = (
+                                move_line.quantity_product_uom or move_line.qty_done or move_line.move_id.product_uom_qty
+                            )
 
-                # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder)
-                if picking.state == 'assigned':
-                    res = picking.with_context(
-                        skip_wms_integration=True,
-                        skip_backorder=True,
-                    ).button_validate()
+                    # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder)
+                    if picking.state == 'assigned':
+                        res = picking.with_context(
+                            skip_wms_integration=True,
+                            skip_backorder=True,
+                        ).button_validate()
 
-                    if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
-                        backorder_wiz = (
-                            request.env['stock.backorder.confirmation']
-                            .with_context(**res.get('context', {}))
-                            .sudo()
-                            .create({})
-                        )
-                        backorder_wiz.process_cancel_backorder()
+                        if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                            backorder_wiz = (
+                                request.env['stock.backorder.confirmation']
+                                .with_context(**res.get('context', {}))
+                                .sudo()
+                                .create({})
+                            )
+                            backorder_wiz.process_cancel_backorder()
 
                 # Validar las operaciones internas de Odoo (no_integrado) que comparten
                 # este código — se les propagó el código de este paso WIS y deben quedar
