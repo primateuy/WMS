@@ -608,7 +608,44 @@ class StockPicking(models.Model):
                 )
         return super().action_cancel()
 
+    def _wis_emitir_eremito_si_corresponde(self):
+        """Emite el e-Remito (CFE) ANTES de que el picking pase a 'done'. INDISPENSABLE: un
+        picking que use CFE debe emitir el remito antes de completarse, en CUALQUIER flujo —
+        incluida la validación de operaciones internas del crossdock
+        (`_wis_validar_operaciones_internas`), que corre con skip_wms_integration y se saltaba
+        la emisión que hacen los handlers WIS (confirmacionPedido / mercaderiaPreparada).
+
+        Si la emisión falla -> UserError: el picking NO pasa a 'done' (decisión del usuario
+        2026-06-09). Se acota a pickings del flujo WIS (con código o tipo integrado) para no
+        alterar el flujo estándar de entregas no-WIS. Respeta cfe_emitido (no re-emite) y el
+        bypass wis_skip_eremito."""
+        for picking in self:
+            if not picking.uses_cfe or picking.cfe_emitido or picking.wis_skip_eremito:
+                continue
+            if not (picking.codigo_unico or picking.picking_type_id.integracion_wms):
+                continue  # ajeno a WIS -> sigue su flujo estándar de e-Remito
+            try:
+                picking.create_delivery_guide()  # respeta cfe_emitido + wis_skip_eremito
+            except Exception as e:
+                _logger.exception(
+                    "[WIS] e-Remito | falla al emitir para picking=%s: %s", picking.name, e)
+                raise UserError(
+                    f"No se puede completar el picking {picking.name}: falló la emisión del "
+                    f"e-Remito (CFE), obligatoria antes de pasar a 'Hecho'.\n\n"
+                    f"Detalle: {e}\n\nResolver la emisión del CFE y reintentar."
+                )
+            if not picking.cfe_emitido:
+                raise UserError(
+                    f"No se puede completar el picking {picking.name}: el e-Remito (CFE) no "
+                    f"quedó emitido y es obligatorio antes de pasar a 'Hecho'. "
+                    f"Resolver la emisión del CFE y reintentar."
+                )
+
     def _action_done(self):
+        # e-Remito SIEMPRE antes de 'done' (indispensable): cubre las validaciones que corren
+        # con skip_wms_integration (crossdock / operaciones internas) que se saltaban la emisión.
+        # Va ANTES del super() y del check de skip para no dejar ningún camino sin emitir.
+        self._wis_emitir_eremito_si_corresponde()
         res = super(StockPicking, self)._action_done()
         if self.env.context.get('skip_wms_integration'):
             return res
