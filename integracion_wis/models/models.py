@@ -934,7 +934,8 @@ class IntegracionWIS(models.Model):
             'dsReferencia': f"RECEPCIÓN DESDE ODOO: {picking.name}",
             'referencias': [{
                 'referencia': codigo,
-                'tipoReferencia': 'OC',
+                # tipoReferencia sale del tipo de operación (Tipo de Pedido WIS); 'OC' si no está.
+                'tipoReferencia': picking.picking_type_id.tipo_pedido_wis or 'OC',
                 'fechaVencimientoOrden': picking.date_done.isoformat() if (colocarFecha and picking.date_done) else None,
                 'codigoAgente': codigo_agente,
                 'tipoAgente': tipo_agente,
@@ -976,7 +977,8 @@ class IntegracionWIS(models.Model):
             'dsReferencia': f"ACTUALIZACIÓN DESDE ODOO: {picking.name}",
             'referencias': [{
                 'referencia': picking.codigo_unico,
-                'tipoReferencia': 'OC',
+                # tipoReferencia sale del tipo de operación (Tipo de Pedido WIS); 'OC' si no está.
+                'tipoReferencia': picking.picking_type_id.tipo_pedido_wis or 'OC',
                 'codigoAgente': codigo_agente,
                 'tipoAgente': tipo_agente,
                 'predio': '1',
@@ -1008,7 +1010,8 @@ class IntegracionWIS(models.Model):
             'dsReferencia': f'Anulación desde Odoo: {picking.name}',
             'referencias': [{
                 'referencia': picking.codigo_unico,
-                'tipoReferencia': 'OC',
+                # tipoReferencia sale del tipo de operación (Tipo de Pedido WIS); 'OC' si no está.
+                'tipoReferencia': picking.picking_type_id.tipo_pedido_wis or 'OC',
                 'codigoAgente': codigo_agente,
                 'tipoAgente': tipo_agente,
             }],
