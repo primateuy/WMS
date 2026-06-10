@@ -689,10 +689,10 @@ Body: {body_str[:500]}"""
             # contaminaría su paquete.
             if len(pickings_done_preparado) == 1:
                 picking = pickings_done_preparado
-            # Prioridad 2: sin preparado + 1 activo (ej. anulación parcial: el saldo activo ES la
-            # operación a despachar; o flujo sin mercaderiaPreparada previa).
-            elif not pickings_done_preparado and len(pickings_activos) == 1:
-                picking = pickings_activos
+            # # Prioridad 2: sin preparado + 1 activo (ej. anulación parcial: el saldo activo ES la
+            # # operación a despachar; o flujo sin mercaderiaPreparada previa).
+            # elif not pickings_done_preparado and len(pickings_activos) == 1:
+            #     picking = pickings_activos
             # Bloqueo: el picking está en done pero NO con wms_estado='preparado'
             # (probablemente 'despachado' o 'enviado'). No permitir re-confirmación.
             elif not pickings_activos and not pickings_done_preparado and pickings_done_otro:
@@ -800,35 +800,35 @@ Body: {body_str[:500]}"""
                 # el despacho (metadatos + e-Remito + operaciones internas). Re-procesar acá pisaría
                 # lo que hizo la preparada (sobre todo en parciales/crossdock). Si NO viene de una
                 # preparada (state='assigned'), se hace el flujo normal (armar paquete + validar).
-                paquetes_creados = []
-                if picking.state != 'done':
-                    # Spec 2.4 paso 3 + 2.5: crear paquetes con mapa de cantidades por producto.
-                    paquetes_creados = self._crear_paquetes_desde_contenedores(
-                        picking, contenedores
-                    )
+                # paquetes_creados = []
+                # if picking.state != 'done':
+                # Spec 2.4 paso 3 + 2.5: crear paquetes con mapa de cantidades por producto.
+                paquetes_creados = self._crear_paquetes_desde_contenedores(
+                    picking, contenedores
+                )
 
-                    # Asignar cantidad por defecto a las move_lines sin qty_done
-                    for move_line in picking.move_line_ids:
-                        if move_line.qty_done == 0:
-                            move_line.sudo().qty_done = (
-                                move_line.quantity_product_uom or move_line.qty_done or move_line.move_id.product_uom_qty
-                            )
+                # Asignar cantidad por defecto a las move_lines sin qty_done
+                for move_line in picking.move_line_ids:
+                    if move_line.qty_done == 0:
+                        move_line.sudo().qty_done = (
+                            move_line.quantity_product_uom or move_line.qty_done or move_line.move_id.product_uom_qty
+                        )
 
-                    # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder)
-                    if picking.state == 'assigned':
-                        res = picking.with_context(
-                            skip_wms_integration=True,
-                            skip_backorder=True,
-                        ).button_validate()
+                # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder)
+                if picking.state == 'assigned':
+                    res = picking.with_context(
+                        skip_wms_integration=True,
+                        skip_backorder=True,
+                    ).button_validate()
 
-                        if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
-                            backorder_wiz = (
-                                request.env['stock.backorder.confirmation']
-                                .with_context(**res.get('context', {}))
-                                .sudo()
-                                .create({})
-                            )
-                            backorder_wiz.process_cancel_backorder()
+                    if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                        backorder_wiz = (
+                            request.env['stock.backorder.confirmation']
+                            .with_context(**res.get('context', {}))
+                            .sudo()
+                            .create({})
+                        )
+                        backorder_wiz.process_cancel_backorder()
 
                 # Validar las operaciones internas de Odoo (no_integrado) que comparten
                 # este código — se les propagó el código de este paso WIS y deben quedar
