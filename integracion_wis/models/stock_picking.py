@@ -350,7 +350,36 @@ class StockPicking(models.Model):
             _logger.error("Error en integración WMS para picking %s: %s", self.id, str(e))
             raise ValidationError(f"Error en integración WMS: {str(e)}")
 
+    def _wis_registrar_envio(self, codigo, tipo, ok=True, error=None):
+        """Registra en `wms.integracion.log` el resultado del envío de ESTE picking a WMS.
 
+        Centraliza el log de los 5 puntos de envío (create / _enviar_wis_si_corresponde /
+        _action_done / write / _action_confirm) para que TODOS los pickings integrados queden
+        registrados —no solo el que envía por el path `write`— cada uno con su `codigo_unico` y
+        la orden de origen (`origin`), de modo que se puedan agrupar por compra/venta filtrando
+        por la orden. Nunca rompe el flujo de negocio (envuelto en try/except)."""
+        self.ensure_one()
+        try:
+            detalle = "Orden: %s · Tipo: %s · Estado: %s" % (
+                self.origin or 's/orden', tipo or '-', self.state)
+            if ok:
+                texto = "Picking %s enviado a WMS. CodigoUnico: %s" % (self.name, codigo or '')
+                nivel, resultado = 'info', 'exito'
+            else:
+                texto = "Error al enviar picking %s a WMS: %s" % (self.name, error)
+                nivel, resultado = 'error', 'error'
+            self.env['wms.integracion.log'].create({
+                'fecha': fields.Datetime.now(),
+                'nivel': nivel,
+                'modelo': 'stock.picking',
+                'texto': texto,
+                'picking_id': self.id,
+                'resultado': resultado,
+                'detalle': detalle,
+            })
+        except Exception as e:
+            _logger.exception(
+                "[WIS] _wis_registrar_envio | no se pudo registrar log de %s: %s", self.name, e)
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -391,8 +420,10 @@ class StockPicking(models.Model):
                         wms_vals['codigo_unico'] = response.get('codigoUnico', '')
                     record.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] create | picking=%s enviado a WMS", record.name)
+                    record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] create | error en picking=%s: %s", record.name, e)
+                record._wis_registrar_envio('', tipo, ok=False, error=str(e))
         # Adquisición DESDE LA CREACIÓN: si el picking que adquiere ya tiene su predecesor
         # con código al crearse, hereda acá mismo. Si el predecesor aún no tiene código
         # (ej. cadenas por procurement que se arman hacia atrás), los hooks de ciclo de vida
@@ -459,17 +490,10 @@ class StockPicking(models.Model):
                         wms_vals['codigo_unico'] = response.get('codigoUnico', '')
                     record.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] %s | picking=%s enviado a WMS", hook_name, record.name)
+                    record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] %s | error en picking=%s: %s", hook_name, record.name, e)
-                self.env['wms.integracion.log'].create({
-                    'fecha': fields.Datetime.now(),
-                    'nivel': 'error',
-                    'modelo': 'stock.picking',
-                    'texto': f"Error al enviar picking {record.name} a WMS: {str(e)}",
-                    'picking_id': record.id,
-                    'resultado': 'error',
-                    'detalle': f"Hook: {hook_name} | Estado: {record.state} | Tipo: {record.picking_type_id.name if record.picking_type_id else 'N/A'}",
-                })
+                record._wis_registrar_envio('', tipo, ok=False, error=str(e))
 
     def _wis_adquirir_codigo_si_corresponde(self):
         """Para pickings cuyo tipo tiene `adquiere_codigo_unico_wms=True`: adquieren el
@@ -726,8 +750,10 @@ class StockPicking(models.Model):
                         wms_vals['codigo_unico'] = response.get('codigoUnico', '')
                     record.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] _action_done | picking=%s enviado a WMS", record.name)
+                    record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] _action_done | error en picking=%s: %s", record.name, e)
+                record._wis_registrar_envio('', tipo, ok=False, error=str(e))
         self._wis_adquirir_codigo_si_corresponde()
         return res
 
@@ -834,27 +860,9 @@ class StockPicking(models.Model):
                             wms_vals['codigo_unico'] = response.get('codigoUnico', '')
                             
                         record.with_context(skip_wms_integration=True).write(wms_vals)
-                        
-                        codigo_log = response.get('codigoUnico', '') if isinstance(response, dict) else ''
-                        self.env['wms.integracion.log'].create({
-                            'fecha': fields.Datetime.now(),
-                            'nivel': 'info',
-                            'modelo': 'stock.picking',
-                            'texto': f"Picking {record.name} enviado a WMS. CodigoUnico: {codigo_log}",
-                            'picking_id': record.id,
-                            'resultado': 'exito',
-                            'detalle': f"Estado: {record.state}, Tipo: {tipo}",
-                        })
+                        record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
                 except Exception as e:
-                    self.env['wms.integracion.log'].create({
-                        'fecha': fields.Datetime.now(),
-                        'nivel': 'error',
-                        'modelo': 'stock.picking',
-                        'texto': f"Error al enviar picking {record.name} a WMS: {str(e)}",
-                        'picking_id': record.id,
-                        'resultado': 'error',
-                        'detalle': f"Estado: {record.state}, Tipo: {record.picking_type_id.name if record.picking_type_id else 'N/A'}",
-                    })
+                    record._wis_registrar_envio('', tipo, ok=False, error=str(e))
                     raise
         return res
 
@@ -1052,8 +1060,10 @@ class StockMove(models.Model):
                         wms_vals['codigo_unico'] = response.get('codigoUnico', '')
                     picking.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] _action_confirm | picking=%s enviado a WMS", picking.name)
+                    picking._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] _action_confirm | error en picking=%s: %s", picking.name, e)
+                picking._wis_registrar_envio('', tipo, ok=False, error=str(e))
         # Tras confirmar (cadena de moves ya enlazada), intentar la adquisición en los pickings
         # flagged: si su predecesor ya tiene código en este punto, adquieren sin esperar a que se
         # los procese (ej. cadenas por procurement donde el upstream ya se codificó en el run).
