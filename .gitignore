@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos / config local
+.env
+*.egg-info/
+.idea/
+.vscode/
+*.swp
+.DS_Store

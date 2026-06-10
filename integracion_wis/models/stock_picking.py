@@ -498,6 +498,20 @@ class StockPicking(models.Model):
             preds = record.move_ids.move_orig_ids.picking_id.filtered(
                 lambda p: p.id != record.id and p.codigo_unico
             )
+            # Fallback crossdock: los moves del crosspick son make_to_stock (sin `move_orig`),
+            # así que la cadena de movimientos no encuentra al predecesor. Se busca por
+            # `group_id` + adyacencia de ubicación (el destino del predecesor == mi origen):
+            # el intermedio termina en la Salida de la sucursal y el crosspick sale de ahí.
+            # Robustece la propagación cuando el intermedio obtiene su código DESPUÉS del pase
+            # único post-confirm de automatic_crossdocking (ej. su envío a WIS se difirió).
+            if not preds and record.group_id and record.location_id:
+                preds = self.search([
+                    ('group_id', '=', record.group_id.id),
+                    ('location_dest_id', '=', record.location_id.id),
+                    ('codigo_unico', '!=', False),
+                    ('id', '!=', record.id),
+                    ('state', 'not in', ('cancel',)),
+                ])
             codigos = set(preds.mapped('codigo_unico'))
             if len(codigos) != 1:
                 if len(codigos) > 1:
@@ -731,6 +745,21 @@ class StockPicking(models.Model):
         # `_wis_adquirir_codigo_si_corresponde` no vuelve a tocarlo.
         if vals.get('codigo_unico'):
             sucesores = self.move_ids.move_dest_ids.picking_id.filtered(lambda p: p.id not in self.ids)
+            # Fallback crossdock: el crosspick no está encadenado por moves (make_to_stock), así
+            # que `move_dest_ids` no lo alcanza. Se lo busca por `group_id` + adyacencia de
+            # ubicación (mi destino == su origen) entre los pickings que adquieren código y aún
+            # no lo tienen. Idempotente: si ya tiene código, `_wis_adquirir_codigo_si_corresponde`
+            # no lo vuelve a tocar. Cubre el caso en que el intermedio codea tarde (después del
+            # pase único post-confirm), dejando al crosspick huérfano de código.
+            for rec in self.filtered(lambda p: p.group_id and p.location_dest_id):
+                sucesores |= self.search([
+                    ('group_id', '=', rec.group_id.id),
+                    ('location_id', '=', rec.location_dest_id.id),
+                    ('picking_type_id.adquiere_codigo_unico_wms', '=', True),
+                    ('codigo_unico', '=', False),
+                    ('id', 'not in', self.ids),
+                    ('state', 'not in', ('cancel', 'done')),
+                ])
             if sucesores:
                 sucesores.with_context(skip_wms_integration=False)._wis_adquirir_codigo_si_corresponde()
 
