@@ -1167,16 +1167,22 @@ Body: {body_str[:500]}"""
                 # existente (NO se borra la línea). Si el move no tiene línea (picking sin
                 # reservar), se crea una con la cantidad informada. El paquete del contenedor
                 # se asigna en `result_package_id`.
+                # Se setea `qty_done` (no solo `quantity`): qty_done es computado con inverse y
+                # deja la línea "hecha" (picked) además de reservada -> el move/picking pasa a
+                # 'assigned' AUNQUE venga 'waiting' (ej. un backorder encadenado por move_orig),
+                # y el guard del e-Remito (que lee qty_done) ve la cantidad real. Con solo
+                # `quantity`, qty_done quedaba en 0 y el picking 'waiting' no se podía procesar.
                 lineas = move.move_line_ids
                 if lineas:
                     lineas[0].write({
                         'quantity': aplicar,
+                        'qty_done': aplicar,
                         'result_package_id': (
                             paquete.id if paquete else lineas[0].result_package_id.id),
                     })
                     # Si hubiera más de una línea para el mismo move, el resto queda en 0.
                     for extra in lineas[1:]:
-                        extra.quantity = 0
+                        extra.write({'quantity': 0, 'qty_done': 0})
                 elif aplicar > 0:
                     SML.create({
                         'move_id': move.id,
@@ -1186,6 +1192,7 @@ Body: {body_str[:500]}"""
                         'location_id': move.location_id.id,
                         'location_dest_id': move.location_dest_id.id,
                         'quantity': aplicar,
+                        'qty_done': aplicar,
                         'result_package_id': paquete.id if paquete else False,
                     })
                 # NO se marca `picked` acá: el `quantity` seteado deja el move 'assigned'
