@@ -1107,8 +1107,12 @@ Body: {body_str[:500]}"""
         Por cada contenedor crea/obtiene el `stock.quant.package` (CodigoBarras -> name,
         IdExternoContenedor -> wis_id_externo). Por cada `detalle` busca el move del picking por
         `product_id.codigo_unico` y setea su cantidad hecha = `cantidadPreparada` DIRECTO en una
-        `stock.move.line` (reemplaza las move_lines del move por una con la cantidad informada y
-        el paquete del contenedor; ubicaciones tomadas del move). Sin `action_assign`.
+        `stock.move.line` (la cantidad informada en `qty_done` + el paquete del contenedor).
+
+        Primero hace `action_assign` (comprobar disponibilidad) para RESERVAR el stock disponible y
+        que el picking quede 'Listo'/assigned con sus move_lines reservadas — clave en backorders no
+        reservados: setear qty_done en una línea sin reserva del quant no dejaba el picking 'Listo'.
+        La CANTIDAD final la define WIS (se sobrescribe con qty_done, no la disponibilidad).
 
         Devuelve (paquetes_creados, es_parcial). es_parcial=True si algún producto del picking
         quedó por debajo de su demanda (genera backorder con el remanente al validar).
@@ -1118,6 +1122,16 @@ Body: {body_str[:500]}"""
         paquetes_creados = []
         preparado_por_cod = {}   # codigo_unico producto -> cantidad total preparada (sumada)
         paquete_por_cod = {}     # codigo_unico producto -> paquete que lo contiene
+
+        # Reservar el stock disponible (comprobar disponibilidad): deja el picking 'Listo' con sus
+        # move_lines reservadas. Si no hay stock para reservar (ej. encadenado), las cantidades se
+        # setean igual a mano más abajo (transferencia forzada).
+        if picking.state not in ('done', 'cancel'):
+            try:
+                picking.with_context(skip_wms_integration=True).action_assign()
+            except Exception as e:
+                _logger.warning(
+                    "[WIS] preparada | action_assign falló en %s: %s", picking.name, e)
 
         for contenedor in contenedores:
             codigo_barras = contenedor.get('codigoBarras', '') or ''
@@ -1239,8 +1253,11 @@ Body: {body_str[:500]}"""
         bo_vals = {}
         if 'codigo_unico' in picking._fields:
             bo_vals['codigo_unico'] = picking.codigo_unico
+        # El saldo NO está preparado: queda 'enviado' (pendiente). Si copiáramos el 'preparado'
+        # del original, la próxima mercaderiaPreparada de ese saldo no lo encontraría como
+        # procesable y daría "ya tiene wms_estado 'preparado', se omite".
         if 'wms_estado' in picking._fields:
-            bo_vals['wms_estado'] = picking.wms_estado
+            bo_vals['wms_estado'] = 'enviado'
         if bo_vals:
             backorder.with_context(skip_wms_integration=True).write(bo_vals)
         # Las líneas en 0 no aportan al remito; se quitan del original (no tienen valor). El move
