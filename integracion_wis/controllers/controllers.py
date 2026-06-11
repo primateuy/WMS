@@ -1031,6 +1031,114 @@ Body: {body_str[:500]}"""
 
         return paquetes_creados
 
+    def _wis_setear_cantidades_y_paquetes_preparada(self, picking, contenedores):
+        """confirmacionMercaderiaPreparada: registra MANUALMENTE en el picking lo que WIS informa
+        como preparado dentro de los contenedores. NO depende de la reserva/disponibilidad de
+        Odoo — WIS es la fuente de verdad de lo físicamente preparado.
+
+        Por cada contenedor crea/obtiene el `stock.quant.package` (CodigoBarras -> name,
+        IdExternoContenedor -> wis_id_externo). Por cada `detalle` busca el move del picking por
+        `product_id.codigo_unico` y setea su cantidad hecha = `cantidadPreparada` DIRECTO en una
+        `stock.move.line` (reemplaza las move_lines del move por una con la cantidad informada y
+        el paquete del contenedor; ubicaciones tomadas del move). Sin `action_assign`.
+
+        Devuelve (paquetes_creados, es_parcial). es_parcial=True si algún producto del picking
+        quedó por debajo de su demanda (genera backorder con el remanente al validar).
+        """
+        SML = request.env['stock.move.line'].sudo()
+        Package = request.env['stock.quant.package'].sudo()
+        paquetes_creados = []
+        preparado_por_cod = {}   # codigo_unico producto -> cantidad total preparada (sumada)
+        paquete_por_cod = {}     # codigo_unico producto -> paquete que lo contiene
+
+        for contenedor in contenedores:
+            codigo_barras = contenedor.get('codigoBarras', '') or ''
+            nro_contenedor = contenedor.get('numeroContenedor', '')
+            id_externo = contenedor.get('idExternoContenedor', '')
+            nombre_paquete = codigo_barras or (
+                str(nro_contenedor) if nro_contenedor
+                else f"PKG-{picking.name}-{len(paquetes_creados) + 1}")
+            paquete = Package.search([('name', '=', nombre_paquete)], limit=1)
+            if not paquete:
+                paquete = Package.create({
+                    'name': nombre_paquete,
+                    'wis_id_externo': str(id_externo) if id_externo else False,
+                })
+            elif id_externo and not paquete.wis_id_externo:
+                paquete.write({'wis_id_externo': str(id_externo)})
+            paquetes_creados.append(paquete)
+            for det in (contenedor.get('detalles') or []):
+                cod = det.get('producto', '')
+                cant = det.get('cantidadPreparada', 0) or 0
+                if not cod or cant <= 0:
+                    continue
+                preparado_por_cod[cod] = preparado_por_cod.get(cod, 0) + cant
+                paquete_por_cod.setdefault(cod, paquete)
+
+        es_parcial = False
+        cods_aplicados = set()
+        for cod, cant_total in preparado_por_cod.items():
+            moves = picking.move_ids.filtered(
+                lambda m: m.product_id.codigo_unico == cod
+                and m.state not in ('done', 'cancel')
+            ).sorted('id')
+            if not moves:
+                _logger.warning(
+                    "[WIS] preparada | contenedor con producto '%s' sin move en picking %s.",
+                    cod, picking.name)
+                continue
+            cods_aplicados.add(cod)
+            paquete = paquete_por_cod.get(cod)
+            restante = cant_total
+            for move in moves:
+                aplicar = min(restante, move.product_uom_qty) if restante > 0 else 0
+                restante -= aplicar
+                if aplicar < move.product_uom_qty:
+                    es_parcial = True
+                # Setear la cantidad recibida DIRECTO en el campo `quantity` de la move_line
+                # existente (NO se borra la línea). Si el move no tiene línea (picking sin
+                # reservar), se crea una con la cantidad informada. El paquete del contenedor
+                # se asigna en `result_package_id`.
+                lineas = move.move_line_ids
+                if lineas:
+                    lineas[0].write({
+                        'quantity': aplicar,
+                        'result_package_id': (
+                            paquete.id if paquete else lineas[0].result_package_id.id),
+                    })
+                    # Si hubiera más de una línea para el mismo move, el resto queda en 0.
+                    for extra in lineas[1:]:
+                        extra.quantity = 0
+                elif aplicar > 0:
+                    SML.create({
+                        'move_id': move.id,
+                        'picking_id': picking.id,
+                        'product_id': move.product_id.id,
+                        'product_uom_id': move.product_uom.id,
+                        'location_id': move.location_id.id,
+                        'location_dest_id': move.location_dest_id.id,
+                        'quantity': aplicar,
+                        'result_package_id': paquete.id if paquete else False,
+                    })
+                if aplicar > 0:
+                    move.picked = True
+            if restante > 0:
+                _logger.warning(
+                    "[WIS] preparada | WIS preparó %s del producto %s por encima de la demanda "
+                    "total del picking %s (se topeó a la demanda).", restante, cod, picking.name)
+
+        # Productos del picking que WIS NO informó como preparados -> quedan en 0 (backorder).
+        # Se setea quantity=0 en sus líneas (sin borrarlas).
+        for move in picking.move_ids:
+            if move.state in ('done', 'cancel'):
+                continue
+            if move.product_id.codigo_unico not in cods_aplicados:
+                for ml in move.move_line_ids:
+                    ml.quantity = 0
+                es_parcial = True
+
+        return paquetes_creados, es_parcial
+
     def _handle_mercaderia_preparada(self, data):
         """Spec sección 3: WIS preparó físicamente la mercadería del pedido.
 
@@ -1157,20 +1265,14 @@ Body: {body_str[:500]}"""
                     'wms_nro_preparacion':   nro_preparacion,
                 })
 
-                # Si el payload trae contenedores, crear los paquetes acá (en la
-                # preparación). confirmacionPedido va a llamar al mismo helper más
-                # tarde y los reutiliza por idempotencia (search por name +
-                # `if ml.result_package_id: continue`).
+                # Contenedores que informa WIS con lo preparado. El seteo de cantidades + el
+                # armado de paquetes se hace más abajo en UN solo paso (set MANUAL, sin reserva).
                 contenedores_prep = (
                     pedido_data.get('contenedores')
                     or data.get('contenedores')
                     or []
                 )
                 paquetes_creados = []
-                if contenedores_prep:
-                    paquetes_creados = self._crear_paquetes_desde_contenedores(
-                        picking, contenedores_prep
-                    )
 
                 # Autocompletar document_type y partner (consistente con los otros
                 # handlers: confirmacionRecepcion, confirmacionPedido, almacenamiento).
@@ -1180,71 +1282,30 @@ Body: {body_str[:500]}"""
                 # así la dirección de entrega en el e-Remito es la correcta del picking.
                 picking.sudo()._wis_complete_document_type()
 
-                # Spec 3.3 paso 3: emitir eRemito si corresponde.
-                self._intentar_emitir_eremito(
-                    picking, origen='confirmacionMercaderiaPreparada'
-                )
+                # Spec 3.3 paso 3: el eRemito NO se emite acá. La emisión se difiere a la
+                # VALIDACIÓN del picking (button_validate -> _action_done ->
+                # _wis_emitir_eremito_si_corresponde), que ocurre más abajo DESPUÉS de setear
+                # las cantidades preparadas reales y SOLO si el picking llega a 'done'.
+                # Emitir en este punto generaba remitos con cantidad 0 (las cantidades todavía
+                # no estaban seteadas) y/o sobre pickings que la validación luego no completaba
+                # (el except de más abajo se traga la falla). Ver [[wis-eremito-antes-de-done]].
 
-                # CANTIDADES PARCIALES (Problema 2): es en ESTA instancia
-                # (confirmacionMercaderiaPreparada) donde WIS informa lo efectivamente
-                # preparado por producto, y sobre lo cual se emite el e-Remito. Odoo debe
-                # entregar ESA cantidad, no la demanda completa. Antes esta lógica vivía en
-                # confirmacionPedido; se trasladó acá porque ahora la preparada es la
-                # instancia que informa las cantidades reales.
-                #
-                # Fuente: contenedores[].detalles[].cantidadPreparada (se suma por producto).
-                #   - Si lo preparado < demanda -> se valida lo preparado y se genera un
-                #     BACKORDER con el remanente (queda una orden parcial pendiente, para
-                #     validar a futuro o anular).
-                #   - Si el payload NO trae contenedores con cantidades -> se valida la
-                #     demanda completa (comportamiento previo, decisión del usuario).
-                mapa_preparado = {}
-                for contenedor in contenedores_prep:
-                    for det in (contenedor.get('detalles') or []):
-                        cod = det.get('producto', '')
-                        cant = det.get('cantidadPreparada', 0) or 0
-                        if not cod or cant <= 0:
-                            continue
-                        mapa_preparado[cod] = mapa_preparado.get(cod, 0) + cant
-
+                # CANTIDADES PREPARADAS (set MANUAL): WIS informa en los contenedores la cantidad
+                # efectivamente preparada por producto (cantidadPreparada). Se registra esa
+                # cantidad DIRECTO en la línea del producto (matcheado por codigo_unico) y se arma
+                # el paquete del contenedor, SIN depender de la reserva/disponibilidad de Odoo —
+                # WIS es la fuente de verdad de lo preparado. El button_validate de más abajo
+                # emite el e-Remito sobre esas cantidades. Si lo preparado < demanda -> backorder
+                # con el remanente. Ver [[wis-cfe-no-emitir-cantidad-cero]].
                 es_parcial = False
                 try:
-                    if mapa_preparado:
-                        # Aplicar la cantidad preparada por producto a cada move (orden
-                        # ascendente de id para consumir primero los moves más antiguos del
-                        # mismo producto). Lo no informado/faltante queda en 0 -> backorder.
-                        cant_restante_por_cod = dict(mapa_preparado)
-                        for move in picking.move_ids.sorted('id'):
-                            cod = move.product_id.codigo_unico
-                            disponible = cant_restante_por_cod.get(cod, 0)
-                            aplicar = min(disponible, move.product_uom_qty)
-                            cant_restante_por_cod[cod] = disponible - aplicar
-                            if aplicar < move.product_uom_qty:
-                                es_parcial = True
-                                _logger.info(
-                                    "[WIS] preparada parcial | picking=%s producto=%s "
-                                    "demanda=%s preparado=%s",
-                                    picking.name, move.product_id.name,
-                                    move.product_uom_qty, aplicar,
-                                )
-                            # Distribuir 'aplicar' entre las move_lines reservadas del move.
-                            restante = aplicar
-                            for ml in move.move_line_ids:
-                                cap = ml.quantity_product_uom or move.product_uom_qty
-                                if restante <= 0:
-                                    ml.sudo().qty_done = 0
-                                elif restante >= cap:
-                                    ml.sudo().qty_done = cap
-                                    restante -= cap
-                                else:
-                                    ml.sudo().qty_done = restante
-                                    restante = 0
-                            # Remanente sin move_line donde ubicarlo: sumarlo al primero.
-                            if restante > 0 and move.move_line_ids:
-                                primera = move.move_line_ids[0]
-                                primera.sudo().qty_done = primera.qty_done + restante
+                    if contenedores_prep:
+                        paquetes_creados, es_parcial = (
+                            self._wis_setear_cantidades_y_paquetes_preparada(
+                                picking, contenedores_prep)
+                        )
                     else:
-                        # Sin info de preparado: validar la demanda completa (como hasta hoy).
+                        # Sin contenedores: validar la demanda completa (comportamiento previo).
                         for move_line in picking.move_line_ids:
                             if move_line.qty_done == 0:
                                 move_line.sudo().qty_done = (
@@ -1253,10 +1314,13 @@ Body: {body_str[:500]}"""
                                     or move_line.move_id.product_uom_qty
                                 )
 
-                    # Validar solo si el picking está listo. NO pasamos skip_backorder:
-                    # si es parcial necesitamos que aparezca el wizard de backorder para
-                    # generar la orden con el remanente (skip_backorder lo descartaría).
-                    if picking.state == 'assigned':
+                    # Validar (button_validate) SIEMPRE que el picking no esté ya done/cancel.
+                    # Las cantidades se setearon manualmente (no por reserva), así que NO se exige
+                    # state=='assigned'. El button_validate dispara _action_done ->
+                    # _wis_emitir_eremito_si_corresponde, que emite el e-Remito si corresponde.
+                    # NO pasamos skip_backorder: si es parcial necesitamos el wizard de backorder
+                    # para generar la orden con el remanente.
+                    if picking.state not in ('done', 'cancel'):
                         res = picking.with_context(
                             skip_wms_integration=True,
                         ).button_validate()
