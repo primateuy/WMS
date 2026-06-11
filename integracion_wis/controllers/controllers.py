@@ -553,6 +553,66 @@ Body: {body_str[:500]}"""
                 f"Errores: {' | '.join(errores)}"
             )
 
+    def _wis_reservar_desde_paquete_predecesor(self, pick):
+        """Para una operación interna (crosspick) que NO pudo reservar por CONTENCIÓN de stock en
+        la ubicación de paso (la reserva FIFO se la llevó otro picking): setea sus cantidades
+        MANUALMENTE desde el PAQUETE que su predecesor depositó en el origen de este picking,
+        identificado por `group_id` + adyacencia (predecesor.location_dest == mi origen, done). Así
+        cada orden de crossdock mueve SU propio paquete, inmune a la competencia por reservas.
+
+        Reemplaza las move_lines del picking por una por producto con la cantidad del paquete y su
+        `package_id`/`result_package_id` (el paquete viaja al destino). Devuelve True si seteó algo.
+        """
+        if not pick.group_id or not pick.location_id:
+            return False
+        predecesor = request.env['stock.picking'].sudo().search([
+            ('group_id', '=', pick.group_id.id),
+            ('location_dest_id', '=', pick.location_id.id),
+            ('state', '=', 'done'),
+            ('id', '!=', pick.id),
+        ], order='id desc', limit=1)
+        if not predecesor:
+            return False
+        # Cantidad + paquete por producto que el predecesor dejó EN el origen de este crosspick.
+        por_producto = {}
+        for ml in predecesor.move_line_ids:
+            if ml.location_dest_id.id != pick.location_id.id or not ml.result_package_id:
+                continue
+            qty_acc, _pkg = por_producto.get(ml.product_id.id, (0.0, ml.result_package_id))
+            por_producto[ml.product_id.id] = (qty_acc + ml.quantity, ml.result_package_id)
+        if not por_producto:
+            return False
+        SML = request.env['stock.move.line'].sudo()
+        seteado = False
+        for move in pick.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
+            data = por_producto.get(move.product_id.id)
+            if not data:
+                continue
+            cantidad, paquete = data
+            aplicar = min(cantidad, move.product_uom_qty)
+            if aplicar <= 0:
+                continue
+            # La reserva FIFO falló -> reemplazar las move_lines por una con el paquete del
+            # predecesor (toma de ese paquete y lo mantiene en el destino).
+            move.move_line_ids.unlink()
+            SML.create({
+                'move_id': move.id,
+                'picking_id': pick.id,
+                'product_id': move.product_id.id,
+                'product_uom_id': move.product_uom.id,
+                'location_id': move.location_id.id,
+                'location_dest_id': move.location_dest_id.id,
+                'quantity': aplicar,
+                'package_id': paquete.id,
+                'result_package_id': paquete.id,
+            })
+            seteado = True
+        if seteado:
+            _logger.info(
+                "[WIS] op.interna %s: reserva forzada desde el paquete del predecesor %s "
+                "(contención en %s).", pick.name, predecesor.name, pick.location_id.complete_name)
+        return seteado
+
     def _wis_validar_operaciones_internas(self, codigo_unico, origen='confirmacionPedido'):
         """Valida (button_validate → 'done') las operaciones INTERNAS de Odoo que comparten
         el `codigo_unico` — los pickings `no_integrado` a los que se les propagó el código
@@ -573,6 +633,11 @@ Body: {body_str[:500]}"""
             try:
                 if pick.state not in ('assigned',):
                     pick.action_assign()
+                # Si la reserva FIFO no alcanzó (CONTENCIÓN en la ubicación de paso: otro picking
+                # se llevó la reserva), forzar las cantidades desde el PAQUETE del predecesor —
+                # cada orden mueve su propio paquete, inmune a la competencia por reservas.
+                if pick.state != 'assigned':
+                    self._wis_reservar_desde_paquete_predecesor(pick)
                 for move_line in pick.move_line_ids:
                     if move_line.qty_done == 0:
                         move_line.sudo().qty_done = (
@@ -580,7 +645,10 @@ Body: {body_str[:500]}"""
                             or move_line.qty_done
                             or move_line.move_id.product_uom_qty
                         )
-                if pick.state == 'assigned':
+                # Validar si quedó 'assigned' (reserva normal) O si se forzaron cantidades desde el
+                # paquete del predecesor (transferencia inmediata, sin depender de la reserva FIFO).
+                hay_cantidades = any(ml.qty_done > 0 for ml in pick.move_line_ids)
+                if pick.state == 'assigned' or hay_cantidades:
                     res = pick.with_context(
                         skip_wms_integration=True,
                         skip_backorder=True,
@@ -595,8 +663,8 @@ Body: {body_str[:500]}"""
                     )
                 else:
                     _logger.warning(
-                        "[WIS] %s | operación interna %s no quedó 'assigned' (state=%s); "
-                        "no se pudo validar automáticamente.",
+                        "[WIS] %s | operación interna %s no quedó 'assigned' (state=%s) y no se "
+                        "pudo forzar desde el paquete del predecesor; no se validó.",
                         origen, pick.name, pick.state,
                     )
             except Exception as e:
@@ -1337,6 +1405,7 @@ Body: {body_str[:500]}"""
                 # emite el e-Remito sobre esas cantidades. Si lo preparado < demanda -> backorder
                 # con el remanente. Ver [[wis-cfe-no-emitir-cantidad-cero]].
                 es_parcial = False
+                error_validacion = None
                 try:
                     if contenedores_prep:
                         paquetes_creados, es_parcial = (
@@ -1387,11 +1456,40 @@ Body: {body_str[:500]}"""
                             else:
                                 backorder_wiz.process_cancel_backorder()
                 except Exception as e:
+                    error_validacion = str(e)
                     _logger.warning(
                         "[WIS] confirmacionMercaderiaPreparada | no se pudo "
                         "validar picking=%s: %s. Estado actual: %s",
                         picking.name, e, picking.state,
                     )
+
+                # Si la validación FALLÓ (excepción en el button_validate: cantidad en 0 que el
+                # guard del e-Remito bloquea, falta de stock para reservar, etc.), NO se marca
+                # 'preparado' como éxito (antes el except se tragaba la falla y reportaba OK igual).
+                # Se registra el error, se revierte wms_estado a 'enviado' (para permitir reintento)
+                # y se agrega a `errores` (así la respuesta a WIS refleja el fallo).
+                if error_validacion:
+                    picking.with_context(skip_wms_integration=True).write(
+                        {'wms_estado': 'enviado'})
+                    _logger.warning(
+                        "[WIS] confirmacionMercaderiaPreparada | picking=%s NO se validó: %s",
+                        picking.name, error_validacion)
+                    request.env['wms.integracion.log'].sudo().create({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error',
+                        'modelo': 'stock.picking',
+                        'texto': (
+                            f"confirmacionMercaderiaPreparada: el picking {picking.name} NO se "
+                            f"pudo validar/completar."),
+                        'picking_id': picking.id,
+                        'resultado': 'error',
+                        'detalle': f"Motivo: {error_validacion}",
+                        'payload_webhook': json.dumps(pedido_data, ensure_ascii=False, indent=2),
+                    })
+                    errores.append(
+                        f"Picking '{picking.name}': no se completó la preparación — "
+                        f"{error_validacion}")
+                    continue
 
                 _logger.info(
                     "Picking %s marcado como 'preparado' por WMS (fecha=%s)",
