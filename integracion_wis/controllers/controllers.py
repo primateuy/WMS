@@ -1120,8 +1120,10 @@ Body: {body_str[:500]}"""
                         'quantity': aplicar,
                         'result_package_id': paquete.id if paquete else False,
                     })
-                if aplicar > 0:
-                    move.picked = True
+                # NO se marca `picked` acá: el `quantity` seteado deja el move 'assigned'
+                # (o 'partially_available' si es parcial) y el picking en 'assigned'. Si el
+                # producto queda en 0, el move queda 'confirmed' y el picking NO 'assigned'.
+                # El picked lo setea el button_validate de más abajo al validar.
             if restante > 0:
                 _logger.warning(
                     "[WIS] preparada | WIS preparó %s del producto %s por encima de la demanda "
@@ -1314,10 +1316,11 @@ Body: {body_str[:500]}"""
                                     or move_line.move_id.product_uom_qty
                                 )
 
-                    # Validar (button_validate) SIEMPRE que el picking no esté ya done/cancel.
-                    # Las cantidades se setearon manualmente (no por reserva), así que NO se exige
-                    # state=='assigned'. El button_validate dispara _action_done ->
-                    # _wis_emitir_eremito_si_corresponde, que emite el e-Remito si corresponde.
+                    # Validar SOLO si el picking quedó 'assigned'. Al setear el `quantity` de WIS
+                    # en las move_lines, el picking queda 'assigned' cuando NINGÚN producto quedó
+                    # en 0 (un producto en 0 deja su move 'confirmed' y el picking NO 'assigned')
+                    # -> en ese caso NO se valida ni se emite remito con 0. El button_validate
+                    # dispara _action_done -> _wis_emitir_eremito_si_corresponde (emite el CFE).
                     # NO pasamos skip_backorder: si es parcial necesitamos el wizard de backorder
                     # para generar la orden con el remanente.
                     if picking.state == 'assigned':

@@ -306,32 +306,46 @@ def test_confirmacion_pedido_basico(rpc, base_url):
     cod_prod = rpc.read("product.product", [prod_id], ["codigo_unico"])[0]["codigo_unico"]
     barcode_pkg = f"BARCODE-E2E-{int(time.time() * 1000)}"
     id_ext = f"EXT-E2E-{int(time.time() * 1000)}"
-    payload = {
+    # Flujo nuevo: primero confirmacionMercaderiaPreparada valida el picking a done/preparado y
+    # arma el paquete con las cantidades del contenedor. confirmacionPedido YA NO procesa pickings
+    # activos (esa rama se desactivó a propósito): solo confirma el DESPACHO de lo ya preparado.
+    res = post_webhook(base_url, {
+        "Id": "confirmacionMercaderiaPreparada",
+        "confirmacionMercaderiaPreparada": {
+            "FechaPreparacion": "01/05/2026 09:00",
+            "Pedidos": [{
+                "Pedido": codigo_unico,
+                "Contenedores": [{
+                    "CodigoBarras": barcode_pkg,
+                    "IdExternoContenedor": id_ext,
+                    "Detalles": [{"Producto": cod_prod, "CantidadPreparada": 2.0}],
+                }],
+            }],
+        },
+    })
+    assert res.get("status") == 200, res
+
+    # confirmacionPedido: despacha lo preparado (metadatos de transporte sobre el picking done)
+    res = post_webhook(base_url, {
         "Id": "confirmacionPedido",
         "confirmacionPedido": {
             "FechaCierre": "01/05/2026 10:00",
             "DescripcionCamion": "Camion E2E",
             "Transportadora": "Trans-E2E",
             "Pedidos": [{"Pedido": codigo_unico}],
-            "Contenedores": [{
-                "CodigoBarras": barcode_pkg,
-                "IdExternoContenedor": id_ext,
-                "Detalles": [{"Producto": cod_prod, "CantidadPreparada": 2.0}],
-            }],
         },
-    }
-    res = post_webhook(base_url, payload)
+    })
     assert res.get("status") == 200, res
 
     pdata = rpc.read("stock.picking", [pick_id], ["state", "wms_estado", "wms_descripcion_camion"])[0]
     assert pdata["state"] == "done", f"state esperado 'done', vino '{pdata['state']}'"
     assert pdata["wms_estado"] == "despachado", pdata
     assert pdata["wms_descripcion_camion"] == "Camion E2E", pdata
-    # Paquete con CodigoBarras y wis_id_externo
+    # Paquete (creado por la preparada) con CodigoBarras y wis_id_externo
     pkg = rpc.search_read("stock.quant.package", [["name", "=", barcode_pkg]], ["wis_id_externo"], 1)
     assert pkg, f"falta paquete name={barcode_pkg}"
     assert pkg[0]["wis_id_externo"] == id_ext, pkg
-    return f"despacho OK; paquete '{barcode_pkg}' con wis_id_externo='{id_ext}'"
+    return f"despacho OK (preparada+pedido); paquete '{barcode_pkg}'"
 
 
 def test_mercaderia_preparada_basico(rpc, base_url):
@@ -920,6 +934,22 @@ def test_punto2_wms_origen_despacho(rpc, base_url):
     rpc.execute("stock.picking", "action_assign", [pick_id])
 
     cod_prod = rpc.read("product.product", [prod_id], ["codigo_unico"])[0]["codigo_unico"]
+    # Flujo nuevo: preparada (valida a done/preparado con el contenedor) y luego confirmacionPedido.
+    res = post_webhook(base_url, {
+        "Id": "confirmacionMercaderiaPreparada",
+        "confirmacionMercaderiaPreparada": {
+            "FechaPreparacion": "10/05/2026 11:00",
+            "Pedidos": [{
+                "Pedido": codigo_unico,
+                "Contenedores": [{
+                    "CodigoBarras": f"P2-BC-{int(time.time() * 1000)}",
+                    "IdExternoContenedor": f"P2-EXT-{int(time.time() * 1000)}",
+                    "Detalles": [{"Producto": cod_prod, "CantidadPreparada": 1.0}],
+                }],
+            }],
+        },
+    })
+    assert res.get("status") == 200, res
     res = post_webhook(base_url, {
         "Id": "confirmacionPedido",
         "confirmacionPedido": {
@@ -927,18 +957,13 @@ def test_punto2_wms_origen_despacho(rpc, base_url):
             "DescripcionCamion": "P2 Camion",
             "Transportadora": "P2 Trans",
             "Pedidos": [{"Pedido": codigo_unico}],
-            "Contenedores": [{
-                "CodigoBarras": f"P2-BC-{int(time.time() * 1000)}",
-                "IdExternoContenedor": f"P2-EXT-{int(time.time() * 1000)}",
-                "Detalles": [{"Producto": cod_prod, "CantidadPreparada": 1.0}],
-            }],
         },
     })
     assert res.get("status") == 200, res
     pdata = rpc.read("stock.picking", [pick_id], ["wms_estado", "wms_origen"])[0]
     assert pdata["wms_estado"] == "despachado", pdata
     assert pdata["wms_origen"] == "despacho", pdata
-    return f"wms_origen='despacho' OK en picking {pick_id}"
+    return f"wms_origen='despacho' OK en picking {pick_id} (preparada+pedido)"
 
 
 def test_punto3_l10n_latam_document_type_bypass(rpc, base_url):
