@@ -663,6 +663,20 @@ class StockPicking(models.Model):
                 continue
             if not (picking.codigo_unico or picking.picking_type_id.integracion_wms):
                 continue  # ajeno a WIS -> sigue su flujo estándar de e-Remito
+            # Guard: NUNCA emitir un e-Remito (CFE) con líneas en cantidad 0 — un CFE con
+            # cantidad 0 es inválido. Si no hay nada que despachar o alguna línea quedó en 0,
+            # se BLOQUEA el pase a 'done' (las cantidades vienen SIEMPRE en los contenedores de
+            # WIS; un 0 es una anomalía a resolver). Ver [[wis-cfe-no-emitir-cantidad-cero]].
+            lineas = picking.move_line_ids
+            if not lineas or any(ml.qty_done <= 0 for ml in lineas):
+                self._wis_registrar_falla_eremito(
+                    picking,
+                    "Hay líneas en cantidad 0 — un e-Remito (CFE) no puede emitirse con cantidad 0.")
+                raise UserError(
+                    f"No se puede completar el picking {picking.name}: el e-Remito (CFE) no "
+                    f"puede emitirse porque hay líneas en cantidad 0. Verificar las cantidades "
+                    f"preparadas (deberían venir en el contenedor de WIS) antes de validar."
+                )
             try:
                 picking.create_delivery_guide()  # respeta cfe_emitido + wis_skip_eremito
             except Exception as e:

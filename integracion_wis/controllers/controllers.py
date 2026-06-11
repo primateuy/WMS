@@ -1320,7 +1320,7 @@ Body: {body_str[:500]}"""
                     # _wis_emitir_eremito_si_corresponde, que emite el e-Remito si corresponde.
                     # NO pasamos skip_backorder: si es parcial necesitamos el wizard de backorder
                     # para generar la orden con el remanente.
-                    if picking.state not in ('done', 'cancel'):
+                    if picking.state == 'assigned':
                         res = picking.with_context(
                             skip_wms_integration=True,
                         ).button_validate()
