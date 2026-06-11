@@ -1294,14 +1294,25 @@ Body: {body_str[:500]}"""
                 errores.append("Un pedido del array no tiene campo 'pedido'.")
                 continue
 
-            # Spec 3.3 paso 1: buscar por codigo_unico, luego name.
-            # Excluir 'no_integrado': operaciones internas (ej. crosspick) que comparten
-            # el código del paso WIS anterior; no deben resolver los webhooks entrantes
-            # (sino, por _order=id desc, search limit=1 devolvía el crosspick interno).
-            picking = request.env['stock.picking'].sudo().search(
-                [('codigo_unico', '=', nombre_pedido),
-                 ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))], limit=1
-            )
+            # Spec 3.3 paso 1: buscar por codigo_unico el picking PROCESABLE, luego name.
+            # Excluir 'no_integrado': operaciones internas (ej. crosspick) que comparten el código
+            # del paso WIS anterior; no deben resolver los webhooks entrantes.
+            # Tras una preparada PARCIAL quedan 2 pickings con el mismo código: el preparado
+            # (done, wms_estado='preparado') y el SALDO/backorder (wms_estado='enviado'). Se
+            # prioriza el que TODAVÍA se puede preparar (no done/cancel + wms_estado='enviado'),
+            # sino se omitía con "ya tiene wms_estado 'preparado'" al agarrar el preparado.
+            picking = request.env['stock.picking'].sudo().search([
+                ('codigo_unico', '=', nombre_pedido),
+                ('state', 'not in', ('done', 'cancel')),
+                ('wms_estado', '=', 'enviado'),
+            ], order='id', limit=1)
+            if not picking:
+                # Sin saldo procesable: search general (excluye internas/sin enviar). Si solo
+                # existe el preparado/done, el bloque de validación de abajo da el error claro.
+                picking = request.env['stock.picking'].sudo().search(
+                    [('codigo_unico', '=', nombre_pedido),
+                     ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))], limit=1
+                )
             if not picking:
                 picking = request.env['stock.picking'].sudo().search(
                     [('name', '=', nombre_pedido)], limit=1
