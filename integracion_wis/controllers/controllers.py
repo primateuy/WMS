@@ -1141,6 +1141,43 @@ Body: {body_str[:500]}"""
 
         return paquetes_creados, es_parcial
 
+    def _wis_separar_ceros_a_backorder(self, picking):
+        """Caso MIXTO: WIS preparó algunos productos (>0) y otros NO (0). Mueve los moves que
+        quedaron en 0 a un BACKORDER nuevo, dejando el picking original SOLO con las líneas que
+        tienen cantidad, para validarlo y emitir el e-Remito **sin líneas en 0** (el template del
+        remito itera TODOS los `move_ids` y no saltea las de 0). Los moves en 0 quedan pendientes
+        en el backorder (para una preparación futura o anulación).
+
+        Solo actúa si hay líneas en 0 Y NO son todas (mezcla). Si no hay ninguna en 0, o si TODAS
+        quedaron en 0 (ahí no se valida nada), no hace nada. Devuelve True si separó."""
+        activos = picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel'))
+        moves_cero = activos.filtered(
+            lambda m: sum(m.move_line_ids.mapped('quantity')) <= 0)
+        if not moves_cero or moves_cero == activos:
+            return False
+        backorder = picking.with_context(skip_wms_integration=True).copy({
+            'move_ids': [],
+            'move_line_ids': [],
+            'backorder_id': picking.id,
+            'origin': picking.origin,
+        })
+        bo_vals = {}
+        if 'codigo_unico' in picking._fields:
+            bo_vals['codigo_unico'] = picking.codigo_unico
+        if 'wms_estado' in picking._fields:
+            bo_vals['wms_estado'] = picking.wms_estado
+        if bo_vals:
+            backorder.with_context(skip_wms_integration=True).write(bo_vals)
+        # Las líneas en 0 no aportan al remito; se quitan del original (no tienen valor). El move
+        # (ya sin líneas) se mueve al backorder como pendiente; se re-reserva/prepara en una
+        # preparación futura. Así el original queda SOLO con las líneas con cantidad.
+        moves_cero.move_line_ids.unlink()
+        moves_cero.write({'picking_id': backorder.id})
+        _logger.info(
+            "[WIS] preparada | %s línea(s) en 0 movidas al backorder %s; se valida %s solo con "
+            "las líneas con cantidad.", len(moves_cero), backorder.name, picking.name)
+        return True
+
     def _handle_mercaderia_preparada(self, data):
         """Spec sección 3: WIS preparó físicamente la mercadería del pedido.
 
@@ -1315,6 +1352,12 @@ Body: {body_str[:500]}"""
                                     or move_line.qty_done
                                     or move_line.move_id.product_uom_qty
                                 )
+
+                    # MEZCLA (algunas líneas con cantidad, otras en 0): mover las líneas en 0 a un
+                    # backorder para validar/emitir el remito SOLO con las que tienen valor. Tras
+                    # esto el picking original queda 'assigned' (solo líneas >0). Si TODAS quedaron
+                    # en 0, no separa y el picking sigue 'confirmed' (no se valida ni emite).
+                    self._wis_separar_ceros_a_backorder(picking)
 
                     # Validar SOLO si el picking quedó 'assigned'. Al setear el `quantity` de WIS
                     # en las move_lines, el picking queda 'assigned' cuando NINGÚN producto quedó
