@@ -554,63 +554,70 @@ Body: {body_str[:500]}"""
             )
 
     def _wis_reservar_desde_paquete_predecesor(self, pick):
-        """Para una operación interna (crosspick) que NO pudo reservar por CONTENCIÓN de stock en
-        la ubicación de paso (la reserva FIFO se la llevó otro picking): setea sus cantidades
-        MANUALMENTE desde el PAQUETE que su predecesor depositó en el origen de este picking,
-        identificado por `group_id` + adyacencia (predecesor.location_dest == mi origen, done). Así
-        cada orden de crossdock mueve SU propio paquete, inmune a la competencia por reservas.
+        """Para una operación interna (crosspick): mueve los PAQUETES que sus predecesores (las N
+        cajas preparadas) depositaron en el origen de este picking, identificados por `group_id` +
+        adyacencia (predecesor.location_dest == mi origen, done). **Consolida TODAS las cajas**:
+        cada move del crosspick se reserva desde el/los paquete(s) que contienen su producto (con
+        `package_id`/`result_package_id`), así los paquetes VIAJAN al destino. NO usa la reserva
+        FIFO (que movería stock genérico sin paquete y dejaría las cajas en la Salida).
 
-        Reemplaza las move_lines del picking por una por producto con la cantidad del paquete y su
-        `package_id`/`result_package_id` (el paquete viaja al destino). Devuelve True si seteó algo.
+        Reemplaza las move_lines del picking por una por (producto, paquete). Devuelve True si seteó.
         """
         if not pick.group_id or not pick.location_id:
             return False
-        predecesor = request.env['stock.picking'].sudo().search([
+        predecesores = request.env['stock.picking'].sudo().search([
             ('group_id', '=', pick.group_id.id),
             ('location_dest_id', '=', pick.location_id.id),
             ('state', '=', 'done'),
             ('id', '!=', pick.id),
-        ], order='id desc', limit=1)
-        if not predecesor:
+        ], order='id')
+        if not predecesores:
             return False
-        # Cantidad + paquete por producto que el predecesor dejó EN el origen de este crosspick.
+        # producto -> [(paquete, cantidad en ese paquete en el origen), ...] (de TODAS las cajas).
         por_producto = {}
-        for ml in predecesor.move_line_ids:
-            if ml.location_dest_id.id != pick.location_id.id or not ml.result_package_id:
-                continue
-            qty_acc, _pkg = por_producto.get(ml.product_id.id, (0.0, ml.result_package_id))
-            por_producto[ml.product_id.id] = (qty_acc + ml.quantity, ml.result_package_id)
+        for pred in predecesores:
+            for ml in pred.move_line_ids:
+                if ml.location_dest_id.id != pick.location_id.id or not ml.result_package_id:
+                    continue
+                por_producto.setdefault(ml.product_id.id, []).append(
+                    (ml.result_package_id, ml.quantity))
         if not por_producto:
             return False
         SML = request.env['stock.move.line'].sudo()
         seteado = False
+        paquetes_movidos = set()
         for move in pick.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
-            data = por_producto.get(move.product_id.id)
-            if not data:
+            fuentes = por_producto.get(move.product_id.id)
+            if not fuentes:
                 continue
-            cantidad, paquete = data
-            aplicar = min(cantidad, move.product_uom_qty)
-            if aplicar <= 0:
-                continue
-            # La reserva FIFO falló -> reemplazar las move_lines por una con el paquete del
-            # predecesor (toma de ese paquete y lo mantiene en el destino).
             move.move_line_ids.unlink()
-            SML.create({
-                'move_id': move.id,
-                'picking_id': pick.id,
-                'product_id': move.product_id.id,
-                'product_uom_id': move.product_uom.id,
-                'location_id': move.location_id.id,
-                'location_dest_id': move.location_dest_id.id,
-                'quantity': aplicar,
-                'package_id': paquete.id,
-                'result_package_id': paquete.id,
-            })
-            seteado = True
+            restante = move.product_uom_qty
+            for paquete, qty in fuentes:
+                if restante <= 0:
+                    break
+                aplicar = min(qty, restante)
+                if aplicar <= 0:
+                    continue
+                restante -= aplicar
+                SML.create({
+                    'move_id': move.id,
+                    'picking_id': pick.id,
+                    'product_id': move.product_id.id,
+                    'product_uom_id': move.product_uom.id,
+                    'location_id': move.location_id.id,
+                    'location_dest_id': move.location_dest_id.id,
+                    'quantity': aplicar,
+                    'qty_done': aplicar,
+                    'package_id': paquete.id,
+                    'result_package_id': paquete.id,
+                })
+                paquetes_movidos.add(paquete.id)
+                seteado = True
         if seteado:
             _logger.info(
-                "[WIS] op.interna %s: reserva forzada desde el paquete del predecesor %s "
-                "(contención en %s).", pick.name, predecesor.name, pick.location_id.complete_name)
+                "[WIS] op.interna %s: consolidó %s paquete(s) de %s caja(s) predecesora(s) en %s.",
+                pick.name, len(paquetes_movidos), len(predecesores),
+                pick.location_id.complete_name)
         return seteado
 
     def _wis_validar_operaciones_internas(self, codigo_unico, origen='confirmacionPedido'):
@@ -631,13 +638,12 @@ Body: {body_str[:500]}"""
         ], order='id')
         for pick in internas:
             try:
-                if pick.state not in ('assigned',):
+                # SIEMPRE mover los paquetes de las cajas predecesoras (consolidando las N cajas)
+                # para que los PAQUETES VIAJEN al destino. Si no hay paquetes de predecesor (no es
+                # un crosspick post-preparada), recién ahí reserva normal (FIFO) por disponibilidad.
+                reservado_paquete = self._wis_reservar_desde_paquete_predecesor(pick)
+                if not reservado_paquete and pick.state not in ('assigned',):
                     pick.action_assign()
-                # Si la reserva FIFO no alcanzó (CONTENCIÓN en la ubicación de paso: otro picking
-                # se llevó la reserva), forzar las cantidades desde el PAQUETE del predecesor —
-                # cada orden mueve su propio paquete, inmune a la competencia por reservas.
-                if pick.state != 'assigned':
-                    self._wis_reservar_desde_paquete_predecesor(pick)
                 for move_line in pick.move_line_ids:
                     if move_line.qty_done == 0:
                         move_line.sudo().qty_done = (
@@ -755,8 +761,12 @@ Body: {body_str[:500]}"""
             # quedó el preparado en done + un BACKORDER con el saldo (que hereda código + 'enviado').
             # Hay que confirmar el PREPARADO, NO el saldo activo — sino se despacharía el saldo y se
             # contaminaría su paquete.
-            if len(pickings_done_preparado) == 1:
-                picking = pickings_done_preparado
+            if pickings_done_preparado:
+                # 1 o N cajas preparadas con el mismo código: una OC no entra en una caja, así que
+                # WIS hace N preparaciones parciales (N cajas/paquetes), TODAS con el mismo código.
+                # Se despachan TODAS: metadatos a cada una + la cascada consolida sus paquetes en el
+                # paso interno (salida->transito). `picking` = representante para el flujo singular.
+                picking = pickings_done_preparado[:1]
             # # Prioridad 2: sin preparado + 1 activo (ej. anulación parcial: el saldo activo ES la
             # # operación a despachar; o flujo sin mercaderiaPreparada previa).
             # elif not pickings_done_preparado and len(pickings_activos) == 1:
@@ -777,8 +787,8 @@ Body: {body_str[:500]}"""
                     f"{nombres}. No se permite confirmar."
                 )
                 continue
-            elif len(pickings_activos) > 1 or len(pickings_done_preparado) > 1:
-                conflicto = pickings_activos | pickings_done_preparado
+            elif len(pickings_activos) > 1:
+                conflicto = pickings_activos
                 nombres = ', '.join(conflicto.mapped('name'))
                 _logger.error(
                     "[WIS] confirmacionPedido | Múltiples pickings con codigo_unico='%s': %s",
@@ -837,14 +847,19 @@ Body: {body_str[:500]}"""
                 )
                 continue
 
-            try:
-                # Spec 2.3: emisión de eRemito ANTES de validar.
-                # Si el picking maneja CFE y aún no fue emitido, se intenta emitir aquí.
-                # Una falla NO bloquea el despacho — se loggea para intervención manual.
-                self._intentar_emitir_eremito(picking, origen='confirmacionPedido')
+            # Cajas a despachar: TODAS las marcadas como preparadas (wms_estado='preparado') con ese
+            # código — son las N cajas de la(s) preparación(es). Si no hay, el picking matcheado.
+            pickings_despachados = pickings_todos.filtered(
+                lambda p: p.wms_estado == 'preparado' and p.state != 'cancel') or picking
 
-                # Spec 2.4 paso 2: registrar datos de transporte
-                picking.with_context(skip_wms_integration=True).write({
+            try:
+                # Spec 2.3: emisión de eRemito ANTES de validar, por cada caja. Las preparadas ya
+                # lo emitieron en su preparada -> se saltea por cfe_emitido. Una falla NO bloquea.
+                for _pk in pickings_despachados:
+                    self._intentar_emitir_eremito(_pk, origen='confirmacionPedido')
+
+                # Spec 2.4 paso 2: registrar datos de transporte en TODAS las cajas despachadas.
+                pickings_despachados.with_context(skip_wms_integration=True).write({
                     'wms_estado':            'despachado',
                     'wms_origen':            'despacho',
                     'wms_fecha_despacho':    fecha_despacho,
@@ -860,7 +875,8 @@ Body: {body_str[:500]}"""
                 })
 
                 # Punto 4: autocompletar document_type antes de validar (si aplica CFE).
-                picking.sudo()._wis_complete_document_type()
+                for _pk in pickings_despachados:
+                    _pk.sudo()._wis_complete_document_type()
 
                 # GUARD: si el picking YA fue validado por mercaderiaPreparada (state='done'), NO
                 # se re-arman paquetes ni se re-setean cantidades ni se re-valida: la preparada ya
