@@ -584,8 +584,9 @@ Body: {body_str[:500]}"""
         if not por_producto:
             return False
         SML = request.env['stock.move.line'].sudo()
+        PL = request.env['stock.package_level'].sudo()
         seteado = False
-        paquetes_movidos = set()
+        pl_por_paquete = {}  # paquete.id -> stock.package_level (1 por paquete, alimenta el listado)
         for move in pick.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
             fuentes = por_producto.get(move.product_id.id)
             if not fuentes:
@@ -599,6 +600,17 @@ Body: {body_str[:500]}"""
                 if aplicar <= 0:
                     continue
                 restante -= aplicar
+                # Un `stock.package_level` por paquete para que el paquete aparezca en el LISTADO
+                # de paquetes del picking (operación de paquete completo), no solo en las líneas.
+                pl = pl_por_paquete.get(paquete.id)
+                if not pl:
+                    pl = PL.create({
+                        'package_id': paquete.id,
+                        'picking_id': pick.id,
+                        'location_dest_id': move.location_dest_id.id,
+                        'company_id': pick.company_id.id,
+                    })
+                    pl_por_paquete[paquete.id] = pl
                 SML.create({
                     'move_id': move.id,
                     'picking_id': pick.id,
@@ -610,13 +622,13 @@ Body: {body_str[:500]}"""
                     'qty_done': aplicar,
                     'package_id': paquete.id,
                     'result_package_id': paquete.id,
+                    'package_level_id': pl.id,
                 })
-                paquetes_movidos.add(paquete.id)
                 seteado = True
         if seteado:
             _logger.info(
                 "[WIS] op.interna %s: consolidó %s paquete(s) de %s caja(s) predecesora(s) en %s.",
-                pick.name, len(paquetes_movidos), len(predecesores),
+                pick.name, len(pl_por_paquete), len(predecesores),
                 pick.location_id.complete_name)
         return seteado
 
