@@ -438,9 +438,15 @@ class StockPicking(models.Model):
             if not original:
                 continue
             if not original.picking_type_id.integra_parciales and original.codigo_unico:
+                # Si el original es una operación INTERNA (no_integrado, ej. crosspick), su
+                # backorder debe seguir siendo no_integrado — sino la cascada
+                # `_wis_validar_operaciones_internas` (que busca no_integrado) NO lo encuentra y el
+                # paso salida->transito del saldo queda sin procesar. El resto (intermedio
+                # preparado/enviado) hereda 'enviado' (saldo pendiente de preparar).
                 backorder.with_context(skip_wms_integration=True).write({
                     'codigo_unico': original.codigo_unico,
-                    'wms_estado': 'enviado',
+                    'wms_estado': (
+                        'no_integrado' if original.wms_estado == 'no_integrado' else 'enviado'),
                 })
                 _logger.info(
                     "[WIS] _create_backorder | backorder=%s hereda codigo_unico='%s' de original=%s",
