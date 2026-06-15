@@ -1095,11 +1095,15 @@ class StockMove(models.Model):
 
     def _action_assign(self, *args, **kwargs):
         res = super()._action_assign(*args, **kwargs)
-        # La adquisición de código se dispara también acá porque la AUTO-asignación de un
-        # picking aguas abajo (cuando su predecesor se valida) ocurre a nivel move, NO por
-        # `picking.action_assign()`. En ese momento el predecesor ya está hecho y codificado,
-        # así que el picking flagged adquiere su código (y el `write` cascada al siguiente).
         if not self.env.context.get('skip_wms_integration'):
+            # ENVÍO WIS: la AUTO-asignación de un picking aguas abajo (cuando su predecesor se
+            # valida) ocurre a nivel move, NO por `picking.action_assign()`. Si ese picking
+            # integra y dispara en 'assigned' (ej. la 2da operación de una devolución de caja
+            # cerrada: Transito->Existencias), recién acá llega a su estado de disparo, así que
+            # se intenta el envío para que genere su codigo_unico. `_enviar_wis_si_corresponde`
+            # tiene los guards (integra, sin_enviar, estado de disparo) -> no duplica.
+            self.picking_id._enviar_wis_si_corresponde('move_action_assign')
+            # La adquisición de código (pickings flagged que adquieren del predecesor).
             self.picking_id._wis_adquirir_codigo_si_corresponde()
             self.picking_id._wis_complete_document_type()
         return res
