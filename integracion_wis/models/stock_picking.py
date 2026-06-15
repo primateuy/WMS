@@ -381,6 +381,24 @@ class StockPicking(models.Model):
             _logger.exception(
                 "[WIS] _wis_registrar_envio | no se pudo registrar log de %s: %s", self.name, e)
 
+    def _wis_codigo_esperado(self, tipo):
+        """Código único determinístico que Odoo asigna a este picking (W-D-/W-R-/W-P-<id>).
+
+        El `codigo_unico` lo genera Odoo, NO WIS: los métodos `insertar*` de models.py lo arman
+        localmente y WIS solo lo eco-devuelve en la respuesta. Esto permite persistir el código
+        aunque la llamada a WIS falle (ej. WIS rechaza un tipoReferencia), para no dejar la
+        operación sin código y romper trazabilidad/conciliación. Replica el ruteo de `enviarWS`:
+        devolución -> W-D-, incoming -> W-R-, resto (pedidos) -> W-P-."""
+        self.ensure_one()
+        if self.codigo_unico:
+            return self.codigo_unico
+        TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
+        if tipo in TIPOS_DEVOLUCION:
+            return "W-D-%s" % self.id
+        if self.picking_type_id.code == 'incoming':
+            return "W-R-%s" % self.id
+        return "W-P-%s" % self.id
+
     @api.model_create_multi
     def create(self, vals_list):
         records = super(StockPicking, self).create(vals_list)
@@ -417,13 +435,19 @@ class StockPicking(models.Model):
                     wms_vals = {'wms_estado': 'enviado'}
                     if isinstance(response, dict):
                         wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
-                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico') or record._wis_codigo_esperado(tipo)
+                    else:
+                        wms_vals['codigo_unico'] = record._wis_codigo_esperado(tipo)
                     record.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] create | picking=%s enviado a WMS", record.name)
                     record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] create | error en picking=%s: %s", record.name, e)
-                record._wis_registrar_envio('', tipo, ok=False, error=str(e))
+                # El código es determinístico (lo genera Odoo, no WIS): se persiste aunque WIS
+                # rechace, para no dejar la operación sin código. wms_estado queda 'sin_enviar'.
+                cod_local = record._wis_codigo_esperado(tipo)
+                record.with_context(skip_wms_integration=True).write({'codigo_unico': cod_local})
+                record._wis_registrar_envio(cod_local, tipo, ok=False, error=str(e))
         # Adquisición DESDE LA CREACIÓN: si el picking que adquiere ya tiene su predecesor
         # con código al crearse, hereda acá mismo. Si el predecesor aún no tiene código
         # (ej. cadenas por procurement que se arman hacia atrás), los hooks de ciclo de vida
@@ -493,13 +517,20 @@ class StockPicking(models.Model):
                     wms_vals = {'wms_estado': 'enviado'}
                     if isinstance(response, dict):
                         wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
-                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico') or record._wis_codigo_esperado(tipo)
+                    else:
+                        wms_vals['codigo_unico'] = record._wis_codigo_esperado(tipo)
                     record.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] %s | picking=%s enviado a WMS", hook_name, record.name)
                     record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] %s | error en picking=%s: %s", hook_name, record.name, e)
-                record._wis_registrar_envio('', tipo, ok=False, error=str(e))
+                # El código es determinístico (lo genera Odoo, no WIS): se persiste aunque WIS
+                # rechace, para no dejar la operación sin código. wms_estado queda 'sin_enviar' y
+                # el guard `if record.codigo_unico` de arriba evita reintentos en próximos assign.
+                cod_local = record._wis_codigo_esperado(tipo)
+                record.with_context(skip_wms_integration=True).write({'codigo_unico': cod_local})
+                record._wis_registrar_envio(cod_local, tipo, ok=False, error=str(e))
 
     def _wis_adquirir_codigo_si_corresponde(self):
         """Para pickings cuyo tipo tiene `adquiere_codigo_unico_wms=True`: adquieren el
@@ -758,6 +789,10 @@ class StockPicking(models.Model):
                 continue
             if record.wms_estado != 'sin_enviar':
                 continue
+            if record.codigo_unico:
+                # Ya tiene código (ej. un envío previo falló pero el código quedó asignado): no
+                # se reintenta, para respetar la política de "código persistido, sin reenvío".
+                continue
             if record.picking_type_id.estado_disparo_wis not in ('done', False, ''):
                 continue
             tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
@@ -767,13 +802,19 @@ class StockPicking(models.Model):
                     wms_vals = {'wms_estado': 'enviado'}
                     if isinstance(response, dict):
                         wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
-                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico') or record._wis_codigo_esperado(tipo)
+                    else:
+                        wms_vals['codigo_unico'] = record._wis_codigo_esperado(tipo)
                     record.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] _action_done | picking=%s enviado a WMS", record.name)
                     record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] _action_done | error en picking=%s: %s", record.name, e)
-                record._wis_registrar_envio('', tipo, ok=False, error=str(e))
+                # El código es determinístico (lo genera Odoo, no WIS): se persiste aunque WIS
+                # rechace, para no dejar la operación sin código. wms_estado queda 'sin_enviar'.
+                cod_local = record._wis_codigo_esperado(tipo)
+                record.with_context(skip_wms_integration=True).write({'codigo_unico': cod_local})
+                record._wis_registrar_envio(cod_local, tipo, ok=False, error=str(e))
         self._wis_adquirir_codigo_si_corresponde()
         return res
 
@@ -867,6 +908,10 @@ class StockPicking(models.Model):
                 if not record.move_ids:
                     continue
                 if record.wms_estado != 'sin_enviar':
+                    continue
+                if record.codigo_unico:
+                    # Ya tiene código (envío previo fallido): no se reintenta. Evita además que un
+                    # cambio de estado posterior relance el error de WIS y bloquee la operación.
                     continue
 
                 tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
@@ -1061,6 +1106,9 @@ class StockMove(models.Model):
                 continue
             if picking.wms_estado != 'sin_enviar':
                 continue
+            if picking.codigo_unico:
+                # Ya tiene código (envío previo fallido): no se reintenta.
+                continue
             estado_obj = picking.picking_type_id.estado_disparo_wis or ''
             if not estado_obj:
                 continue
@@ -1077,13 +1125,19 @@ class StockMove(models.Model):
                     wms_vals = {'wms_estado': 'enviado'}
                     if isinstance(response, dict):
                         wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
-                        wms_vals['codigo_unico'] = response.get('codigoUnico', '')
+                        wms_vals['codigo_unico'] = response.get('codigoUnico') or picking._wis_codigo_esperado(tipo)
+                    else:
+                        wms_vals['codigo_unico'] = picking._wis_codigo_esperado(tipo)
                     picking.with_context(skip_wms_integration=True).write(wms_vals)
                     _logger.info("[WIS] _action_confirm | picking=%s enviado a WMS", picking.name)
                     picking._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
             except Exception as e:
                 _logger.exception("[WIS] _action_confirm | error en picking=%s: %s", picking.name, e)
-                picking._wis_registrar_envio('', tipo, ok=False, error=str(e))
+                # El código es determinístico (lo genera Odoo, no WIS): se persiste aunque WIS
+                # rechace, para no dejar la operación sin código. wms_estado queda 'sin_enviar'.
+                cod_local = picking._wis_codigo_esperado(tipo)
+                picking.with_context(skip_wms_integration=True).write({'codigo_unico': cod_local})
+                picking._wis_registrar_envio(cod_local, tipo, ok=False, error=str(e))
         # Tras confirmar (cadena de moves ya enlazada), intentar la adquisición en los pickings
         # flagged: si su predecesor ya tiene código en este punto, adquieren sin esperar a que se
         # los procese (ej. cadenas por procurement donde el upstream ya se codificó en el run).
