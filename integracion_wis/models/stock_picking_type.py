@@ -91,3 +91,19 @@ class StockPickingType(models.Model):
              'puede generar diferencias reales de stock (abastecimientos a tiendas, entregas '
              'mayoristas). NO activar en recepciones.'
     )
+
+    enviar_lpns_wis = fields.Boolean(
+        string='Enviar LPN a WIS (caja cerrada)',
+        default=False,
+        help='Si está activo, tras crear la referencia de devolución (OD) este tipo de operación '
+             'crea en WIS los LPN de las cajas del picking (POST /Lpn/Create). Activar en las '
+             'recepciones de caja cerrada fin de temporada.'
+    )
+
+    tipo_lpn_wis = fields.Char(
+        string='Tipo de LPN WIS',
+        default='FINTEMP',
+        help='Valor del campo "tipo" del LPN que se envía a WIS (ej. FINTEMP para fin de temporada). '
+             'Si se deja vacío, WIS aplica su parámetro por defecto (IE_535_TP_LPN_TIPO). '
+             'El valor debe estar dado de alta en WIS.'
+    )

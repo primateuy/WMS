@@ -26,6 +26,12 @@
                            statusbar_visible="sin_enviar,enviado,preparado,despachado,anulado,en_proceso_cancelacion"/>
                     <field name="wms_origen" widget="badge"
                            invisible="wms_origen == 'manual'"/>
+                    <!-- Reenvío manual de LPN (caja cerrada): recupera el caso referencia OK / LPN falló -->
+                    <field name="wis_enviar_lpns" invisible="1"/>
+                    <button name="action_wis_reenviar_lpns" type="object"
+                            string="Reenviar LPN a WIS"
+                            invisible="not wis_enviar_lpns"
+                            groups="stock.group_stock_user"/>
                 </xpath>
 
                 <!-- Spec 1: ocultar Cancelar cuando hay una cancelación pendiente de resolver
@@ -60,6 +66,8 @@
                             <group>
                                 <field name="wms_nro_caja"
                                        help="Solo para pedidos FINT. Si se completa, el WMS preparará esa caja específica (LPN tipo FINTEMP)."/>
+                                <field name="wms_lpns_enviados" readonly="1"
+                                       invisible="not wis_enviar_lpns"/>
                             </group>
                         </group>
 

@@ -165,7 +165,20 @@ class StockPicking(models.Model):
         help="Número de caja específico para pedidos de fin de temporada (FINT). "
              "Si se completa, se enviará al WMS como LPN con tipo FINTEMP.",
     )
-    
+
+    wms_lpns_enviados = fields.Boolean(
+        string="LPN enviados a WMS",
+        copy=False,
+        help="Indica que los LPN (cajas) de esta devolución de caja cerrada ya se crearon en WIS "
+             "(POST /Lpn/Create). Evita reenvíos duplicados; el botón 'Reenviar LPN a WIS' lo ignora.",
+    )
+
+    wis_enviar_lpns = fields.Boolean(
+        related='picking_type_id.enviar_lpns_wis',
+        string="Tipo envía LPN a WIS",
+        help="Reflejo del flag del tipo de operación; usado para mostrar el botón de reenvío de LPN.",
+    )
+
     state = fields.Selection(selection_add=[
         ('preparado_wms', 'Preparado por WMS')
     ], ondelete={'preparado_wms': 'cascade'})
@@ -291,7 +304,12 @@ class StockPicking(models.Model):
         TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
 
         if tipo in TIPOS_DEVOLUCION:
-            return datosAPI.insertarDevolucion(self)
+            response = datosAPI.insertarDevolucion(self)
+            # Caja cerrada fin de temporada: tras la referencia de devolución (OD),
+            # crear los LPN de las cajas en WIS (POST /Lpn/Create) si el tipo lo habilita.
+            if response is not False:
+                self._wis_enviar_lpns_si_corresponde(datosAPI)
+            return response
 
         if self.picking_type_id.code == 'incoming':
             return datosAPI.insertarReferenciaRecepcion(self)
@@ -398,6 +416,41 @@ class StockPicking(models.Model):
         if self.picking_type_id.code == 'incoming':
             return "W-R-%s" % self.id
         return "W-P-%s" % self.id
+
+    def _wis_enviar_lpns_si_corresponde(self, datosAPI=None, force=False):
+        """Crea los LPN de las cajas en WIS (POST /Lpn/Create) para devoluciones de caja cerrada.
+
+        Solo actúa si el tipo de operación tiene `enviar_lpns_wis` activo y el picking aún no
+        envió sus LPN (`wms_lpns_enviados`), salvo `force=True` (reenvío manual). No tumba el
+        flujo de negocio: ante error registra en el log y NO reintenta automáticamente (mismo
+        criterio que `codigo_unico`). El detalle de las cajas se arma en `insertarLpns`."""
+        self.ensure_one()
+        if not self.picking_type_id.enviar_lpns_wis:
+            return False
+        if self.wms_lpns_enviados and not force:
+            return False
+        if datosAPI is None:
+            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+        if not datosAPI:
+            return False
+        try:
+            response = datosAPI.insertarLpns(self)
+            if response is not False:
+                self.with_context(skip_wms_integration=True).write({'wms_lpns_enviados': True})
+                self._wis_registrar_envio(self.codigo_unico, 'LPN')
+            return response
+        except Exception as e:
+            _logger.error("[WIS] LPN | error al crear LPN del picking %s: %s", self.name, e)
+            self._wis_registrar_envio(self.codigo_unico, 'LPN', ok=False, error=str(e))
+            return False
+
+    def action_wis_reenviar_lpns(self):
+        """Acción manual (botón): reenvía los LPN a WIS, recuperando el caso en que la
+        referencia de devolución entró pero `/Lpn/Create` falló. Respeta el alcance del
+        tipo (`enviar_lpns_wis`) pero ignora el guard `wms_lpns_enviados` (force=True)."""
+        for picking in self:
+            picking._wis_enviar_lpns_si_corresponde(force=True)
+        return True
 
     @api.model_create_multi
     def create(self, vals_list):

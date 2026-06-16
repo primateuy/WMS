@@ -846,6 +846,125 @@ class IntegracionWIS(models.Model):
             response['codigoUnico'] = codigo
             return response
 
+    def insertarLpns(self, picking):
+        """Crea en WIS los LPN (cajas) de una devolución de caja cerrada fin de temporada.
+
+        Endpoint: POST /Lpn/Create (spec WIS-WMS API 10.2 §16.1). Crea UN LPN por cada
+        `stock.quant.package` presente en las move_lines del picking; sus `detalles` llevan
+        el contenido declarado de la caja (producto + cantidad + lote + vencimiento).
+
+        - idExterno = `package.wis_id_externo` o `package.name`.
+        - tipo = `picking_type_id.tipo_lpn_wis` (default 'FINTEMP'); si está vacío se omite y
+          WIS aplica su parámetro IE_535_TP_LPN_TIPO.
+        - cantidadDeclarada = `move_line.quantity` (en 'assigned' ya refleja la caja reservada;
+          las cajas viajan por la cadena → el incoming trae `move_line.package_id` del
+          predecesor ya en 'assigned', verificado en el flujo 2270->2271).
+
+        Fallback (picking sin paquetes): un único LPN con idExterno = `wms_nro_caja` o el
+        `codigo_unico`/W-D- y detalles desde `move_ids` (cantidad = product_uom_qty).
+        """
+        tipo_lpn = (picking.picking_type_id.tipo_lpn_wis or '').strip()
+        fecha_venc_default = (datetime.datetime.now() + datetime.timedelta(days=365)).date().isoformat()
+
+        def _fecha_venc(ml):
+            """Vencimiento real desde la move_line/lote; None si no aplica."""
+            if hasattr(ml, 'expiration_date') and ml.expiration_date:
+                return ml.expiration_date.date().isoformat()
+            if hasattr(ml, 'lot_id') and ml.lot_id and getattr(ml.lot_id, 'expiration_date', False):
+                return ml.lot_id.expiration_date.date().isoformat()
+            return None
+
+        # Agrupar move_lines por paquete (la caja cerrada). Prioriza el paquete origen
+        # (package_id, el que llega por la cadena); si no, el destino (result_package_id).
+        lineas_por_paquete = {}   # paquete -> [move_line, ...]
+        sin_paquete = []
+        for ml in picking.move_line_ids:
+            if (ml.quantity or 0) <= 0:
+                continue
+            paquete = ml.package_id or ml.result_package_id
+            if paquete:
+                lineas_por_paquete.setdefault(paquete, []).append(ml)
+            else:
+                sin_paquete.append(ml)
+
+        lpns = []
+
+        def _detalles_desde_move_lines(move_lines):
+            """Consolida move_lines por (producto, lote) en detalles de LPN."""
+            agrupado = {}  # (product_id, lot_id) -> dict detalle acumulado
+            for ml in move_lines:
+                codigo_producto = ml.product_id.codigo_unico or ''
+                if not codigo_producto:
+                    raise ValidationError(
+                        f"No se encontró código único WIS en el producto: {ml.product_id.name}. "
+                        f"Sincronícelo con WIS antes de crear el LPN.")
+                clave = (ml.product_id.id, ml.lot_id.id if ml.lot_id else False)
+                det = agrupado.get(clave)
+                if not det:
+                    det = {
+                        'idLineaSistemaExterno': f"odoo__stock.move.line__{ml.id}",
+                        'codigoProducto': codigo_producto,
+                        'cantidadDeclarada': 0.0,
+                        'fechaVencimiento': _fecha_venc(ml) or fecha_venc_default,
+                    }
+                    if ml.lot_id:
+                        det['identificador'] = ml.lot_id.name
+                    agrupado[clave] = det
+                det['cantidadDeclarada'] += ml.quantity
+            return list(agrupado.values())
+
+        # Caso principal: un LPN por paquete.
+        for paquete, move_lines in lineas_por_paquete.items():
+            lpn = {
+                'idExterno': paquete.wis_id_externo or paquete.name,
+                'detalles': _detalles_desde_move_lines(move_lines),
+            }
+            if tipo_lpn:
+                lpn['tipo'] = tipo_lpn
+            lpns.append(lpn)
+
+        # Fallback: el picking no tiene cajas modeladas como paquetes.
+        if not lpns:
+            detalles_fb = []
+            fuente = sin_paquete or picking.move_line_ids
+            if fuente:
+                detalles_fb = _detalles_desde_move_lines(fuente)
+            else:
+                for move in picking.move_ids:
+                    codigo_producto = move.product_id.codigo_unico or ''
+                    if not codigo_producto:
+                        raise ValidationError(
+                            f"No se encontró código único WIS en el producto: {move.product_id.name}.")
+                    detalles_fb.append({
+                        'idLineaSistemaExterno': f"odoo__stock.move__{move.id}",
+                        'codigoProducto': codigo_producto,
+                        'cantidadDeclarada': move.product_uom_qty,
+                        'fechaVencimiento': fecha_venc_default,
+                    })
+            if not detalles_fb:
+                _logger.info("[WIS] insertarLpns: picking %s sin líneas para LPN", picking.name)
+                return False
+            id_externo = picking.wms_nro_caja or picking.codigo_unico or f"W-D-{picking.id}"
+            lpn = {'idExterno': id_externo, 'detalles': detalles_fb}
+            if tipo_lpn:
+                lpn['tipo'] = tipo_lpn
+            lpns.append(lpn)
+
+        payload = {
+            'empresa': self.empresa_id,
+            'dsReferencia': f"Creación de LPN desde Odoo: {picking.name}",
+            'lpns': lpns,
+        }
+
+        response = self.consultarAPI(
+            link="/Lpn/Create",
+            body=payload,
+            params=None,
+            method="POST"
+        )
+        _logger.info("[WIS] insertarLpns: %s LPN(s) creados para %s", len(lpns), picking.name)
+        return response
+
     def insertarReferenciaRecepcion(self, picking):
 
         moves = picking.move_ids or (hasattr(picking, 'move_ids_without_package') and picking.move_ids_without_package) or []
