@@ -1,5 +1,5 @@
 from odoo import models, fields, api
-from odoo.exceptions import UserError, ValidationError
+from odoo.exceptions import ValidationError
 import logging
 _logger = logging.getLogger(__name__)
 import datetime;
@@ -1137,32 +1137,6 @@ class IntegracionWIS(models.Model):
         }
         return self.consultarAPI(
             link='/AnulacionReferenciaRecepcion/Update',
-            body=body,
-            params=None,
-            method='POST',
-        )
-
-    def anularPedido(self, picking):
-        """Spec 1.4: anula un pedido de salida pendiente en WIS (cancelación saliente).
-        Endpoint: POST /Preparacion/AnularPickingPedidoPendiente. Requiere el número de
-        preparación que asigna WIS (`picking.wms_nro_preparacion`).
-
-        PENDIENTE Polo Oeste: confirmar la estructura exacta del body y si la anulación se
-        puede hacer solo con `nroPedido` (sin `preparacion`). Hasta entonces, `action_cancel`
-        bloquea con UserError cuando `wms_nro_preparacion` está vacío (no llega acá sin número).
-        """
-        if not picking.wms_nro_preparacion:
-            raise UserError(
-                f"Falta el número de preparación de WIS para anular el pedido de salida "
-                f"{picking.name}."
-            )
-        body = {
-            'empresa': self.empresa_id,
-            'nroPedido': picking.codigo_unico,
-            'preparacion': picking.wms_nro_preparacion,
-        }
-        return self.consultarAPI(
-            link='/Preparacion/AnularPickingPedidoPendiente',
             body=body,
             params=None,
             method='POST',

@@ -23,7 +23,7 @@
                 <!-- Badge de estado WMS en el header, solo si fue enviado -->
                 <xpath expr="//header" position="inside">
                     <field name="wms_estado" widget="statusbar"
-                           statusbar_visible="sin_enviar,enviado,preparado,despachado,anulado,en_proceso_cancelacion"/>
+                           statusbar_visible="sin_enviar,enviado,preparado,despachado,anulado,en_proceso_cancelacion,error_cancelacion"/>
                     <field name="wms_origen" widget="badge"
                            invisible="wms_origen == 'manual'"/>
                     <!-- Reenvío manual de LPN (caja cerrada): recupera el caso referencia OK / LPN falló -->

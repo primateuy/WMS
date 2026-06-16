@@ -23,6 +23,7 @@ class StockPicking(models.Model):
             ("anulado", "Anulado por WMS"),
             ("no_integrado", "No integrado con WMS"),
             ("en_proceso_cancelacion", "En proceso de cancelación"),
+            ("error_cancelacion", "Error en cancelación"),
         ],
         string="Estado WMS",
         default="sin_enviar",
@@ -662,13 +663,20 @@ class StockPicking(models.Model):
         return res
 
     def action_cancel(self):
-        """Spec 1: cancelación Odoo → WIS (SALIENTE). Antes de cancelar en Odoo, notifica la
-        anulación a WIS según el tipo de operación:
-          - Recepciones (code='incoming'): /AnulacionReferenciaRecepcion/Update (solo codigo_unico).
-          - Pedidos de salida: /Preparacion/AnularPickingPedidoPendiente (requiere wms_nro_preparacion).
+        """Cancelación Odoo → WIS (SALIENTE), ACOTADA A RECEPCIONES NORMALES (OC/RR).
 
-        Si WIS acepta -> wms_estado='anulado' y se cancela en Odoo. Si WIS rechaza -> el picking
-        queda 'en_proceso_cancelacion' (bloqueo operativo) y se aborta la cancelación con UserError.
+        Antes de cancelar en Odoo, notifica la anulación de la referencia de recepción a WIS
+        vía /AnulacionReferenciaRecepcion/Update (identifica por `codigo_unico`).
+
+        ALCANCE (decisión 2026-06-16): SOLO recepciones normales. Quedan FUERA (cancelan con el
+        flujo estándar de Odoo, sin tocar WIS): las salidas (pedidos) y las devoluciones de caja
+        cerrada / fin de temporada (tipo de devolución o `enviar_lpns_wis`). Sus referencias se
+        crean distinto (OD / LPN) y su anulación no está en alcance.
+
+        Si WIS acepta -> wms_estado='anulado' y se cancela en Odoo. Si WIS rechaza -> se ABORTA la
+        cancelación con UserError y el picking queda marcado 'error_cancelacion' con un log de
+        error. Ese marcado + log se persisten en un cursor SEPARADO (`_wis_log_cancelacion_rechazada`)
+        porque el UserError hace rollback de la transacción principal.
 
         NO interviene si el picking no integra, no tiene código, o ya está anulado/despachado —
         esto último cubre la anulación ENTRANTE (`_handle_pedidos_anulados`), que setea
@@ -679,6 +687,7 @@ class StockPicking(models.Model):
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             return super().action_cancel()
 
+        TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
         datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
         for picking in self:
             if (not picking.picking_type_id.integracion_wms
@@ -687,25 +696,23 @@ class StockPicking(models.Model):
                 continue  # flujo estándar de Odoo (no integrado)
             if picking.wms_estado in ('anulado', 'despachado'):
                 continue  # ya anulado (ej. anulación entrante) o despachado -> dejar pasar
+
+            # Alcance: SOLO recepciones normales. Salidas y devoluciones/caja cerrada cancelan
+            # con el flujo estándar de Odoo, sin notificar a WIS.
+            pt = picking.picking_type_id
+            es_recepcion_normal = (
+                pt.code == 'incoming'
+                and (pt.tipo_pedido_wis or '') not in TIPOS_DEVOLUCION
+                and not pt.enviar_lpns_wis
+            )
+            if not es_recepcion_normal:
+                continue
+
             if not datosAPI:
                 continue
 
-            es_recepcion = picking.picking_type_id.code == 'incoming'
-            # Pedido de salida sin número de preparación: WIS no puede anularlo todavía.
-            # (Pendiente de confirmar con Polo Oeste cómo provee 'preparacion'.) No se intenta
-            # la llamada ni se marca 'en_proceso_cancelacion' -> solo se bloquea con aviso.
-            if not es_recepcion and not picking.wms_nro_preparacion:
-                raise UserError(
-                    f"No se puede cancelar el pedido de salida {picking.name} en WIS: falta el "
-                    f"número de preparación que asigna WIS (wms_nro_preparacion). Pendiente de "
-                    f"confirmar con Polo Oeste. La operación no se canceló."
-                )
-
             try:
-                if es_recepcion:
-                    datosAPI.anularReferenciaRecepcion(picking)
-                else:
-                    datosAPI.anularPedido(picking)
+                datosAPI.anularReferenciaRecepcion(picking)
                 # WIS aceptó (sin excepción) -> marcar anulado y seguir con el flujo estándar.
                 picking.with_context(skip_wms_integration=True).write({
                     'wms_estado': 'anulado',
@@ -715,27 +722,43 @@ class StockPicking(models.Model):
                 })
                 _logger.info("[WIS] action_cancel | picking=%s anulado en WIS y cancelado en Odoo", picking.name)
             except Exception as e:
-                # WIS rechazó la cancelación -> bloqueo operativo.
-                picking.with_context(skip_wms_integration=True).write({
-                    'wms_estado': 'en_proceso_cancelacion',
-                })
-                self.env['wms.integracion.log'].sudo().create({
+                # WIS rechazó la cancelación -> bloqueo operativo. La traza (estado + log) se
+                # persiste en cursor separado porque el UserError de abajo hace rollback.
+                _logger.warning("[WIS] action_cancel | WIS rechazó cancelación de %s: %s", picking.name, e)
+                self._wis_log_cancelacion_rechazada(picking, e)
+                raise UserError(
+                    f"No es posible cancelar el picking {picking.name} porque WIS no aceptó la "
+                    f"cancelación: {str(e)}\n\n"
+                    f"El picking quedó marcado como 'Error en cancelación'. "
+                    f"Contactar a Polo Oeste para resolver."
+                )
+        return super().action_cancel()
+
+    def _wis_log_cancelacion_rechazada(self, picking, error):
+        """Persiste la traza del rechazo de una cancelación en un cursor SEPARADO.
+
+        El `action_cancel` lanza `UserError` cuando WIS rechaza, lo que hace rollback de la
+        transacción principal y se llevaría puesto cualquier write/log hecho en ella. Para que el
+        marcado `error_cancelacion` y el log de error SOBREVIVAN, se escriben en un cursor
+        nuevo que se confirma al cerrarse (independiente del rollback de la principal)."""
+        try:
+            with self.env.registry.cursor() as new_cr:
+                new_env = api.Environment(new_cr, self.env.uid, self.env.context)
+                new_env['stock.picking'].browse(picking.id).with_context(
+                    skip_wms_integration=True).write({'wms_estado': 'error_cancelacion'})
+                new_env['wms.integracion.log'].create({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'error',
                     'modelo': 'stock.picking',
-                    'texto': f"action_cancel: WIS rechazó la cancelación de {picking.name}: {str(e)}",
+                    'texto': f"action_cancel: WIS rechazó la cancelación de {picking.name}: {str(error)}",
                     'picking_id': picking.id,
                     'resultado': 'error',
                     'detalle': f"Tipo: {picking.picking_type_id.name} | codigo_unico: {picking.codigo_unico}",
                 })
-                _logger.warning("[WIS] action_cancel | WIS rechazó cancelación de %s: %s", picking.name, e)
-                raise UserError(
-                    f"No es posible cancelar el picking {picking.name} porque WIS no aceptó la "
-                    f"cancelación: {str(e)}\n\n"
-                    f"El picking quedó marcado como 'En proceso de cancelación'. "
-                    f"Contactar a Polo Oeste para resolver."
-                )
-        return super().action_cancel()
+        except Exception as log_err:
+            _logger.exception(
+                "[WIS] _wis_log_cancelacion_rechazada | no se pudo persistir traza de %s: %s",
+                picking.name, log_err)
 
     def _wis_emitir_eremito_si_corresponde(self):
         """Emite el e-Remito (CFE) ANTES de que el picking pase a 'done'. INDISPENSABLE: un
