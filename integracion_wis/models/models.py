@@ -800,18 +800,38 @@ class IntegracionWIS(models.Model):
 
     def insertarDevolucion(self, picking):
             moves = picking.move_ids or (hasattr(picking, 'move_ids_without_package') and picking.move_ids_without_package) or []
-            
+
             if not moves:
                 _logger.info("No hay productos detectados en la devolución %s", picking.name)
                 return False
-                
+
+            # Fecha de vencimiento por defecto: WIS la exige para productos perecederos (no
+            # duraderos). Se busca la real en el lote/línea; si no hay, se usa la programada del
+            # picking, y como último recurso hoy+365 (mismo criterio que insertarReferenciaRecepcion).
+            if picking.scheduled_date:
+                fecha_venc_default = picking.scheduled_date.date().isoformat()
+            else:
+                fecha_venc_default = (datetime.datetime.now() + datetime.timedelta(days=365)).date().isoformat()
+
             detalles = []
             for move in moves:
                 codigo_producto = move.product_id.codigo_unico or ''
+
+                # Vencimiento real desde las líneas de movimiento (lotes), si existe.
+                fecha_venc = None
+                for ml in move.move_line_ids:
+                    if hasattr(ml, 'expiration_date') and ml.expiration_date:
+                        fecha_venc = ml.expiration_date.date().isoformat()
+                        break
+                    if hasattr(ml, 'lot_id') and ml.lot_id and getattr(ml.lot_id, 'expiration_date', False):
+                        fecha_venc = ml.lot_id.expiration_date.date().isoformat()
+                        break
+
                 detalles.append({
                     'idLineaSistemaExterno': f"odoo__stock.move__{move.id}",
                     'codigoProducto': codigo_producto,
-                    'cantidadReferencia': move.product_uom_qty
+                    'cantidadReferencia': move.product_uom_qty,
+                    'fechaVencimiento': fecha_venc or fecha_venc_default,
                 })
 
             # Código único estandarizado por tipo: W-D-<id del picking> (devolución).
@@ -826,7 +846,9 @@ class IntegracionWIS(models.Model):
                 'dsReferencia': f"DEVOLUCIÓN DE CLIENTE DESDE ODOO: {picking.name}",
                 'referencias': [{
                     'referencia': codigo,
-                    'tipoReferencia': 'OD',  # Order Delivery Return
+                    # tipoReferencia sale del tipo de operación (Tipo de Pedido WIS): para caja
+                    # cerrada fin de temporada es 'ODFT'; 'OD' (Orden de Devolución) si no está.
+                    'tipoReferencia': picking.picking_type_id.tipo_pedido_wis or 'OD',
                     'codigoAgente': _cod_ag_dev,
                     'tipoAgente': _tipo_ag_dev,
                     'predio': '1',
