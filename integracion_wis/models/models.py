@@ -881,11 +881,16 @@ class IntegracionWIS(models.Model):
         - cantidadDeclarada = `move_line.quantity` (en 'assigned' ya refleja la caja reservada;
           las cajas viajan por la cadena → el incoming trae `move_line.package_id` del
           predecesor ya en 'assigned', verificado en el flujo 2270->2271).
+        - idPacking = número de la referencia de recepción (la misma `referencia` que se envió
+          en `insertarDevolucion`), para agrupar los LPN bajo esa referencia. La referencia se
+          manda SIEMPRE primero (enviarWS: insertarDevolucion y luego los LPN).
 
         Fallback (picking sin paquetes): un único LPN con idExterno = `wms_nro_caja` o el
         `codigo_unico`/W-D- y detalles desde `move_ids` (cantidad = product_uom_qty).
         """
         tipo_lpn = (picking.picking_type_id.tipo_lpn_wis or '').strip()
+        # Número de la referencia de recepción (idéntico a la `referencia` de insertarDevolucion).
+        ref_recepcion = picking.codigo_unico or f"W-D-{picking.id}"
         fecha_venc_default = (datetime.datetime.now() + datetime.timedelta(days=365)).date().isoformat()
 
         def _fecha_venc(ml):
@@ -939,6 +944,7 @@ class IntegracionWIS(models.Model):
         for paquete, move_lines in lineas_por_paquete.items():
             lpn = {
                 'idExterno': paquete.wis_id_externo or paquete.name,
+                'idPacking': ref_recepcion,
                 'detalles': _detalles_desde_move_lines(move_lines),
             }
             if tipo_lpn:
@@ -967,7 +973,7 @@ class IntegracionWIS(models.Model):
                 _logger.info("[WIS] insertarLpns: picking %s sin líneas para LPN", picking.name)
                 return False
             id_externo = picking.wms_nro_caja or picking.codigo_unico or f"W-D-{picking.id}"
-            lpn = {'idExterno': id_externo, 'detalles': detalles_fb}
+            lpn = {'idExterno': id_externo, 'idPacking': ref_recepcion, 'detalles': detalles_fb}
             if tipo_lpn:
                 lpn['tipo'] = tipo_lpn
             lpns.append(lpn)
