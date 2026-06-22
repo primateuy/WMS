@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Stock Move -->
+    <record model="ir.actions.server" id="sh_cancel_stock_move_cancel_multi_action">
+        <field name="name">Cancel</field>
+        <field name="type">ir.actions.server</field>
+        <field name="model_id" ref="stock.model_stock_move" />
+        <field name="binding_model_id" ref="stock.model_stock_move" />
+        <field name="group_ids" eval="[(4, ref('sh_stock_move_cancel.group_sh_stock_move_cancel'))]" />
+        <field name="state">code</field>
+        <field name="code">
+            records.action_move_cancel()
+        </field>
+    </record>
+    <record model="ir.actions.server" id="sh_cancel_stock_move_draft_multi_action">
+        <field name="name">Cancel &amp; Reset Draft</field>
+        <field name="type">ir.actions.server</field>
+        <field name="model_id" ref="stock.model_stock_move" />
+        <field name="binding_model_id" ref="stock.model_stock_move" />
+        <field name="group_ids" eval="[(4, ref('sh_stock_move_cancel.group_sh_stock_move_cancel'))]" />
+        <field name="state">code</field>
+        <field name="code">
+            records.action_move_cancel_draft()
+        </field>
+    </record>
+
+ 
+    <record model="ir.actions.server" id="sh_cancel_stock_move_delete_multi_action">
+        <field name="name">Cancel &amp; Delete</field>
+        <field name="type">ir.actions.server</field>
+        <field name="model_id" ref="stock.model_stock_move" />
+        <field name="binding_model_id" ref="stock.model_stock_move" />
+        <field name="binding_view_types">list</field>
+        <field name="group_ids" eval="[(4, ref('sh_stock_move_cancel.group_sh_stock_move_cancel'))]" />
+        <field name="state">code</field>
+        <field name="code">
+            records.action_move_cancel_delete()
+        </field>
+    </record>
+</odoo>
