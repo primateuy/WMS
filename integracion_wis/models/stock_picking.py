@@ -163,9 +163,31 @@ class StockPicking(models.Model):
     wms_nro_caja = fields.Char(
         string="Nro. de Caja (FINT)",
         copy=False,
-        help="Número de caja específico para pedidos de fin de temporada (FINT). "
-             "Si se completa, se enviará al WMS como LPN con tipo FINTEMP.",
+        compute="_compute_wms_nro_caja",
+        store=True,
+        readonly=True,
+        help="Números de caja para pedidos de fin de temporada (FINT). Se autocompleta con los "
+             "paquetes ('Poner en paquete') del picking, separados por coma. Cada uno se envía al "
+             "WMS como un LPN tipo FINTEMP.",
     )
+
+    @api.depends('move_line_ids.result_package_id')
+    def _compute_wms_nro_caja(self):
+        """Lista de nombres de los paquetes (result_package_id) del picking, separados por coma.
+
+        Refleja siempre el set actual de cajas armadas con 'Poner en paquete': por cada paquete
+        agregado se suma su nombre, y si se quita un paquete también se descuenta. Preserva el
+        orden de agregación (orden de las move_line_ids) y deduplica.
+        """
+        for picking in self:
+            nombres = []
+            # Ordenado por id de la move line (orden de creación) para que el orden de
+            # agregación de las cajas sea determinístico: 1er paquete, 2do paquete, ...
+            for ml in picking.move_line_ids.sorted('id'):
+                paquete = ml.result_package_id
+                if paquete and paquete.name and paquete.name not in nombres:
+                    nombres.append(paquete.name)
+            picking.wms_nro_caja = ','.join(nombres)
 
     wms_lpns_enviados = fields.Boolean(
         string="LPN enviados a WMS",

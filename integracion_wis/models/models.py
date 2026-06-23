@@ -724,15 +724,43 @@ class IntegracionWIS(models.Model):
         if not vals:
             raise ValidationError("No se ha encontrado información del pedido");
 
+        # En FINT con cajas, los productos dentro de paquetes viajan por `lpns` (ver más abajo);
+        # en `detalles` solo van las líneas sueltas (move lines sin result_package_id). Si todo
+        # está empaquetado, `detalles` queda vacío.
+        es_fint_con_cajas = (tipo == 'FINT' and bool(vals.wms_nro_caja))
+
         detalles = [];
-        for prod in vals.move_ids:
-            if not prod.product_id.codigo_unico:
-                raise ValidationError(f"El producto '{prod.product_id.name}' no tiene un código WMS asignado. Sincronícelo primero desde el formulario del producto.")
-            detalles.append({
-                "codigoProducto": prod.product_id.codigo_unico,
-                "identificador": "*",
-                "cantidad": prod.product_uom_qty
-            })
+        if es_fint_con_cajas:
+            # Solo líneas NO empaquetadas, agrupadas por producto (suma de cantidades). Lo que
+            # está dentro de un paquete no se repite acá: se manda por `lpns`.
+            agrupado = {}
+            for ml in vals.move_line_ids:
+                if ml.result_package_id:
+                    continue
+                cantidad = ml.quantity or ml.product_uom_qty or 0
+                if cantidad <= 0:
+                    continue
+                if not ml.product_id.codigo_unico:
+                    raise ValidationError(f"El producto '{ml.product_id.name}' no tiene un código WMS asignado. Sincronícelo primero desde el formulario del producto.")
+                det = agrupado.get(ml.product_id.id)
+                if not det:
+                    det = {
+                        "codigoProducto": ml.product_id.codigo_unico,
+                        "identificador": "*",
+                        "cantidad": 0.0,
+                    }
+                    agrupado[ml.product_id.id] = det
+                det["cantidad"] += cantidad
+            detalles = list(agrupado.values())
+        else:
+            for prod in vals.move_ids:
+                if not prod.product_id.codigo_unico:
+                    raise ValidationError(f"El producto '{prod.product_id.name}' no tiene un código WMS asignado. Sincronícelo primero desde el formulario del producto.")
+                detalles.append({
+                    "codigoProducto": prod.product_id.codigo_unico,
+                    "identificador": "*",
+                    "cantidad": prod.product_uom_qty
+                })
 
         _logger.info(f"TERMINANDO DE ASIGNAR DETALLES detalles: {detalles}")
 
@@ -765,11 +793,15 @@ class IntegracionWIS(models.Model):
             "detalles": detalles,
         }
 
-        if tipo == 'FINT' and vals.wms_nro_caja:
+        if es_fint_con_cajas:
+            # Una línea de LPN por cada paquete del picking (wms_nro_caja = nombres separados por
+            # coma). Los detalles de los productos empaquetados ya NO van en `pedido["detalles"]`:
+            # viajan como cajas acá. `detalles` queda vacío si todo estaba empaquetado.
+            cajas = [c.strip() for c in vals.wms_nro_caja.split(',') if c.strip()]
             pedido["lpns"] = [{
-                "idExterno": vals.wms_nro_caja,
+                "idExterno": caja,
                 "tipo": "FINTEMP",
-            }]
+            } for caja in cajas]
 
         pedidos = [pedido]
 

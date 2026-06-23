@@ -64,8 +64,8 @@
 
                         <group string="Configuración de envío">
                             <group>
-                                <field name="wms_nro_caja"
-                                       help="Solo para pedidos FINT. Si se completa, el WMS preparará esa caja específica (LPN tipo FINTEMP)."/>
+                                <field name="wms_nro_caja" readonly="1"
+                                       help="Solo para pedidos FINT. Se autocompleta con los paquetes ('Poner en paquete') del picking; cada caja se envía al WMS como LPN tipo FINTEMP."/>
                                 <field name="wms_lpns_enviados" readonly="1"
                                        invisible="not wis_enviar_lpns"/>
                             </group>
