@@ -34,11 +34,14 @@ class StockPicking(models.Model):
             old_quantity = move_line.product_uom_qty
             quantity_difference = float(new_quantity) - old_quantity
             
+            # Solo se ajusta la DEMANDA (`product_uom_qty`). NO se escribe `quantity`: estas
+            # operaciones tienen reserva MANUAL (WIS es la fuente de verdad de lo recibido/
+            # preparado), así que sugerir/reservar cantidad automáticamente al editar la
+            # distribución no es el comportamiento esperado.
             move_line.with_context(do_not_propagate=True, no_recompute=True).write({
                 'product_uom_qty': float(new_quantity),
-                'quantity': float(new_quantity),
             })
-            
+
             purchase_line = move_line.purchase_line_id
             surplus_updated = False
             
@@ -71,65 +74,77 @@ class StockPicking(models.Model):
             return {'error': str(e)}
 
     def update_transfer_picking(self, purchase_order, purchase_line, quantity_difference, current_picking):
-        
+        """Propaga la nueva demanda HACIA ARRIBA por TODA la cadena interna del crossdock.
+
+        La cadena tiene varios eslabones internos que se alimentan en cascada (cada uno sale de
+        la ubicación destino del anterior), p.ej. en 4 pasos:
+            Intermedio(Entrada→Salida) → Crosspick(Salida→Tránsito) → Recepción-destino(Tránsito→Existencias)
+        Se sube nivel por nivel (buscando el picking cuyo `location_dest_id` == origen del eslabón
+        ya visitado) hasta llegar a la Entrada. El feeder de la Entrada (la recepción del proveedor)
+        y el sobrante NO se tocan acá: se excluyen por `location_id.usage != 'internal'` y el corte
+        en la ubicación de Entrada (el sobrante lo maneja `_update_surplus_picking_quantity`).
+
+        Antes solo subía UN nivel, por lo que en cadenas de 4 pasos el Intermedio quedaba con la
+        demanda vieja. Además solo se ajusta la DEMANDA (`product_uom_qty`), nunca `quantity`:
+        estas operaciones tienen reserva MANUAL.
+        """
         try:
             if not current_picking.location_id:
                 _logger.warning("El picking actual no tiene location_id")
                 return False
 
-            crossdocking_location = current_picking.location_id
-            
-          
-            transfer_pickings = purchase_order.picking_ids.filtered(
-                lambda p: (
-                    p.location_dest_id.id == crossdocking_location.id
-                )
-            )
-            
-            if transfer_pickings:
-                _logger.info(f"Encontrados {len(transfer_pickings)} pickings candidatos: {transfer_pickings.mapped('name')}")
-            else:
-                _logger.warning(f"No se encontraron pickings de transferencia que salgan desde {crossdocking_location.name}")
-                return False
-            
+            entrance_location = purchase_order._get_or_create_entrance_location()
             updated = False
-            
-            for transfer_picking in transfer_pickings:
-                transfer_move = transfer_picking.move_ids_without_package.filtered(
-                    lambda m: m.purchase_line_id.id == purchase_line.id
-                )
-                
-                if not transfer_move:
-                    _logger.info(f"Picking {transfer_picking.name} no contiene el producto {purchase_line.product_id.name}")
+            visited = set()
+            # Cola de ubicaciones cuyo picking "feeder" (el que deja stock ahí) hay que actualizar.
+            pendientes = [current_picking.location_id.id]
+
+            while pendientes:
+                loc_id = pendientes.pop()
+                if loc_id in visited or loc_id == entrance_location.id:
                     continue
-                
-                if len(transfer_move) > 1:
-                    transfer_move = transfer_move[0]
-                
-                old_transfer_quantity = transfer_move.product_uom_qty
-                new_transfer_quantity = old_transfer_quantity + quantity_difference
-                
-                if new_transfer_quantity < 0:
-                    _logger.warning(f"Cantidad negativa detectada ({new_transfer_quantity}), ajustando a 0")
-                    new_transfer_quantity = 0
-                
-                original_state = transfer_picking.state
-                
-                _logger.info(f"Actualizando {transfer_picking.name}: {old_transfer_quantity} → {new_transfer_quantity}")
-                
-                transfer_move.with_context(do_not_propagate=True, no_recompute=True).write({
-                    'product_uom_qty': new_transfer_quantity,
-                    'quantity': new_transfer_quantity,
-                })
-                
-                if transfer_picking.state != original_state:
-                    transfer_picking.write({'state': original_state})
-                
-                updated = True
-                _logger.info(f"Picking {transfer_picking.name} actualizado correctamente")
-            
+                visited.add(loc_id)
+
+                transfer_pickings = purchase_order.picking_ids.filtered(
+                    lambda p: p.location_dest_id.id == loc_id
+                    and p.id != current_picking.id
+                    and p.location_id.usage == 'internal'  # excluye la recepción del proveedor
+                )
+                if not transfer_pickings:
+                    continue
+
+                for transfer_picking in transfer_pickings:
+                    transfer_move = transfer_picking.move_ids_without_package.filtered(
+                        lambda m: m.purchase_line_id.id == purchase_line.id
+                    )
+                    if not transfer_move:
+                        _logger.info(f"Picking {transfer_picking.name} no contiene el producto {purchase_line.product_id.name}")
+                        continue
+                    if len(transfer_move) > 1:
+                        transfer_move = transfer_move[0]
+
+                    old_transfer_quantity = transfer_move.product_uom_qty
+                    new_transfer_quantity = old_transfer_quantity + quantity_difference
+                    if new_transfer_quantity < 0:
+                        _logger.warning(f"Cantidad negativa detectada ({new_transfer_quantity}), ajustando a 0")
+                        new_transfer_quantity = 0
+
+                    original_state = transfer_picking.state
+                    _logger.info(f"Actualizando {transfer_picking.name}: {old_transfer_quantity} → {new_transfer_quantity}")
+
+                    # SOLO demanda; NO `quantity` (reserva MANUAL en estas operaciones).
+                    transfer_move.with_context(do_not_propagate=True, no_recompute=True).write({
+                        'product_uom_qty': new_transfer_quantity,
+                    })
+                    if transfer_picking.state != original_state:
+                        transfer_picking.write({'state': original_state})
+
+                    updated = True
+                    # Subir un eslabón más: el feeder de ESTE picking sale de su ubicación de origen.
+                    pendientes.append(transfer_picking.location_id.id)
+
             return updated
-            
+
         except Exception as e:
             _logger.error(f"Error al actualizar picking de transferencia: {str(e)}")
             import traceback
@@ -175,9 +190,9 @@ class StockPicking(models.Model):
                         new_surplus_quantity = 0
                     
                     original_state = surplus_picking.state
+                    # SOLO demanda; NO `quantity` (reserva MANUAL).
                     surplus_move.with_context(do_not_propagate=True, no_recompute=True).write({
                         'product_uom_qty': new_surplus_quantity,
-                        'quantity': new_surplus_quantity,
                     })
                     
                     if surplus_picking.state != original_state:

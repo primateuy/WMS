@@ -565,22 +565,40 @@ Body: {body_str[:500]}"""
         """
         if not pick.group_id or not pick.location_id:
             return False
-        predecesores = request.env['stock.picking'].sudo().search([
+        Picking = request.env['stock.picking'].sudo()
+        predecesores = Picking.search([
             ('group_id', '=', pick.group_id.id),
             ('location_dest_id', '=', pick.location_id.id),
             ('state', '=', 'done'),
             ('id', '!=', pick.id),
         ], order='id')
-        if not predecesores:
-            return False
-        # producto -> [(paquete, cantidad en ese paquete en el origen), ...] (de TODAS las cajas).
+        # producto -> [(paquete, cantidad, ubicacion_real_del_paquete), ...] (de TODAS las cajas).
         por_producto = {}
         for pred in predecesores:
             for ml in pred.move_line_ids:
                 if ml.location_dest_id.id != pick.location_id.id or not ml.result_package_id:
                     continue
                 por_producto.setdefault(ml.product_id.id, []).append(
-                    (ml.result_package_id, ml.quantity))
+                    (ml.result_package_id, ml.quantity, ml.location_dest_id))
+        # FALLBACK por GAP de ubicación en la cadena: si NINGÚN predecesor adyacente aportó
+        # paquetes (el origen de este crosspick NO coincide con la ubicación donde el paso
+        # anterior dejó la caja — típico del crossdock de 4 pasos: el intermedio deposita el
+        # paquete en "Salida Sucursal" pero el crosspick salía de otra "Salida"), se buscan los
+        # predecesores `done` del MISMO `group_id` SIN exigir adyacencia y se trae el paquete
+        # desde donde realmente quedó (`ml.location_dest_id`). El move del crosspick se reasigna
+        # para salir de esa ubicación. Sin esto el crosspick quedaba `confirmed` (no se validaba)
+        # porque `action_assign` no encontraba el stock empaquetado en la otra Salida.
+        if not por_producto:
+            for pred in Picking.search([
+                ('group_id', '=', pick.group_id.id),
+                ('state', '=', 'done'),
+                ('id', '!=', pick.id),
+            ], order='id'):
+                for ml in pred.move_line_ids:
+                    if not ml.result_package_id:
+                        continue
+                    por_producto.setdefault(ml.product_id.id, []).append(
+                        (ml.result_package_id, ml.quantity, ml.location_dest_id))
         if not por_producto:
             return False
         SML = request.env['stock.move.line'].sudo()
@@ -593,13 +611,19 @@ Body: {body_str[:500]}"""
                 continue
             move.move_line_ids.unlink()
             restante = move.product_uom_qty
-            for paquete, qty in fuentes:
+            for paquete, qty, src_loc in fuentes:
                 if restante <= 0:
                     break
                 aplicar = min(qty, restante)
                 if aplicar <= 0:
                     continue
                 restante -= aplicar
+                # Gap de cadena: si el paquete quedó en una ubicación distinta al origen del move,
+                # reasignar el origen del move a donde está el paquete (sino el move no tendría
+                # stock en su origen y la validación fallaría).
+                if src_loc and src_loc.id != move.location_id.id:
+                    move.with_context(skip_wms_integration=True).write({'location_id': src_loc.id})
+                origen_id = src_loc.id if src_loc else move.location_id.id
                 # Un `stock.package_level` por paquete para que el paquete aparezca en el LISTADO
                 # de paquetes del picking (operación de paquete completo), no solo en las líneas.
                 pl = pl_por_paquete.get(paquete.id)
@@ -616,7 +640,7 @@ Body: {body_str[:500]}"""
                     'picking_id': pick.id,
                     'product_id': move.product_id.id,
                     'product_uom_id': move.product_uom.id,
-                    'location_id': move.location_id.id,
+                    'location_id': origen_id,
                     'location_dest_id': move.location_dest_id.id,
                     'quantity': aplicar,
                     'qty_done': aplicar,
