@@ -86,6 +86,12 @@ Body: {body_str[:500]}"""
             # NumeroInterfazEjecucion va en el payload raíz; lo dejamos accesible a los handlers
             # (lo usa la auditoría de anulaciones parciales). El controller se instancia por request.
             self._wis_numero_interfaz = numero_interfaz
+            # Proceso/código actuales: los inyecta `_ilog` en cada wms.integracion.log para que
+            # TODO log quede identificable por proceso + codigo_unico (no solo por picking_id,
+            # cuyo `name` puede renombrarse en la cadena crossdock). Cada handler refina
+            # `_wis_codigo_actual` con el código concreto que está procesando.
+            self._wis_evento_actual = event_id
+            self._wis_codigo_actual = self._extraer_codigo_wis(raw_data)
             handler(handler_data)
             response = {'status': 200}
             self._create_log(payload, response, event_id, 'exito', numero_interfaz)
@@ -180,6 +186,15 @@ Body: {body_str[:500]}"""
             else:
                 walk(fuente)
         return ', '.join(encontrados)
+
+    def _ilog(self, vals):
+        """Crea un `wms.integracion.log` inyectando `proceso` (evento WIS en curso) y
+        `codigo_unico` cuando el call-site no los pasó explícitamente. Así cada log queda
+        identificable por proceso + código, además del `picking_id`. El call-site puede
+        sobrescribir ambos pasándolos en `vals` (p.ej. el código de una referencia puntual)."""
+        vals.setdefault('proceso', getattr(self, '_wis_evento_actual', '') or '')
+        vals.setdefault('codigo_unico', getattr(self, '_wis_codigo_actual', '') or '')
+        return request.env['wms.integracion.log'].sudo().create(vals)
 
     def _create_log(self, data, respuesta, tipo, estado='exito', numero_interfaz=0):
         try:
@@ -282,7 +297,7 @@ Body: {body_str[:500]}"""
                     numero_referencia,
                     pickings_todos.mapped('name'),
                 )
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'warning',
                     'modelo': 'stock.picking',
@@ -302,7 +317,7 @@ Body: {body_str[:500]}"""
                     "[WIS] confirmacionRecepcion | Múltiples pickings activos con codigo_unico='%s': %s",
                     numero_referencia, nombres,
                 )
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'error',
                     'modelo': 'stock.picking',
@@ -511,7 +526,7 @@ Body: {body_str[:500]}"""
                     subtype_xmlid='mail.mt_note',
                 )
 
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'info',
                     'modelo': 'stock.picking',
@@ -536,7 +551,7 @@ Body: {body_str[:500]}"""
                 errores.append(f"Error en referencia '{numero_referencia}': {str(e)}")
 
         if errores:
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
                 'modelo': 'stock.picking',
@@ -589,11 +604,12 @@ Body: {body_str[:500]}"""
         # para salir de esa ubicación. Sin esto el crosspick quedaba `confirmed` (no se validaba)
         # porque `action_assign` no encontraba el stock empaquetado en la otra Salida.
         if not por_producto:
-            for pred in Picking.search([
+            predecesores = Picking.search([
                 ('group_id', '=', pick.group_id.id),
                 ('state', '=', 'done'),
                 ('id', '!=', pick.id),
-            ], order='id'):
+            ], order='id')
+            for pred in predecesores:
                 for ml in pred.move_line_ids:
                     if not ml.result_package_id:
                         continue
@@ -830,7 +846,7 @@ Body: {body_str[:500]}"""
                     "[WIS] confirmacionPedido | Múltiples pickings con codigo_unico='%s': %s",
                     nombre_pedido, nombres,
                 )
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'error',
                     'modelo': 'stock.picking',
@@ -964,7 +980,7 @@ Body: {body_str[:500]}"""
                     peso_total,
                 )
 
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'info',
                     'modelo': 'stock.picking',
@@ -994,7 +1010,7 @@ Body: {body_str[:500]}"""
                 errores.append(f"Error en picking '{nombre_pedido}': {str(e)}")
 
         if errores:
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
                 'modelo': 'stock.picking',
@@ -1043,7 +1059,7 @@ Body: {body_str[:500]}"""
                 "[WIS] %s | error emitiendo eRemito para picking=%s",
                 origen or 'eRemito', picking.name,
             )
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'warning',
                 'modelo': 'stock.picking',
@@ -1411,7 +1427,7 @@ Body: {body_str[:500]}"""
                     "no tiene metodo_preparacion_wis. Se omite.",
                     picking.name, picking.picking_type_id.name,
                 )
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'warning',
                     'modelo': 'stock.picking',
@@ -1561,7 +1577,7 @@ Body: {body_str[:500]}"""
                     _logger.warning(
                         "[WIS] confirmacionMercaderiaPreparada | picking=%s NO se validó: %s",
                         picking.name, error_validacion)
-                    request.env['wms.integracion.log'].sudo().create({
+                    self._ilog({
                         'fecha': fields.Datetime.now(),
                         'nivel': 'error',
                         'modelo': 'stock.picking',
@@ -1583,7 +1599,7 @@ Body: {body_str[:500]}"""
                     picking.name, fecha_preparacion,
                 )
 
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'info',
                     'modelo': 'stock.picking',
@@ -1650,7 +1666,7 @@ Body: {body_str[:500]}"""
                 _logger.exception(
                     "[WIS] conciliar_anulados | error conciliando %s: %s", codigo, e
                 )
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'error',
                     'modelo': 'stock.picking',
@@ -1738,7 +1754,7 @@ Body: {body_str[:500]}"""
                     "metodo_cancelacion_wis. Se omite.",
                     picking.name, picking.picking_type_id.name,
                 )
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'warning',
                     'modelo': 'stock.picking',
@@ -1756,7 +1772,7 @@ Body: {body_str[:500]}"""
                 errores.append(
                     f"Picking '{picking.name}' ya fue validado (done), no se puede anular."
                 )
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'error',
                     'modelo': 'stock.picking',
@@ -1805,7 +1821,7 @@ Body: {body_str[:500]}"""
                 errores.append(f"Error en picking '{nombre_pedido}': {str(e)}")
 
         if errores:
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
                 'modelo': 'stock.picking',
@@ -1825,7 +1841,7 @@ Body: {body_str[:500]}"""
     def _log_anulacion_error(self, picking, msg, pedido_data):
         """Registra un error de línea de anulación (VAL-02/VAL-03) sin abortar el pedido."""
         _logger.warning("[WIS] pedidosAnulados | %s", msg)
-        request.env['wms.integracion.log'].sudo().create({
+        self._ilog({
             'fecha': fields.Datetime.now(),
             'nivel': 'error',
             'modelo': 'stock.picking',
@@ -1855,7 +1871,7 @@ Body: {body_str[:500]}"""
                 f"<td style='padding:4px 8px;'>{aplicacion}</td>"
                 f"</tr>"
             )
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'warning',
                 'modelo': 'stock.picking',
@@ -1903,7 +1919,7 @@ Body: {body_str[:500]}"""
 
         _logger.warning("Picking %s ANULADO (total) por WMS. Motivo: %s", picking.name, motivo)
 
-        request.env['wms.integracion.log'].sudo().create({
+        self._ilog({
             'fecha': fields.Datetime.now(),
             'nivel': 'warning',
             'modelo': 'stock.picking',
@@ -2044,7 +2060,7 @@ Body: {body_str[:500]}"""
             subtype_xmlid='mail.mt_note',
         )
 
-        request.env['wms.integracion.log'].sudo().create({
+        self._ilog({
             'fecha': fields.Datetime.now(),
             'nivel': 'warning',
             'modelo': 'stock.picking',
@@ -2124,7 +2140,7 @@ Body: {body_str[:500]}"""
             if not producto:
                 msg = f"ajustes: producto codigo_unico='{cod_producto}' no encontrado."
                 _logger.error("[WIS] %s", msg)
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'error',
                     'modelo': 'product.product',
@@ -2181,7 +2197,7 @@ Body: {body_str[:500]}"""
                     f"integracion_wis. Ajuste NumeroAjusteStock={nro_ajuste} sin procesar."
                 )
                 _logger.error("[WIS] %s", msg)
-                request.env['wms.integracion.log'].sudo().create({
+                self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'error',
                     'modelo': 'integracion_wis.integracion_wis',
@@ -2230,7 +2246,7 @@ Body: {body_str[:500]}"""
                     f"Ajuste {producto.display_name} ({nro_ajuste}): {str(e)}"
                 )
 
-        request.env['wms.integracion.log'].sudo().create({
+        self._ilog({
             'fecha': fields.Datetime.now(),
             'nivel': 'info' if not errores else 'warning',
             'modelo': 'integracion_wis.integracion_wis',
@@ -2299,7 +2315,7 @@ Body: {body_str[:500]}"""
             })
             quant.sudo().action_apply_inventory()
 
-        request.env['wms.integracion.log'].sudo().create({
+        self._ilog({
             'fecha': fields.Datetime.now(),
             'nivel': 'info',
             'modelo': 'stock.quant',
@@ -2416,7 +2432,7 @@ Body: {body_str[:500]}"""
             )
             backorder_wiz.process_cancel_backorder()
 
-        request.env['wms.integracion.log'].sudo().create({
+        self._ilog({
             'fecha': fields.Datetime.now(),
             'nivel': 'info',
             'modelo': 'stock.picking',
@@ -2462,6 +2478,9 @@ Body: {body_str[:500]}"""
         if not detalles:
             raise ValueError(f"Almacenamiento '{serializado}' sin detalles.")
 
+        # Todos los logs de este almacenamiento se identifican por el código de la recepción.
+        self._wis_codigo_actual = serializado
+
         # Paso 1: buscar picking de recepción
         # Excluir 'no_integrado' (operaciones internas que comparten el código del paso
         # WIS anterior): el almacenamiento debe resolver al picking que integra.
@@ -2476,7 +2495,7 @@ Body: {body_str[:500]}"""
         if not picking_imp:
             msg = f"almacenamiento: no se encontró picking de recepción para '{serializado}'."
             _logger.error("[WIS] %s", msg)
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
                 'modelo': 'stock.picking',
@@ -2494,7 +2513,7 @@ Body: {body_str[:500]}"""
                 f"state='{picking_imp.state}', se espera 'done'."
             )
             _logger.error("[WIS] %s", msg)
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
                 'modelo': 'stock.picking',
@@ -2512,28 +2531,52 @@ Body: {body_str[:500]}"""
         # se propaga toda la cadena IMPO→INT.
         group = picking_imp.group_id
         purchase = picking_imp.purchase_id  # solo para mensajes de log
+        Picking = request.env['stock.picking'].sudo()
+        cod_ref = picking_imp.codigo_unico
+        loc_dest = picking_imp.location_dest_id.id
 
-        # Lookup PRIMARIO: por group_id (procurement group). Se propaga toda la cadena
-        # IMPO→INT en compras y en recepciones de tienda por ruta. Si hay más de uno, el de
-        # mayor ID (spec 5.4 paso 2).
+        # Lookup PRIMARIO: por group_id + `codigo_unico` de la recepción. Contrastar el código
+        # es CRÍTICO en crossdock: el mismo procurement group contiene los crosspicks de otros
+        # pedidos (con código W-P-… propio) que arrancan en la MISMA ubicación de Entrada, así
+        # que filtrar solo por group_id + ubicación agarraba un crosspick ajeno y el log del
+        # almacenamiento terminaba en un picking de otro código. Se incluye 'done' porque el
+        # almacenamiento puede llegar después de que la cascada validó el interno; el código
+        # garantiza que es el picking correcto.
         picking_int = request.env['stock.picking']
-        if group:
-            picking_int = request.env['stock.picking'].sudo().search([
+        if group and cod_ref:
+            picking_int = Picking.search([
+                ('group_id', '=', group.id),
+                ('picking_type_id.code', '=', 'internal'),
+                ('codigo_unico', '=', cod_ref),
+                ('location_id', '=', loc_dest),
+            ], order='id desc')[:1]
+
+        # FALLBACK por cadena de movimientos (move_dest) contrastando el código: en flujos por
+        # ruta (ej. recepción desde tiendas) la recepción está encadenada al INT aunque el
+        # group_id no se haya propagado.
+        if not picking_int and cod_ref:
+            picking_int = picking_imp.move_ids.move_dest_ids.picking_id.filtered(
+                lambda p: p.picking_type_id.code == 'internal'
+                and p.codigo_unico == cod_ref
+                and p.location_id.id == loc_dest
+            ).sorted('id')[-1:]
+
+        # FALLBACK SIN código: cuando el interno no adquirió `codigo_unico` (ej. flujos donde la
+        # propagación aún no corrió). Se mantiene el criterio histórico por group_id/cadena en
+        # estados ABIERTOS únicamente (sin 'done') para no agarrar un interno ajeno ya validado.
+        if not picking_int and group:
+            picking_int = Picking.search([
                 ('group_id', '=', group.id),
                 ('picking_type_id.code', '=', 'internal'),
                 ('state', 'in', ('waiting', 'confirmed', 'assigned')),
-                ('location_id', '=', picking_imp.location_dest_id.id),
+                ('location_id', '=', loc_dest),
             ], order='id desc')[:1]
 
-        # Spec 3 — FALLBACK por la cadena de movimientos (move_dest): en flujos por ruta
-        # (ej. recepción desde tiendas) la recepción RECV está encadenada al INT aunque el
-        # group_id no se haya propagado / esté vacío. No aplica a compras (moves make_to_stock
-        # sin move_dest) → no cambia ese flujo, solo agrega cobertura.
         if not picking_int:
             picking_int = picking_imp.move_ids.move_dest_ids.picking_id.filtered(
                 lambda p: p.picking_type_id.code == 'internal'
                 and p.state in ('waiting', 'confirmed', 'assigned')
-                and p.location_id.id == picking_imp.location_dest_id.id
+                and p.location_id.id == loc_dest
             ).sorted('id')[-1:]
 
         if not picking_int:
@@ -2544,7 +2587,7 @@ Body: {body_str[:500]}"""
                 f"cadena de movimientos."
             )
             _logger.error("[WIS] %s", msg)
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
                 'modelo': 'stock.picking',
@@ -2554,6 +2597,29 @@ Body: {body_str[:500]}"""
                 'detalle': f"Grupo: {group.name if group else '(vacío)'} | Recepción: {picking_imp.name}",
             })
             raise ValueError(msg)
+
+        # Si el interno correcto (mismo codigo_unico) ya fue validado por la cascada antes de
+        # llegar el almacenamiento, NO se re-procesan cantidades ni se re-valida: solo se registra
+        # el log en el picking CORRECTO (identificado por código), para dejar traza sin efectos.
+        if picking_int.state == 'done':
+            _logger.info(
+                "[WIS] almacenamiento | picking interno %s (codigo_unico=%s) ya estaba 'done'; "
+                "se registra el log sin re-procesar.", picking_int.name, picking_int.codigo_unico,
+            )
+            self._ilog({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'info',
+                'modelo': 'stock.picking',
+                'texto': (
+                    f"almacenamiento: picking interno {picking_int.name} ya validado "
+                    f"(recepción origen: {picking_imp.name}); log registrado sin re-procesar."
+                ),
+                'picking_id': picking_int.id,
+                'resultado': 'exito',
+                'detalle': f"State: done | Código: {picking_int.codigo_unico or '—'}",
+                'payload_webhook': json.dumps(data, ensure_ascii=False, indent=2),
+            })
+            return
 
         # Paso 3: mapear cantidades por producto y asignar lotes/vencimientos
         cant_por_codigo = {}
@@ -2686,7 +2752,7 @@ Body: {body_str[:500]}"""
                 "[WIS] almacenamiento | error al validar picking interno %s: %s",
                 picking_int.name, e,
             )
-            request.env['wms.integracion.log'].sudo().create({
+            self._ilog({
                 'fecha': fields.Datetime.now(),
                 'nivel': 'error',
                 'modelo': 'stock.picking',
@@ -2700,7 +2766,7 @@ Body: {body_str[:500]}"""
             })
             raise
 
-        request.env['wms.integracion.log'].sudo().create({
+        self._ilog({
             'fecha': fields.Datetime.now(),
             'nivel': 'info',
             'modelo': 'stock.picking',

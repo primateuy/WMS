@@ -5,6 +5,8 @@
     <field name="arch" type="xml">
       <tree>
         <field name="fecha"/>
+        <field name="proceso"/>
+        <field name="codigo_unico"/>
         <field name="picking_id"/>
         <field name="resultado"/>
         <field name="detalle"/>
@@ -19,6 +21,8 @@
       <form string="Log de Integración WMS">
         <group>
           <field name="fecha"/>
+          <field name="proceso"/>
+          <field name="codigo_unico"/>
           <field name="picking_id"/>
           <field name="resultado"/>
           <field name="detalle"/>

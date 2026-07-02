@@ -413,6 +413,8 @@ class StockPicking(models.Model):
                 'fecha': fields.Datetime.now(),
                 'nivel': nivel,
                 'modelo': 'stock.picking',
+                'proceso': 'envio',
+                'codigo_unico': codigo or self.codigo_unico or '',
                 'texto': texto,
                 'picking_id': self.id,
                 'resultado': resultado,

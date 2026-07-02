@@ -19,7 +19,13 @@ class WMSIntegracionLog(models.Model):
     
     modelo = fields.Char(string='Módulo/Modelo', required=True)
     texto = fields.Text(string='Detalle del Log', required=True)
-    
+
+    # Código WMS (codigo_unico) y proceso que originó el log. Permiten identificar/agrupar
+    # los logs por código y por evento WIS de forma independiente al picking_id (cuyo `name`
+    # puede renombrarse en la cadena crossdock) y al texto libre.
+    codigo_unico = fields.Char(string='Código WMS', index=True)
+    proceso = fields.Char(string='Proceso WIS', index=True)
+
     picking_id = fields.Many2one('stock.picking', string='Picking', ondelete='cascade')
     resultado = fields.Selection([
         ('exito', 'Éxito'),

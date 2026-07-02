@@ -793,6 +793,111 @@ def test_almacenamiento_basico(rpc, base_url):
     return f"picking interno {pick_int} validado por almacenamiento"
 
 
+def test_almacenamiento_no_confunde_crosspick_de_otro_codigo(rpc, base_url):
+    """Regresión: en crossdock el mismo procurement group contiene crosspicks de OTROS
+    pedidos (código W-P-…) que arrancan en la MISMA ubicación de Entrada. El almacenamiento
+    de la recepción (código W-R-…) NO debe caer en el crosspick ajeno: debe resolver el
+    interno cuyo `codigo_unico` coincide con el de la recepción, y el log debe quedar ahí."""
+    ts = int(time.time() * 1000)
+    parent = rpc.ref("stock.stock_location_locations")
+    loc_in = rpc.create("stock.location", {
+        "name": f"Entrada AlmaX E2E {ts}", "usage": "internal", "location_id": parent,
+    })
+    wh = rpc.search_read("stock.warehouse", [], ["id"], 1)[0]["id"]
+    pt_imp = rpc.create("stock.picking.type", {
+        "name": "E2E RecepX Test", "code": "incoming",
+        "sequence_code": f"E2EAXR{ts % 100000}/",
+        "default_location_dest_id": loc_in, "warehouse_id": wh,
+    })
+    pt_int = rpc.create("stock.picking.type", {
+        "name": f"E2E InternoX Test {ts}", "code": "internal",
+        "sequence_code": f"E2EAXI{ts % 100000}/",
+        "default_location_src_id": loc_in,
+        "default_location_dest_id": rpc.ref("stock.stock_location_stock"),
+        "warehouse_id": wh,
+    })
+    prod_id = rpc.create("product.product", {
+        "name": "E2E Prod AlmaX", "type": "product", "codigo_unico": f"E2E-ALMX-{ts}",
+    })
+    uom = rpc.read("product.product", [prod_id], ["uom_id"])[0]["uom_id"][0]
+    partner_id = rpc.create("res.partner", {
+        "name": "E2E Vendor AlmaX", "codigo_unico_proveedor": f"PRO-EX-{ts}",
+    })
+    codigo_rec = f"W-R-E2EX-{ts}"          # recepción (el Serializado del almacenamiento)
+    codigo_ped = f"W-P-E2EX-{ts}"          # crosspick de OTRO pedido, mismo grupo
+    group_id = rpc.create("procurement.group", {
+        "name": f"E2E-ALMX-{ts}", "partner_id": partner_id,
+    })
+
+    # Recepción (código W-R-), valida y deja stock en loc_in.
+    pick_imp = rpc.create("stock.picking", {
+        "picking_type_id": pt_imp,
+        "location_id": rpc.ref("stock.stock_location_suppliers"),
+        "location_dest_id": loc_in, "partner_id": partner_id,
+        "codigo_unico": codigo_rec, "group_id": group_id, "wms_estado": "enviado",
+    }, context={"skip_wms_integration": True})
+    rpc.create("stock.move", {
+        "name": "E2EX IMPO move", "picking_id": pick_imp, "product_id": prod_id,
+        "product_uom": uom, "product_uom_qty": 4,
+        "location_id": rpc.ref("stock.stock_location_suppliers"),
+        "location_dest_id": loc_in, "group_id": group_id,
+    }, context={"skip_wms_integration": True})
+    rpc.execute("stock.picking", "action_confirm", [pick_imp])
+    rpc.execute("stock.picking", "action_assign", [pick_imp])
+    for ml in rpc.search_read("stock.move.line", [["picking_id", "=", pick_imp]], ["id"]):
+        rpc.write("stock.move.line", [ml["id"]], {"quantity": 4})
+    rpc.execute("stock.picking", "button_validate", [pick_imp])
+
+    def _crear_interno(codigo):
+        p = rpc.create("stock.picking", {
+            "picking_type_id": pt_int, "location_id": loc_in,
+            "location_dest_id": rpc.ref("stock.stock_location_stock"),
+            "partner_id": partner_id, "group_id": group_id, "codigo_unico": codigo,
+            "wms_estado": "no_integrado",
+        }, context={"skip_wms_integration": True})
+        rpc.create("stock.move", {
+            "name": f"E2EX INT move {codigo}", "picking_id": p, "product_id": prod_id,
+            "product_uom": uom, "product_uom_qty": 4, "location_id": loc_in,
+            "location_dest_id": rpc.ref("stock.stock_location_stock"), "group_id": group_id,
+        }, context={"skip_wms_integration": True})
+        rpc.execute("stock.picking", "action_confirm", [p])
+        rpc.execute("stock.picking", "action_assign", [p])
+        return p
+
+    # El correcto (W-R-) se crea PRIMERO (id menor y reserva el stock); el crosspick ajeno
+    # (W-P-) se crea DESPUÉS con id MAYOR: el criterio viejo (order='id desc' sin código) lo
+    # habría agarrado. El fix debe elegir por codigo_unico, no por id.
+    pick_correcto = _crear_interno(codigo_rec)
+    pick_crosspick = _crear_interno(codigo_ped)
+
+    cod_prod = rpc.read("product.product", [prod_id], ["codigo_unico"])[0]["codigo_unico"]
+    res = post_webhook(base_url, {
+        "Id": "Almacenamiento",
+        "Almacenamiento": {
+            "Serializado": codigo_rec, "CodigoAgente": "PRO-EX",
+            "Detalles": [{"Producto": cod_prod, "CantidadAlmacenada": 4.0, "Identificador": "*"}],
+        },
+    })
+    assert res.get("status") == 200, res
+
+    st_ok = rpc.read("stock.picking", [pick_correcto], ["state"])[0]["state"]
+    st_cross = rpc.read("stock.picking", [pick_crosspick], ["state"])[0]["state"]
+    assert st_ok == "done", f"el interno correcto (W-R) debía validarse, vino '{st_ok}'"
+    assert st_cross != "done", f"el crosspick de OTRO código (W-P) NO debía tocarse, vino '{st_cross}'"
+
+    # El log del almacenamiento debe quedar en el picking correcto, identificado por código.
+    logs = rpc.search_read(
+        "wms.integracion.log",
+        [["codigo_unico", "=", codigo_rec], ["proceso", "=", "almacenamiento"],
+         ["resultado", "=", "exito"]],
+        ["picking_id"],
+    )
+    pids = [l["picking_id"][0] for l in logs if l["picking_id"]]
+    assert pick_correcto in pids, f"log de almacenamiento no quedó en el interno correcto; pids={pids}"
+    assert pick_crosspick not in pids, f"log de almacenamiento cayó en el crosspick ajeno; pids={pids}"
+    return f"almacenamiento resolvió {pick_correcto} (W-R) y NO tocó {pick_crosspick} (W-P)"
+
+
 # ============================================================ Tests Puntos 1-4 (mayo 2026)
 
 def _crear_pick_recepcion_minimo(rpc, codigo_unico, qty=2):
@@ -1098,6 +1203,7 @@ TESTS = [
     test_pedidos_anulados_basico,
     test_ajustes_movimiento,
     test_almacenamiento_basico,
+    test_almacenamiento_no_confunde_crosspick_de_otro_codigo,
     # Tests nuevos — Puntos 1-4 (mayo 2026)
     test_punto1_wis_location_panel_id_recepcion,
     test_punto2_wms_origen_recepcion_sin_location,
