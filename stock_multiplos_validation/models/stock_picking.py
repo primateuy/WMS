@@ -39,6 +39,12 @@ class StockPicking(models.Model):
 
     def action_assign(self):
         res = super().action_assign()
+        # Las operaciones dirigidas por WIS (cascada de crossdock, webhooks) mueven lo que WIS
+        # YA preparó/empaquetó físicamente; la cantidad real puede no ser múltiplo del pack (WIS
+        # es la fuente de verdad). El múltiplo se exige al DISTRIBUIR la demanda (UI), no al
+        # procesar lo ya preparado → se saltea el chequeo en el flujo WIS.
+        if self.env.context.get('skip_wms_integration'):
+            return res
         for picking in self:
             moves_problema = picking._moves_con_multiplo_incumplido()
             if moves_problema:
@@ -51,6 +57,9 @@ class StockPicking(models.Model):
         return res
 
     def button_validate(self):
+        # Ídem action_assign: el flujo WIS valida lo físicamente preparado, sin exigir múltiplo.
+        if self.env.context.get('skip_wms_integration'):
+            return super().button_validate()
         for picking in self:
             moves_problema = picking._moves_con_multiplo_incumplido()
             if not moves_problema:
