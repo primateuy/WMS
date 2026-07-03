@@ -2532,42 +2532,42 @@ Body: {body_str[:500]}"""
         group = picking_imp.group_id
         purchase = picking_imp.purchase_id  # solo para mensajes de log
         Picking = request.env['stock.picking'].sudo()
-        cod_ref = picking_imp.codigo_unico
         loc_dest = picking_imp.location_dest_id.id
+        # "Lo que se está enviando" = el código WIS del serializado. El interno de guardado adquiere
+        # el codigo_unico de la recepción, que normalmente ES el serializado; se contemplan ambos
+        # por si la recepción se resolvió por `name` (su código propio puede diferir del serializado).
+        codigos_match = [c for c in {serializado, picking_imp.codigo_unico} if c]
 
-        # Lookup PRIMARIO: por group_id + `codigo_unico` de la recepción. Contrastar el código
-        # es CRÍTICO en crossdock: el mismo procurement group contiene los crosspicks de otros
-        # pedidos (con código W-P-… propio) que arrancan en la MISMA ubicación de Entrada, así
-        # que filtrar solo por group_id + ubicación agarraba un crosspick ajeno y el log del
-        # almacenamiento terminaba en un picking de otro código. Se incluye 'done' porque el
-        # almacenamiento puede llegar después de que la cascada validó el interno; el código
-        # garantiza que es el picking correcto.
+        # Lookup PRIMARIO (garantía dura): el/los interno(s) cuyo `codigo_unico` ES el que se está
+        # enviando. El código MANDA sobre group_id/ubicación: en flujos ruteados el movimiento de
+        # guardado no siempre está en el mismo procurement group de la recepción ni arranca en su
+        # ubicación dest, así que esos NO se usan como filtro duro (agarraban el picking equivocado),
+        # solo para DESEMPATAR. Contrastar el código es lo que evita validar por error un crosspick
+        # de otro pedido (código W-P-…) o una operación de mercadería preparada. Incluye 'done'
+        # porque el almacenamiento puede llegar después de que la cascada validó el interno.
         picking_int = request.env['stock.picking']
-        if group and cod_ref:
-            picking_int = Picking.search([
-                ('group_id', '=', group.id),
+        if codigos_match:
+            candidatos = Picking.search([
                 ('picking_type_id.code', '=', 'internal'),
-                ('codigo_unico', '=', cod_ref),
-                ('location_id', '=', loc_dest),
-            ], order='id desc')[:1]
+                ('codigo_unico', 'in', codigos_match),
+                ('state', '!=', 'cancel'),
+            ], order='id desc')
+            if len(candidatos) > 1:
+                # Desempate: el movimiento de guardado real arranca en la Entrada de la recepción.
+                preferidos = candidatos.filtered(lambda p: p.location_id.id == loc_dest)
+                picking_int = (preferidos or candidatos)[:1]
+            else:
+                picking_int = candidatos[:1]
 
-        # FALLBACK por cadena de movimientos (move_dest) contrastando el código: en flujos por
-        # ruta (ej. recepción desde tiendas) la recepción está encadenada al INT aunque el
-        # group_id no se haya propagado.
-        if not picking_int and cod_ref:
-            picking_int = picking_imp.move_ids.move_dest_ids.picking_id.filtered(
-                lambda p: p.picking_type_id.code == 'internal'
-                and p.codigo_unico == cod_ref
-                and p.location_id.id == loc_dest
-            ).sorted('id')[-1:]
-
-        # FALLBACK SIN código: cuando el interno no adquirió `codigo_unico` (ej. flujos donde la
-        # propagación aún no corrió). Se mantiene el criterio histórico por group_id/cadena en
-        # estados ABIERTOS únicamente (sin 'done') para no agarrar un interno ajeno ya validado.
+        # FALLBACK SIN código: el interno aún no adquirió `codigo_unico` (propagación pendiente / E2E).
+        # Se RESTRINGE a internos sin código o con el de la recepción — NUNCA uno con código ajeno
+        # (W-P- de otro pedido) — para no validar por error una operación de mercadería preparada /
+        # despacho. Estados abiertos (sin 'done') para no tocar un interno ajeno ya validado.
         if not picking_int and group:
             picking_int = Picking.search([
                 ('group_id', '=', group.id),
                 ('picking_type_id.code', '=', 'internal'),
+                ('codigo_unico', 'in', [False, ''] + codigos_match),
                 ('state', 'in', ('waiting', 'confirmed', 'assigned')),
                 ('location_id', '=', loc_dest),
             ], order='id desc')[:1]
@@ -2575,6 +2575,7 @@ Body: {body_str[:500]}"""
         if not picking_int:
             picking_int = picking_imp.move_ids.move_dest_ids.picking_id.filtered(
                 lambda p: p.picking_type_id.code == 'internal'
+                and (not p.codigo_unico or p.codigo_unico in codigos_match)
                 and p.state in ('waiting', 'confirmed', 'assigned')
                 and p.location_id.id == loc_dest
             ).sorted('id')[-1:]

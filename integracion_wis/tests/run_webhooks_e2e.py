@@ -898,6 +898,100 @@ def test_almacenamiento_no_confunde_crosspick_de_otro_codigo(rpc, base_url):
     return f"almacenamiento resolvió {pick_correcto} (W-R) y NO tocó {pick_crosspick} (W-P)"
 
 
+def test_almacenamiento_no_valida_preparada_si_storage_sin_codigo(rpc, base_url):
+    """Regresión (caso reportado): el interno de guardado todavía NO adquirió su codigo_unico
+    (propagación pendiente) y en el MISMO grupo/ubicación hay una operación de mercadería
+    preparada (código W-P-) ABIERTA con id MAYOR. El almacenamiento debe validar el guardado
+    (sin código) y NO tocar la preparada ajena; el criterio viejo (order id desc) la validaba."""
+    ts = int(time.time() * 1000)
+    parent = rpc.ref("stock.stock_location_locations")
+    loc_in = rpc.create("stock.location", {
+        "name": f"Entrada AlmaZ E2E {ts}", "usage": "internal", "location_id": parent,
+    })
+    loc_prep = rpc.create("stock.location", {
+        "name": f"Prep AlmaZ E2E {ts}", "usage": "internal", "location_id": parent,
+    })
+    wh = rpc.search_read("stock.warehouse", [], ["id"], 1)[0]["id"]
+    pt_imp = rpc.create("stock.picking.type", {
+        "name": "E2E RecepZ Test", "code": "incoming",
+        "sequence_code": f"E2EAZR{ts % 100000}/",
+        "default_location_dest_id": loc_in, "warehouse_id": wh,
+    })
+    pt_int = rpc.create("stock.picking.type", {
+        "name": f"E2E InternoZ Test {ts}", "code": "internal",
+        "sequence_code": f"E2EAZI{ts % 100000}/",
+        "default_location_src_id": loc_in,
+        "default_location_dest_id": rpc.ref("stock.stock_location_stock"),
+        "warehouse_id": wh,
+    })
+    prod_id = rpc.create("product.product", {
+        "name": "E2E Prod AlmaZ", "type": "product", "codigo_unico": f"E2E-ALMZ-{ts}",
+    })
+    uom = rpc.read("product.product", [prod_id], ["uom_id"])[0]["uom_id"][0]
+    partner_id = rpc.create("res.partner", {
+        "name": "E2E Vendor AlmaZ", "codigo_unico_proveedor": f"PRO-EZ-{ts}",
+    })
+    codigo_rec = f"W-R-E2EZ-{ts}"
+    codigo_ped = f"W-P-E2EZ-{ts}"
+    group_id = rpc.create("procurement.group", {
+        "name": f"E2E-ALMZ-{ts}", "partner_id": partner_id,
+    })
+
+    # Recepción: 8 unidades a loc_in (alcanza para el guardado y la preparada).
+    pick_imp = rpc.create("stock.picking", {
+        "picking_type_id": pt_imp,
+        "location_id": rpc.ref("stock.stock_location_suppliers"),
+        "location_dest_id": loc_in, "partner_id": partner_id,
+        "codigo_unico": codigo_rec, "group_id": group_id, "wms_estado": "enviado",
+    }, context={"skip_wms_integration": True})
+    rpc.create("stock.move", {
+        "name": "E2EZ IMPO move", "picking_id": pick_imp, "product_id": prod_id,
+        "product_uom": uom, "product_uom_qty": 8,
+        "location_id": rpc.ref("stock.stock_location_suppliers"),
+        "location_dest_id": loc_in, "group_id": group_id,
+    }, context={"skip_wms_integration": True})
+    rpc.execute("stock.picking", "action_confirm", [pick_imp])
+    rpc.execute("stock.picking", "action_assign", [pick_imp])
+    for ml in rpc.search_read("stock.move.line", [["picking_id", "=", pick_imp]], ["id"]):
+        rpc.write("stock.move.line", [ml["id"]], {"quantity": 8})
+    rpc.execute("stock.picking", "button_validate", [pick_imp])
+
+    def _crear_interno(codigo, loc_dst, qty):
+        p = rpc.create("stock.picking", {
+            "picking_type_id": pt_int, "location_id": loc_in,
+            "location_dest_id": loc_dst, "partner_id": partner_id, "group_id": group_id,
+            "codigo_unico": codigo, "wms_estado": "no_integrado" if codigo else "sin_enviar",
+        }, context={"skip_wms_integration": True})
+        rpc.create("stock.move", {
+            "name": f"E2EZ INT move {codigo or 'sincod'}", "picking_id": p, "product_id": prod_id,
+            "product_uom": uom, "product_uom_qty": qty, "location_id": loc_in,
+            "location_dest_id": loc_dst, "group_id": group_id,
+        }, context={"skip_wms_integration": True})
+        rpc.execute("stock.picking", "action_confirm", [p])
+        rpc.execute("stock.picking", "action_assign", [p])
+        return p
+
+    # Guardado SIN código (propagación pendiente), id menor. Preparada W-P, id MAYOR y abierta.
+    pick_storage = _crear_interno(False, rpc.ref("stock.stock_location_stock"), 4)
+    pick_preparada = _crear_interno(codigo_ped, loc_prep, 4)
+
+    cod_prod = rpc.read("product.product", [prod_id], ["codigo_unico"])[0]["codigo_unico"]
+    res = post_webhook(base_url, {
+        "Id": "Almacenamiento",
+        "Almacenamiento": {
+            "Serializado": codigo_rec, "CodigoAgente": "PRO-EZ",
+            "Detalles": [{"Producto": cod_prod, "CantidadAlmacenada": 4.0, "Identificador": "*"}],
+        },
+    })
+    assert res.get("status") == 200, res
+
+    st_storage = rpc.read("stock.picking", [pick_storage], ["state"])[0]["state"]
+    st_prep = rpc.read("stock.picking", [pick_preparada], ["state"])[0]["state"]
+    assert st_storage == "done", f"el guardado (sin código) debía validarse, vino '{st_storage}'"
+    assert st_prep != "done", f"la mercaderia preparada (W-P) NO debía validarse, vino '{st_prep}'"
+    return f"almacenamiento validó guardado {pick_storage} y NO la preparada {pick_preparada} (W-P)"
+
+
 # ============================================================ Tests Puntos 1-4 (mayo 2026)
 
 def _crear_pick_recepcion_minimo(rpc, codigo_unico, qty=2):
@@ -1204,6 +1298,7 @@ TESTS = [
     test_ajustes_movimiento,
     test_almacenamiento_basico,
     test_almacenamiento_no_confunde_crosspick_de_otro_codigo,
+    test_almacenamiento_no_valida_preparada_si_storage_sin_codigo,
     # Tests nuevos — Puntos 1-4 (mayo 2026)
     test_punto1_wis_location_panel_id_recepcion,
     test_punto2_wms_origen_recepcion_sin_location,
