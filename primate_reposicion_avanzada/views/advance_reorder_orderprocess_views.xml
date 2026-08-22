@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="form_advance_reorder_orderprocess_primate" model="ir.ui.view">
+        <field name="name">advance.reorder.orderprocess.form.primate</field>
+        <field name="model">advance.reorder.orderprocess</field>
+        <field name="inherit_id" ref="setu_advance_reordering.form_advance_reorder_orderprocess"/>
+        <field name="arch" type="xml">
+            <xpath expr="//page[@name='reorder_product']/field[@name='computed_product_ids']" position="before">
+                <group>
+                    <group>
+                        <field name="product_category_ids" widget="many2many_tags"
+                               readonly="state != 'draft'"
+                               options="{'no_create': 1, 'no_create_edit': 1}"/>
+                        <field name="warehouse_group_ids" widget="many2many_tags"
+                               readonly="state != 'draft'"
+                               options="{'no_create': 1, 'no_create_edit': 1}"/>
+                    </group>
+                    <group>
+                        <field name="multiplo_rounding_method" readonly="state != 'draft'"/>
+                        <button name="action_load_products_by_category_and_group" type="object"
+                                string="Cargar por categoría y grupo"
+                                class="btn-secondary" icon="fa-plus"
+                                invisible="state != 'draft' or (not product_category_ids and not warehouse_group_ids)"/>
+                    </group>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>
