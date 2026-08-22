@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="form_advance_procurement_process_primate" model="ir.ui.view">
+        <field name="name">advance.procurement.process.form.primate</field>
+        <field name="model">advance.procurement.process</field>
+        <field name="inherit_id" ref="setu_advance_reordering.form_advance_procurement_process"/>
+        <field name="arch" type="xml">
+
+            <!-- Pestaña Productos: carga asistida por categoría y grupo -->
+            <xpath expr="//page[@name='procurement_product']/field[@name='product_ids']" position="before">
+                <group>
+                    <group>
+                        <field name="product_category_ids" widget="many2many_tags"
+                               readonly="state != 'draft'"
+                               options="{'no_create': 1, 'no_create_edit': 1}"/>
+                        <field name="warehouse_group_ids" widget="many2many_tags"
+                               readonly="state != 'draft'"
+                               options="{'no_create': 1, 'no_create_edit': 1}"/>
+                    </group>
+                    <group>
+                        <field name="multiplo_rounding_method" readonly="state != 'draft'"/>
+                        <button name="action_load_products_by_category_and_group" type="object"
+                                string="Cargar por categoría y grupo"
+                                class="btn-secondary" icon="fa-plus"
+                                invisible="state != 'draft' or (not product_category_ids and not warehouse_group_ids)"/>
+                    </group>
+                </group>
+            </xpath>
+
+            <!-- Pestaña Configuraciones: derivar almacenes destino del grupo -->
+            <xpath expr="//page[@name='procurement_configuration']/field[@name='config_ids']" position="before">
+                <group>
+                    <group>
+                        <field name="warehouse_group_ids" widget="many2many_tags"
+                               readonly="state != 'draft'"
+                               options="{'no_create': 1, 'no_create_edit': 1}"/>
+                    </group>
+                    <group>
+                        <button name="action_add_warehouses_from_groups" type="object"
+                                string="Agregar almacenes de los grupos"
+                                class="btn-secondary" icon="fa-plus"
+                                invisible="state != 'draft' or not warehouse_group_ids"/>
+                    </group>
+                </group>
+            </xpath>
+
+            <!-- Pestaña Cálculo de la demanda: estrategia + columnas de factibilidad -->
+            <xpath expr="//page[@name='procurement_lines']/field[@name='line_ids']" position="before">
+                <group string="Composición de las líneas">
+                    <group>
+                        <field name="count_executable"/>
+                        <field name="count_partial"/>
+                        <field name="count_impossible"/>
+                    </group>
+                    <group>
+                        <field name="count_no_demand"/>
+                        <field name="count_mismatch"/>
+                        <button name="action_open_lines" type="object"
+                                string="Ver líneas en lista aparte (con filtros)"
+                                class="btn-link" icon="fa-search"/>
+                    </group>
+                </group>
+                <group string="Criterio para las líneas a definir">
+                    <group>
+                        <field name="distribution_strategy"
+                               readonly="state in ['done', 'cancel']"/>
+                        <field name="strategy_warehouse_ids" widget="many2many_tags"
+                               invisible="distribution_strategy != 'por_prioridad_almacen'"
+                               options="{'no_create': 1, 'no_create_edit': 1}"/>
+                    </group>
+                    <group>
+                        <field name="multiplo_rounding_method"/>
+                        <button name="action_apply_distribution_strategy" type="object"
+                                string="Aplicar criterio" class="btn-primary" icon="fa-refresh"
+                                invisible="state in ['done', 'cancel'] or count_partial == 0"/>
+                        <button name="action_create_process_from_pending" type="object"
+                                string="Derivar lo pendiente a un proceso nuevo"
+                                class="btn-secondary" icon="fa-share"
+                                invisible="state in ['done', 'cancel'] or count_partial + count_impossible == 0"/>
+                    </group>
+                </group>
+            </xpath>
+
+            <xpath expr="//page[@name='procurement_lines']//tree//field[@name='demand_adjustment_qty']" position="after">
+                <field name="multiplo_distribucion" readonly="1" force_save="True" optional="show"/>
+                <field name="qty_adjusted" readonly="1" force_save="True" optional="show"/>
+                <field name="qty_available_fulfiller" readonly="1" force_save="True" optional="show"/>
+                <field name="qty_distributable" readonly="execution_status != 'partial'"/>
+                <field name="qty_shortfall" optional="show"/>
+                <field name="execution_status" readonly="1" force_save="True"
+                       decoration-success="execution_status == 'executable'"
+                       decoration-warning="execution_status == 'partial'"
+                       decoration-danger="execution_status == 'impossible'"/>
+                <field name="warehouse_group_mismatch" readonly="1" force_save="True" optional="show"/>
+            </xpath>
+
+            <xpath expr="//page[@name='procurement_lines']//tree" position="attributes">
+                <attribute name="decoration-muted">warehouse_group_mismatch</attribute>
+                <attribute name="decoration-success">execution_status == 'executable' and not warehouse_group_mismatch</attribute>
+                <attribute name="decoration-warning">execution_status == 'partial' and not warehouse_group_mismatch</attribute>
+                <attribute name="decoration-danger">execution_status == 'impossible' and not warehouse_group_mismatch</attribute>
+            </xpath>
+
+            <xpath expr="//page[@name='procurement_lines']//form//field[@name='demand_adjustment_qty']" position="after">
+                <field name="multiplo_distribucion"/>
+                <field name="qty_adjusted"/>
+                <field name="qty_available_fulfiller"/>
+                <field name="qty_distributable" readonly="execution_status != 'partial'"/>
+                <field name="execution_status"/>
+                <field name="warehouse_group_mismatch"/>
+            </xpath>
+
+        </field>
+    </record>
+
+    <!-- Lista y búsqueda propias: la lista embebida en el formulario no tiene barra de
+         búsqueda (limitación de Odoo para los One2many), así que los filtros viven acá. -->
+    <record id="tree_advance_procurement_process_line_primate" model="ir.ui.view">
+        <field name="name">advance.procurement.process.line.tree.primate</field>
+        <field name="model">advance.procurement.process.line</field>
+        <field name="arch" type="xml">
+            <tree string="Líneas de Reposición" create="false"
+                  decoration-muted="warehouse_group_mismatch"
+                  decoration-success="execution_status == 'executable' and not warehouse_group_mismatch"
+                  decoration-warning="execution_status == 'partial' and not warehouse_group_mismatch"
+                  decoration-danger="execution_status == 'impossible' and not warehouse_group_mismatch">
+                <field name="procurement_process_id" optional="hide"/>
+                <field name="product_id"/>
+                <field name="warehouse_id"/>
+                <field name="average_daily_sale" optional="hide"/>
+                <field name="demanded_qty"/>
+                <field name="multiplo_distribucion" optional="show"/>
+                <field name="qty_adjusted"/>
+                <field name="qty_available_fulfiller"/>
+                <field name="qty_distributable" readonly="execution_status != 'partial'"/>
+                <field name="qty_shortfall"/>
+                <field name="execution_status"/>
+                <field name="warehouse_group_mismatch" optional="show"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="search_advance_procurement_process_line_primate" model="ir.ui.view">
+        <field name="name">advance.procurement.process.line.search.primate</field>
+        <field name="model">advance.procurement.process.line</field>
+        <field name="arch" type="xml">
+            <search string="Líneas de Reposición">
+                <field name="product_id"/>
+                <field name="warehouse_id"/>
+                <filter name="filtro_a_definir" string="A definir criterio"
+                        domain="[('execution_status', '=', 'partial')]"/>
+                <filter name="filtro_ejecutable" string="Ejecutables"
+                        domain="[('execution_status', '=', 'executable')]"/>
+                <filter name="filtro_imposible" string="Sin ejecución"
+                        domain="[('execution_status', '=', 'impossible')]"/>
+                <separator/>
+                <filter name="filtro_con_demanda" string="Con demanda"
+                        domain="[('qty_adjusted', '>', 0)]"/>
+                <filter name="filtro_sin_demanda" string="Sin demanda"
+                        domain="[('qty_adjusted', '&lt;=', 0)]"/>
+                <filter name="filtro_recortadas" string="Recortadas"
+                        domain="[('qty_shortfall', '>', 0), ('qty_distributable', '>', 0)]"/>
+                <separator/>
+                <filter name="filtro_fuera_grupo" string="Fuera de grupo"
+                        domain="[('warehouse_group_mismatch', '=', True)]"/>
+                <group expand="0" string="Agrupar por">
+                    <filter name="group_estado" string="Estado" context="{'group_by': 'execution_status'}"/>
+                    <filter name="group_almacen" string="Almacén" context="{'group_by': 'warehouse_id'}"/>
+                    <filter name="group_producto" string="Producto" context="{'group_by': 'product_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+</odoo>
