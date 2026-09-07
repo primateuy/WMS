@@ -162,7 +162,7 @@ class ConciliacionMaestros(models.Model):
 
                 self._iniciar_conciliacion('códigos de barras')
 
-                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
                 if not datosAPI or not datosAPI.apiLink:
                     raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
@@ -260,7 +260,7 @@ class ConciliacionMaestros(models.Model):
 
                 self._iniciar_conciliacion('clientes')
 
-                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
                 if not datosAPI or not datosAPI.apiLink:
                     raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
@@ -315,7 +315,7 @@ class ConciliacionMaestros(models.Model):
 
                 self._iniciar_conciliacion('productos')
 
-                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
                 if not datosAPI or not datosAPI.apiLink:
                     raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
@@ -354,7 +354,10 @@ class ConciliacionMaestros(models.Model):
                     'product.product', 'info'
                 )
 
-                resultado = datosAPI.insertarProductosMasivo(variantes_a_sincronizar)
+                # Los códigos de barras tienen su propia conciliación
+                # (`conciliarCodigosBarra`): no se reenvían acá.
+                resultado = datosAPI.insertarProductosMasivo(
+                    variantes_a_sincronizar, enviar_barcodes=False)
 
                 if resultado['errores'] == 0:
                     datosAPI.write({'ultima_sync_productos': inicio_sync})

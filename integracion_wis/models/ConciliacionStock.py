@@ -47,8 +47,8 @@ class ConciliacionStock(models.Model):
 
         self.env['conciliacion.stock'].create({
             'name': 'Conciliación Automática - ' + fields.Datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'diferenciaMinima': self.env['integracion_wis.integracion_wis'].search([], limit=1).diferenciaMinima,
-            'partner': self.env['integracion_wis.integracion_wis'].search([], limit=1).partner.id if self.env['integracion_wis.integracion_wis'].search([], limit=1).partner else False,
+            'diferenciaMinima': self.env['integracion_wis.integracion_wis']._get_config().diferenciaMinima,
+            'partner': self.env['integracion_wis.integracion_wis']._get_config().partner.id if self.env['integracion_wis.integracion_wis']._get_config().partner else False,
             'estado': 'borrador',
         }).conciliarStock();
 
@@ -65,7 +65,7 @@ class ConciliacionStock(models.Model):
                 ('active', '=', True)
             ])
 
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+            datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
             if not datosAPI or not datosAPI.apiLink:
                 raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 

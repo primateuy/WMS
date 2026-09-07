@@ -85,6 +85,60 @@ class IntegracionWIS(models.Model):
              'manuales de integración quedan inactivos.',
     )
 
+    # ---------------------------------------------------------------------
+    # Integración de productos: rendimiento y control
+    # ---------------------------------------------------------------------
+    chunk_size_productos = fields.Integer(
+        string='Productos por lote',
+        default=200,
+        help='Cantidad de productos que viajan en cada llamada a '
+             '/Producto/CreateOrUpdate. Más grande = menos llamadas HTTP, pero '
+             'payloads más pesados. 200 es el valor probado.',
+    )
+
+    verificar_barcode_existente = fields.Boolean(
+        string='Verificar existencia de códigos de barras',
+        default=True,
+        help='Antes de enviar un código de barras consulta a WIS si ya existe, '
+             'para decidir entre alta (A) y sustitución (S). Es un round-trip '
+             'HTTP por código: en integraciones masivas domina el tiempo total. '
+             'Si se desactiva, se envía siempre como alta y solo se verifica en '
+             'el reintento individual cuando el lote falla.',
+    )
+
+    cola_productos_por_corrida = fields.Integer(
+        string='Variantes por corrida del cron',
+        default=500,
+        help='Máximo de variantes que el cron de integración en segundo plano '
+             'procesa en cada ejecución.',
+    )
+
+    cola_max_intentos = fields.Integer(
+        string='Reintentos máximos en la cola',
+        default=3,
+        help='Cuántas veces se reintenta una variante que falla antes de '
+             'dejarla en estado Error a la espera de intervención manual.',
+    )
+
+    bloquear_oc_sin_integrar = fields.Boolean(
+        string='Bloquear confirmación de OC con variantes sin integrar',
+        default=False,
+        help='Si está activo, no se puede confirmar una Orden de Compra cuya '
+             'recepción va a WIS mientras tenga variantes sin integrar. '
+             'Si está inactivo (default) solo se muestra una advertencia con la '
+             'acción "Integrar ahora".',
+    )
+
+    exigir_integracion_oc = fields.Boolean(
+        string='Exigir integración a todo producto almacenable de la OC',
+        default=False,
+        help='Por defecto solo se consideran pendientes las variantes marcadas '
+             'con "Integración con WMS" (en la variante o en su plantilla). '
+             'Con esta opción activa, cualquier producto almacenable de una OC '
+             'cuya recepción vaya a WIS y no tenga código WIS se considera '
+             'pendiente de integración.',
+    )
+
     # Webhook ajustes (spec sección 6.4)
     picking_type_ajuste_wis_id = fields.Many2one(
         'stock.picking.type',
@@ -109,8 +163,21 @@ class IntegracionWIS(models.Model):
     ]
 
     @api.model
+    def _get_config(self):
+        """Devuelve la configuración WIS de la compañía activa.
+
+        Existe un constraint de unicidad por compañía, pero los call-sites
+        históricos hacían `search([], limit=1)` sin filtrar: en multi-compañía
+        eso puede devolver la configuración de otra compañía. Se mantiene el
+        fallback al comportamiento anterior para no romper instalaciones donde
+        la única configuración existente pertenece a otra compañía.
+        """
+        config = self.search([('company_id', '=', self.env.company.id)], limit=1)
+        return config or self.search([], limit=1)
+
+    @api.model
     def _comunicacion_habilitada(self):
-        config = self.search([], limit=1)
+        config = self._get_config()
         return bool(config and config.comunicacion_activa)
 
     def _get_clean_api_url(self):
@@ -138,7 +205,7 @@ class IntegracionWIS(models.Model):
             'grant_type': 'client_credentials'
         }
 
-        req = requests.post(self.url_access_token, headers=headers, data=body)
+        req = requests.post(self.url_access_token, headers=headers, data=body, timeout=30)
 
         if req.status_code == 200:
             reqJson = req.json()
@@ -158,7 +225,7 @@ class IntegracionWIS(models.Model):
         if not self.apiLink or not self.client_id or not self.client_secret or not self.url_access_token or not self.empresa_id:
             raise ValidationError("Faltan datos para acceder a la API")
                 
-        if not self.token or self.expiracionToken < datetime.datetime.now():
+        if not self.token or not self.expiracionToken or self.expiracionToken < datetime.datetime.now():
             self.renovarToken()
 
         headers = {
@@ -236,9 +303,12 @@ class IntegracionWIS(models.Model):
         """
         nombre = vals.name[:65] if len(vals.name) > 65 else vals.name
         unidad_wis = (vals.uom_id.wis_code or '').strip() or 'UND'
+        # Las variantes nuevas todavía no tienen codigo_unico: se les asigna
+        # acá para que el alta inicial también pueda viajar por lote.
+        codigo = self._wis_codigo_producto(vals)
         payload = {
-            "codigoProducto": vals.codigo_unico,
-            "codigo":         vals.codigo_unico,
+            "codigoProducto": codigo,
+            "codigo":         codigo,
             "descripcion":    nombre,
             "familia":        1,
             "unidadMedida":   unidad_wis,
@@ -259,7 +329,12 @@ class IntegracionWIS(models.Model):
 
     def _enviar_chunk_productos(self, chunk, lote_label):
         """Envía un chunk de productos. Si falla el batch, reintenta uno por uno
-        para que un producto con error no bloquee al resto del lote."""
+        para que un producto con error no bloquee al resto del lote.
+
+        Devuelve (codigos_ok, errores_detalle): la lista de códigos que WIS
+        aceptó —el llamador la necesita para persistir el codigo_unico de las
+        variantes nuevas— y el detalle de los que fallaron.
+        """
         payload = {
             "empresa":      self.empresa_id,
             "dsReferencia": f"Sincronización masiva desde Odoo - {lote_label}",
@@ -268,7 +343,7 @@ class IntegracionWIS(models.Model):
         try:
             self.consultarAPI(link="/Producto/CreateOrUpdate", body=payload,
                               params=None, method="POST")
-            return len(chunk), 0, []
+            return [item.get('codigo') for item in chunk], []
         except Exception as batch_err:
             _logger.warning(
                 "[WIS] %s | batch falló (%s), reintentando uno por uno...",
@@ -276,7 +351,7 @@ class IntegracionWIS(models.Model):
             )
 
         # Fallback: reintento individual para aislar el producto problemático
-        enviados, errores, errores_detalle = 0, 0, []
+        codigos_ok, errores_detalle = [], []
         for item in chunk:
             single_payload = {
                 "empresa":      self.empresa_id,
@@ -286,7 +361,7 @@ class IntegracionWIS(models.Model):
             try:
                 self.consultarAPI(link="/Producto/CreateOrUpdate", body=single_payload,
                                   params=None, method="POST")
-                enviados += 1
+                codigos_ok.append(item.get('codigo'))
             except Exception as item_err:
                 err_str = str(item_err)
                 # WIS no permite modificar manejoIdentificador en productos con
@@ -294,37 +369,44 @@ class IntegracionWIS(models.Model):
                 # Este caso NO es un error real: el producto ya existe en WIS
                 # con el valor correcto — simplemente se omite.
                 if 'ManejoIdentificador' in err_str and 'No se permite modificar' in err_str:
-                    enviados += 1
+                    codigos_ok.append(item.get('codigo'))
                     _logger.warning(
                         "[WIS] reintento individual OMITIDO (manejoIdentificador bloqueado) "
                         "| codigo=%s — producto ya sincronizado en WIS",
                         item.get('codigo', '?')
                     )
                 else:
-                    errores += 1
                     errores_detalle.append(
                         f"{item.get('codigo', '?')}: {err_str}"
                     )
                     _logger.error("[WIS] reintento individual ERROR | codigo=%s | %s",
                                   item.get('codigo', '?'), err_str)
-        return enviados, errores, errores_detalle
+        return codigos_ok, errores_detalle
 
-    def insertarProductosMasivo(self, variantes, chunk_size=200):
-        """Envía todos los productos en lotes a /Producto/CreateOrUpdate.
+    def insertarProductosMasivo(self, variantes, chunk_size=None, enviar_barcodes=True):
+        """Envía productos en lotes a /Producto/CreateOrUpdate.
 
         En lugar de 1 llamada HTTP por producto, agrupa hasta chunk_size
         productos por request. Para 1400 productos con chunk_size=200
         se realizan 7 llamadas en lugar de 1400.
 
+        Sirve tanto para actualizar productos ya sincronizados como para el
+        ALTA INICIAL: a las variantes sin codigo_unico se les asigna uno
+        determinístico antes de armar el lote y, cuando WIS acepta el envío,
+        se persiste en Odoo. Antes estas variantes se salteaban en silencio y
+        el alta terminaba yendo de a una por `enviarWS`.
+
         Si un chunk falla (ej. un producto con manejoIdentificador bloqueado),
         reintenta cada producto individualmente para no perder los demás.
 
-        Returns dict con 'enviados', 'errores' y 'errores_detalle'.
+        Returns dict con 'enviados', 'errores', 'errores_detalle' y
+        'barcodes_enviados'.
         """
         variantes_list = list(variantes)
         total = len(variantes_list)
+        chunk_size = chunk_size or self.chunk_size_productos or 200
         enviados = 0
-        errores = 0
+        barcodes_enviados = 0
         todos_errores_detalle = []
         total_chunks = -(-total // chunk_size)  # ceil division
 
@@ -336,49 +418,96 @@ class IntegracionWIS(models.Model):
             lote_num = chunk_idx // chunk_size + 1
             lote_label = f"lote {lote_num}/{total_chunks}"
 
-            productos_payload = [
-                self._build_producto_payload(v)
-                for v in chunk_vars
-                if v.codigo_unico
-            ]
+            # codigo -> variante, para poder persistir el código de las nuevas
+            # y saber a quién pertenece cada resultado.
+            por_codigo = {}
+            productos_payload = []
+            for v in chunk_vars:
+                payload = self._build_producto_payload(v)
+                por_codigo[payload['codigo']] = v
+                productos_payload.append(payload)
 
             if not productos_payload:
                 continue
 
-            ok, err, err_detalle = self._enviar_chunk_productos(productos_payload, lote_label)
-            enviados += ok
-            errores  += err
+            codigos_ok, err_detalle = self._enviar_chunk_productos(productos_payload, lote_label)
             todos_errores_detalle.extend(err_detalle)
+            enviados += len(codigos_ok)
+
+            # Persistir el codigo_unico de las variantes que WIS aceptó y
+            # todavía no lo tenían.
+            variantes_ok = self.env['product.product']
+            for codigo in codigos_ok:
+                variante = por_codigo.get(codigo)
+                if not variante:
+                    continue
+                variantes_ok |= variante
+                if not variante.codigo_unico:
+                    variante.with_context(_avoid_wms=True).write({'codigo_unico': codigo})
+
+            if enviar_barcodes and variantes_ok:
+                try:
+                    barcodes_enviados += self.insertarBarcodesMasivo(variantes_ok)
+                except Exception as e:
+                    _logger.error("[WIS] %s | error enviando códigos de barras: %s",
+                                  lote_label, str(e))
+                    todos_errores_detalle.append(f"códigos de barras {lote_label}: {str(e)}")
 
             _logger.info("[WIS] insertarProductosMasivo | %s | ok=%d err=%d | acumulado=%d",
-                         lote_label, ok, err, enviados)
+                         lote_label, len(codigos_ok), len(err_detalle), enviados)
 
-        _logger.info("[WIS] insertarProductosMasivo | FINALIZADO | enviados=%d | errores=%d",
-                     enviados, errores)
+        errores = len(todos_errores_detalle)
+        _logger.info("[WIS] insertarProductosMasivo | FINALIZADO | enviados=%d | errores=%d | barcodes=%d",
+                     enviados, errores, barcodes_enviados)
         return {'enviados': enviados, 'errores': errores,
-                'errores_detalle': todos_errores_detalle}
+                'errores_detalle': todos_errores_detalle,
+                'barcodes_enviados': barcodes_enviados}
+
+    @api.model
+    def _wis_codigo_producto(self, variante):
+        """Código único de producto para WIS: determinístico por id de variante.
+
+        Antes se sorteaba `PRD-<random de 6 dígitos>` sin verificar unicidad:
+        con ~1.400 productos la probabilidad de colisión ronda el 66% (paradoja
+        del cumpleaños). `PRD-<id>` es estable y reproducible, y sigue la misma
+        convención que los códigos de picking (W-R-, W-P-, W-D-).
+
+        Si el código ya está tomado por otra variante —un código random viejo
+        que casualmente coincida con un id— se desambigua con un sufijo.
+        """
+        if variante.codigo_unico:
+            return variante.codigo_unico
+
+        base = f"PRD-{variante.id}"
+        codigo = base
+        sufijo = 0
+        Producto = self.env['product.product'].with_context(active_test=False)
+        while Producto.search_count([('codigo_unico', '=', codigo),
+                                     ('id', '!=', variante.id)]):
+            sufijo += 1
+            codigo = f"{base}-{sufijo}"
+        return codigo
 
     def insertarProducto(self, vals):
-        
+
 
         productos = [];
         unidad_wis = (vals.uom_id.wis_code or '').strip() if vals.uom_id else 'UND'
         unidad_wis = unidad_wis or 'UND'
-        numeroRandom = random.randint(100000, 999999);
 
         _logger.info("Nombre del producto => {}".format(vals.name));
         _logger.info("DISPLAY NAME => {}".format(vals.display_name));
 
+        # OJO: `vals` es el record del producto. Truncar sobre `vals.name`
+        # escribía el nombre recortado en la base de Odoo (y en el template,
+        # o sea en TODAS sus variantes). El recorte es solo para el payload.
+        nombre = vals.name[:65] if len(vals.name) > 65 else vals.name
         if len(vals.name) > 65:
-            _logger.info("El producto supera los 65 caracteres, se truncará para la integración con WIS");
-            vals.name = vals.name[:65];
-        codigo = ''
-        if vals.codigo_unico:
-            codigo = vals.codigo_unico;
-        else:
-            codigo = f"PRD-{numeroRandom}"
+            _logger.info("El producto supera los 65 caracteres, se trunca solo para el payload de WIS");
 
-            
+        codigo = self._wis_codigo_producto(vals)
+
+
         tracking = vals.tracking
         tipo_manejo_fecha    = 'F' if tracking in ('lot', 'serial') else 'D'
         manejo_identificador = 'L' if tracking in ('lot', 'serial') else 'P'
@@ -386,7 +515,7 @@ class IntegracionWIS(models.Model):
         productos = [{
                 "codigoProducto": codigo,
                 "codigo": codigo,
-                "descripcion": f"{vals.name}",
+                "descripcion": f"{nombre}",
                 "familia": 1,
                 "unidadMedida": unidad_wis,
                 "clase": 1,
@@ -462,50 +591,102 @@ class IntegracionWIS(models.Model):
         return response
 
 
-    def existeBarcode(self, vals):
+    @staticmethod
+    def _respuesta_barcode_tiene_datos(data):
+        """Interpreta la respuesta de /CodigoBarras/GetCodigoBarras.
+
+        WIS puede devolver una lista, o un dict envolviendo la lista. Se
+        considera que el código existe solo si viene contenido real.
+        """
+        if not data:
+            return False
+        if isinstance(data, list):
+            return bool(data)
+        if isinstance(data, dict):
+            for clave in ('codigosDeBarras', 'codigosDeBarra', 'data', 'items', 'resultado'):
+                if clave in data:
+                    return bool(data[clave])
+            # Un dict con el código adentro también cuenta como existente.
+            return bool(data.get('codigo') or data.get('producto'))
+        return False
+
+    def _existe_barcode_codigo(self, codigo):
+        """¿El código de barras ya está dado de alta en WIS?
+
+        Define si el envío posterior va con tipoOperacion 'A' (alta) o 'S'
+        (sustitución). Ante cualquier duda devuelve False —o sea, alta—, que
+        es el caso mayoritario y el que no pisa datos existentes en WIS.
+        """
+        codigo = (codigo or '').strip()
+        if not codigo:
+            return False
+
         if not self.apiLink or not self.client_id or not self.client_secret or not self.url_access_token:
-            raise ValidationError("Faltan datos para acceder a la API");
-            
-        if not self.token or self.expiracionToken < datetime.datetime.now():
-            self.renovarToken();
+            raise ValidationError("Faltan datos para acceder a la API")
+
+        if not self.token or not self.expiracionToken or self.expiracionToken < datetime.datetime.now():
+            self.renovarToken()
 
         params = {
             "empresa": self.empresa_id,
-            "codigo": int(vals.barcode)
+            "codigo": codigo,
         }
-
-
-
-        _logger.info("Realizando consulta de existencia de código de barras en WIS %s", params);
 
         api_url = self._get_clean_api_url()
 
-        req = requests.get(
-            url=f"{api_url}/CodigoBarras/GetCodigoBarras",
-            headers={
-                "Authorization": f"Bearer {self.token}"
-            },
-            params=params
-        )
+        try:
+            req = requests.get(
+                url=f"{api_url}/CodigoBarras/GetCodigoBarras",
+                headers={"Authorization": f"Bearer {self.token}"},
+                params=params,
+                timeout=30,
+            )
+        except Exception as e:
+            _logger.warning("[WIS] No se pudo consultar el código de barras %s: %s — se asume alta",
+                            codigo, e)
+            return False
 
-        if req is not None:
-            _logger.info("El código de barras existe en WIS %s", req);
-            return True;
+        if req.status_code != 200:
+            _logger.info("[WIS] El código de barras %s no existe en WIS (HTTP %s)",
+                         codigo, req.status_code)
+            return False
 
-        _logger.info("El código de barras NO existe en WIS %s", req);
-        return False;
+        try:
+            data = req.json()
+        except ValueError:
+            _logger.warning("[WIS] Respuesta no-JSON al consultar el código de barras %s — se asume alta",
+                            codigo)
+            return False
 
-    def insertarBarcode(self, vals):
+        existe = self._respuesta_barcode_tiene_datos(data)
+        _logger.info("[WIS] Código de barras %s: %s en WIS",
+                     codigo, "EXISTE" if existe else "NO existe")
+        return existe
 
-        existeBarcodeBool = self.existeBarcode(vals);
-        codigos = [{
-            "codigo": vals.barcode,
-            "producto": vals.codigo_unico,
+    def existeBarcode(self, vals):
+        """Compatibilidad: recibe el record del producto."""
+        return self._existe_barcode_codigo(vals.barcode)
+
+    def _build_barcode_payload(self, variante, verificar_existencia=True):
+        """Construye el dict de un código de barras para /CodigoBarras/CreateUpdateOrDelete.
+
+        `verificar_existencia=False` evita el GET previo por código —un round-trip
+        por variante, que en una integración masiva domina el tiempo total— y
+        asume alta. Ver `verificar_barcode_existente` en la configuración.
+        """
+        existe = self._existe_barcode_codigo(variante.barcode) if verificar_existencia else False
+        return {
+            "codigo": variante.barcode,
+            "producto": variante.codigo_unico,
             "tipoCodigo": 13,
             "prioridadUso": 1,
             "cantidadEmbalaje": 1,
-            "tipoOperacion": "A" if not existeBarcodeBool else "S"
-        }]
+            "tipoOperacion": "S" if existe else "A",
+        }
+
+    def insertarBarcode(self, vals):
+
+        codigos = [self._build_barcode_payload(vals)]
 
         payload = {
             "empresa": self.empresa_id,
@@ -523,6 +704,54 @@ class IntegracionWIS(models.Model):
 
 
         return response
+
+    def insertarBarcodesMasivo(self, variantes):
+        """Envía en UNA sola llamada los códigos de barras de varias variantes.
+
+        `/CodigoBarras/CreateUpdateOrDelete` acepta una lista; el circuito
+        original mandaba un código por request. Si el lote falla, reintenta
+        uno por uno —verificando existencia— para que un código con problema
+        no tire abajo al resto. Devuelve la cantidad enviada correctamente.
+        """
+        con_barcode = [v for v in variantes if v.barcode and v.codigo_unico]
+        if not con_barcode:
+            return 0
+
+        verificar = self.verificar_barcode_existente
+        codigos = [self._build_barcode_payload(v, verificar_existencia=verificar)
+                   for v in con_barcode]
+
+        payload = {
+            "empresa": self.empresa_id,
+            "dsReferencia": f"CÓDIGOS DE BARRA masivos desde Odoo ({len(codigos)})",
+            "archivo": "Archivo",
+            "codigosDeBarras": codigos,
+        }
+
+        try:
+            self.consultarAPI(
+                link="/CodigoBarras/CreateUpdateOrDelete",
+                body=payload,
+                params=None,
+                method="POST"
+            )
+            return len(codigos)
+        except Exception as e:
+            _logger.warning("[WIS] Lote de %d códigos de barras falló (%s), reintentando uno por uno...",
+                            len(codigos), str(e))
+
+        enviados = 0
+        for variante in con_barcode:
+            try:
+                # El reintento individual SIEMPRE verifica existencia: si el
+                # lote falló por un 'A' sobre un código ya existente, esto lo
+                # corrige.
+                self.insertarBarcode(variante)
+                enviados += 1
+            except Exception as item_err:
+                _logger.error("[WIS] Código de barras ERROR | producto=%s | codigo=%s | %s",
+                              variante.codigo_unico, variante.barcode, str(item_err))
+        return enviados
 
 
     def transferirStock(self, vals):
@@ -1873,9 +2102,10 @@ class IntegracionWIS(models.Model):
                 codigosBarras = vals.barcode.split(',');
 
                 for cod in codigosBarras:
-                    response = self.existeBarcode(cod);
+                    # `cod` es un string: se consulta por código, no por record.
+                    response = self._existe_barcode_codigo(cod);
 
-                    
+                    insertar = None
 
                     if response == False:
                         self.env['logs.conciliacion'].create({
@@ -1894,7 +2124,7 @@ class IntegracionWIS(models.Model):
                             'conciliacion_id': conciliacion_id
                         })
 
-                    cod.message_post(body=f"Se procesó el código de barra {cod}. Respuesta de la API: {insertar if response == False else 'El código ya existía, no se insertó.'}")
+                    vals.message_post(body=f"Se procesó el código de barra {cod}. Respuesta de la API: {insertar if response == False else 'El código ya existía, no se insertó.'}")
 
 
 

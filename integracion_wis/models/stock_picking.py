@@ -317,7 +317,7 @@ class StockPicking(models.Model):
             fallback_info = f" (compañía fallback: {partner.name})" if not self.partner_id else ""
             raise ValidationError(f"El partner{fallback_info} no tiene Identificación WIS {'Cliente' if tipo_agente == 'CLI' else 'Proveedor'}. Sincronicelo primero desde el contacto.")
 
-        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
         if not datosAPI or not datosAPI.apiLink:
             raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
@@ -455,7 +455,7 @@ class StockPicking(models.Model):
         if self.wms_lpns_enviados and not force:
             return False
         if datosAPI is None:
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+            datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
         if not datosAPI:
             return False
         try:
@@ -712,7 +712,7 @@ class StockPicking(models.Model):
             return super().action_cancel()
 
         TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
-        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
         for picking in self:
             if (not picking.picking_type_id.integracion_wms
                     or not picking.codigo_unico
@@ -966,7 +966,7 @@ class StockPicking(models.Model):
             for record in self:
                 if record.wms_estado != 'enviado' or not record.picking_type_id.integracion_wms:
                     continue
-                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
                 if not datosAPI:
                     continue
                 try:
@@ -1271,7 +1271,7 @@ class StockMove(models.Model):
                 picking = move.picking_id
                 if not picking or picking.wms_estado != 'enviado' or not picking.picking_type_id.integracion_wms:
                     continue
-                datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
                 if not datosAPI:
                     continue
                 try:
