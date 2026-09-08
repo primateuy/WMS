@@ -22,3 +22,7 @@ access_logs_conciliacion_stock,logs_conciliacion_stock,model_logs_conciliacion_s
 access_logs_conciliacion_stock_dev,logs_conciliacion_stock_dev,model_logs_conciliacion_stock,base.group_no_one,1,1,1,1
 access_wms_integracion_log,wms_integracion_log,model_wms_integracion_log,base.group_user,1,0,1,1
 access_wis_webhook_log,wis_webhook_log,model_wis_webhook_log,base.group_user,1,0,1,1
+access_wis_sync_queue,wis_sync_queue,model_wis_sync_queue,base.group_user,1,1,1,0
+access_wis_sync_queue_dev,wis_sync_queue_dev,model_wis_sync_queue,base.group_no_one,1,1,1,1
+access_wis_integrar_variantes_wizard,wis_integrar_variantes_wizard,model_wis_integrar_variantes_wizard,base.group_user,1,1,1,1
+access_wizard_ejecutar_conciliacion,wizard_ejecutar_conciliacion,model_wizard_ejecutar_conciliacion,base.group_user,1,1,1,1

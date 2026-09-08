@@ -4,6 +4,8 @@ import logging
 import json
 import requests
 
+from .wis_sync_queue import PRIORIDAD_BAJA, PRIORIDAD_NORMAL
+
 _logger = logging.getLogger(__name__)
 
 class ProductTemplate(models.Model):
@@ -29,7 +31,7 @@ class ProductTemplate(models.Model):
             return variantes_wms.consultaStock()
         
         resultados = []
-        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
         
         if not datosAPI or not datosAPI.apiLink:
             raise ValidationError("No se encuentran todos los datos para una consulta a la API")
@@ -64,59 +66,76 @@ class ProductTemplate(models.Model):
             
 
     def enviar_variantes_wms(self):
-        """Envía todas las variantes del template a WMS"""
+        """Envía todas las variantes del template a WMS, en lote.
+
+        Es una acción explícita del usuario sobre un template concreto: se
+        resuelve en el momento. Con el envío por lote, un template de 232
+        variantes son 2 llamadas HTTP y no 232.
+        """
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
-        for variant in self.product_variant_ids:
-            if variant.type == 'product':
-                try:
-                    response = variant.enviarWS()
-                    variant.with_context(_avoid_wms=True).write({
-                        'codigo_interfaz_wms': response.get('numeroInterfaz'),
-                        'codigo_unico': response.get('codigoUnico')
-                    })
-                    _logger.info(f"Variante {variant.name} enviada a WMS: {response}")
-                except Exception as e:
-                    _logger.error(f"Error enviando variante {variant.name} a WMS: {str(e)}")
 
-    @api.model
-    def create(self, vals):
-        res = super(ProductTemplate, self).create(vals)
+        variantes = self.mapped('product_variant_ids').filtered(lambda v: v.type == 'product')
+        if not variantes:
+            return
 
-        if res.integracion_wms and res.type == 'product':
+        try:
+            variantes._enviar_wms_en_lote(motivo='envío de variantes del template')
+        except Exception as e:
+            _logger.error(f"Error enviando variantes a WMS: {str(e)}")
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        templates = super(ProductTemplate, self).create(vals_list)
+
+        if self.env.context.get('_avoid_wms'):
+            return templates
+
+        a_procesar = templates.filtered(
+            lambda t: t.integracion_wms and t.type == 'product'
+        )
+        for template in a_procesar:
             try:
-                self._procesar_variantes_wms_directo(res)
+                self._procesar_variantes_wms_directo(template)
             except Exception as e:
-                _logger.error(f"Error procesando variantes para template {res.name}: {str(e)}")
-        
-        return res
+                _logger.error(f"Error procesando variantes para template {template.name}: {str(e)}")
+
+        return templates
 
     def _procesar_variantes_wms_directo(self, template):
+        """Marca las variantes del template y las encola para integrar.
+
+        El alta de un template es un camino automático: no se hace la llamada
+        a WIS acá adentro para no dejar al usuario esperando (un template con
+        cientos de variantes tarda minutos). Va a la cola, que las procesa por
+        lote en segundo plano.
+        """
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             return
-        template = template.with_context(_avoid_wms=True)
-        
-        if template.product_variant_ids:
-            _logger.info(f"Procesando {len(template.product_variant_ids)} variantes para template {template.name}")
-            
-            template.product_variant_ids.with_context(_avoid_wms=True).write({
-                'integracion_wms': True
-            })
-            
-            for variant in template.product_variant_ids:
-                if variant.type == 'product':
-                    try:
-                        response = variant.enviarWS()
-                        variant.with_context(_avoid_wms=True).write({
-                            'codigo_interfaz_wms': response.get('numeroInterfaz'),
-                            'codigo_unico': response.get('codigoUnico')
-                        })
-                        _logger.info(f"Variante {variant.name} enviada a WMS: {response}")
-                    except Exception as e:
-                        _logger.error(f"Error enviando variante {variant.name} a WMS: {str(e)}")
+
+        variantes = template.product_variant_ids.filtered(lambda v: v.type == 'product')
+        if not variantes:
+            return
+
+        _logger.info(f"Encolando {len(variantes)} variantes para template {template.name}")
+
+        variantes.with_context(_avoid_wms=True).write({'integracion_wms': True})
+
+        self.env['wis.sync.queue']._encolar(
+            variantes,
+            origen='template',
+            origen_ref=template.name,
+            prioridad=PRIORIDAD_NORMAL,
+        )
 
     def write(self, vals):
         res = super(ProductTemplate, self).write(vals)
+
+        # `_avoid_wms` es el guard anti-recursión del módulo: product.product lo
+        # respetaba y product.template no, así que una escritura interna sobre
+        # el template terminaba disparando el envío igual.
+        if self.env.context.get('_avoid_wms'):
+            return res
 
         if vals.get('integracion_wms') and self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             for record in self:
@@ -144,19 +163,60 @@ class ProductTemplate(models.Model):
                     lambda v: not v.codigo_interfaz_wms and not v.codigo_unico and v.integracion_wms
                 )
                 if new_variants:
-                    _logger.info(f"Procesando {len(new_variants)} nuevas variantes para template {template.name}")
-                    
-                    for variant in new_variants:
-                        try:
-                            response = variant.enviarWS()
-                            variant.with_context(_avoid_wms=True).write({
-                                'codigo_interfaz_wms': response.get('numeroInterfaz'),
-                                'codigo_unico': response.get('codigoUnico')
-                            })
-                        except Exception as e:
-                            raise ValidationError(f"Error enviando nueva variante {variant.name} a WMS: {str(e)}")
-        
+                    # Se encolan en vez de enviarse acá: agregar un atributo a
+                    # un producto puede generar cientos de variantes, y antes
+                    # cada una era una llamada HTTP sincrónica. Además, un WIS
+                    # caído lanzaba ValidationError e impedía crear variantes
+                    # en Odoo — el WMS no debe bloquear el maestro de productos.
+                    _logger.info(f"Encolando {len(new_variants)} nuevas variantes para template {template.name}")
+                    self.env['wis.sync.queue']._encolar(
+                        new_variants,
+                        origen='template',
+                        origen_ref=template.name,
+                        prioridad=PRIORIDAD_BAJA,
+                    )
+
         return res
+
+    def action_integrar_wms_masivo(self):
+        """Acción masiva desde el listado de Productos: encola las variantes.
+
+        Marca los templates para integración y encola todas sus variantes. El
+        usuario sigue trabajando: el cron las procesa por lote en segundo plano.
+        """
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
+
+        templates = self.filtered(lambda t: t.type == 'product')
+        if not templates:
+            raise ValidationError("Ninguno de los productos seleccionados es almacenable.")
+
+        templates.filtered(lambda t: not t.integracion_wms).with_context(
+            _avoid_wms=True).write({'integracion_wms': True})
+
+        variantes = templates.mapped('product_variant_ids').filtered(lambda v: v.type == 'product')
+        variantes.filtered(lambda v: not v.integracion_wms).with_context(
+            _avoid_wms=True).write({'integracion_wms': True})
+
+        entradas = self.env['wis.sync.queue']._encolar(
+            variantes,
+            origen='masiva',
+            origen_ref=f"{len(templates)} producto(s)",
+            prioridad=PRIORIDAD_NORMAL,
+        )
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Integración con WIS encolada',
+                'message': (f"{len(entradas)} variante(s) en cola. Se integran en segundo "
+                            f"plano; podés seguir trabajando. El avance se ve en "
+                            f"Integración WIS → Cola de productos."),
+                'type': 'success',
+                'sticky': False,
+            },
+        }
 
 class Product(models.Model):
     _inherit = 'product.product'
@@ -174,8 +234,32 @@ class Product(models.Model):
     )
 
     codigo_unico = fields.Char(
-        string='Código identificatorio WIS'
+        string='Código identificatorio WIS',
+        index=True,
+        copy=False,
     )
+
+    @api.constrains('codigo_unico')
+    def _check_codigo_unico_wis(self):
+        """El código WIS identifica al producto en el WMS: no puede repetirse.
+
+        No se usa un _sql_constraints porque las bases existentes pueden tener
+        duplicados heredados de la generación aleatoria anterior, y el índice
+        único haría fallar la actualización del módulo. Esta validación impide
+        que se sigan generando duplicados nuevos.
+        """
+        for record in self:
+            if not record.codigo_unico:
+                continue
+            duplicado = self.with_context(active_test=False).search([
+                ('codigo_unico', '=', record.codigo_unico),
+                ('id', '!=', record.id),
+            ], limit=1)
+            if duplicado:
+                raise ValidationError(
+                    f"El código WIS '{record.codigo_unico}' ya está asignado al producto "
+                    f"'{duplicado.display_name}'. Cada producto debe tener un código único en WIS."
+                )
 
     ajusteStockManual = fields.Boolean(
         string='Habilitar ajuste manual',
@@ -221,7 +305,7 @@ class Product(models.Model):
 
     def consultaStock(self):
         try:
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1);
+            datosAPI = self.env['integracion_wis.integracion_wis']._get_config();
             if not datosAPI or not datosAPI.apiLink:
                 raise ValidationError("No se encuentran todos los datos para una consulta a la API")
             
@@ -265,7 +349,7 @@ class Product(models.Model):
         
     def saveBarcode(self):
         try:
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+            datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
             if not datosAPI or not datosAPI.apiLink:
                 raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
@@ -287,11 +371,44 @@ class Product(models.Model):
             )
             raise
 
+    def action_integrar_wms_masivo(self):
+        """Acción masiva desde el listado de Variantes: encola las seleccionadas."""
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
+
+        variantes = self.filtered(lambda v: v.type == 'product')
+        if not variantes:
+            raise ValidationError("Ninguna de las variantes seleccionadas es almacenable.")
+
+        variantes.filtered(lambda v: not v.integracion_wms).with_context(
+            _avoid_wms=True).write({'integracion_wms': True})
+
+        entradas = self.env['wis.sync.queue']._encolar(
+            variantes,
+            origen='masiva',
+            origen_ref=f"{len(variantes)} variante(s)",
+            prioridad=PRIORIDAD_NORMAL,
+        )
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Integración con WIS encolada',
+                'message': (f"{len(entradas)} variante(s) en cola. Se integran en segundo "
+                            f"plano; podés seguir trabajando. El avance se ve en "
+                            f"Integración WIS → Cola de productos."),
+                'type': 'success',
+                'sticky': False,
+            },
+        }
+
     def enviarWS(self):
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
+        payload_log = ''
         try:
-            datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+            datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
             if not datosAPI or not datosAPI.apiLink:
                 raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
@@ -339,38 +456,47 @@ class Product(models.Model):
                 operacion='enviar_producto',
                 resultado='error',
                 detalle=f'Error enviando producto: {str(e)}',
-                payload_enviado=payload_log if 'payload_log' in dir() else '',
+                payload_enviado=payload_log,
             )
             raise
 
-    @api.model
-    def create(self, vals):
-        res = super(Product, self).create(vals)
-        if (not self.env.context.get('_avoid_wms') and
-            self.env['integracion_wis.integracion_wis']._comunicacion_habilitada() and
-            res.integracion_wms and
-            res.type == 'product' and
-            not res.product_tmpl_id.integracion_wms):
-            try:
-                response = res.enviarWS()
-                res.with_context(_avoid_wms=True).write({
-                    'codigo_interfaz_wms': response.get('numeroInterfaz'),
-                    'codigo_unico': response.get('codigoUnico')
-                })
+    @api.model_create_multi
+    def create(self, vals_list):
+        records = super(Product, self).create(vals_list)
 
-                if 'barcode' in vals and vals.get('barcode') and res.codigo_unico:
-                    res.saveBarcode();
-            except Exception as e:
-                raise ValidationError(f"Error enviando producto {res.name} a WMS: {str(e)}")
-        
-        return res
+        if (self.env.context.get('_avoid_wms') or
+                not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada()):
+            return records
+
+        # Las variantes de un template marcado para WMS las maneja
+        # `_create_variant_ids` / `_procesar_variantes_wms_directo`, en lote.
+        a_enviar = records.filtered(
+            lambda r: r.integracion_wms and r.type == 'product'
+            and not r.product_tmpl_id.integracion_wms
+        )
+        if not a_enviar:
+            return records
+
+        try:
+            if len(a_enviar) > 1:
+                a_enviar._enviar_wms_en_lote(motivo='alta de variantes')
+            else:
+                a_enviar.enviarWS()
+        except Exception as e:
+            raise ValidationError(f"Error enviando producto {a_enviar[0].name} a WMS: {str(e)}")
+
+        return records
 
 
-        
-        
 
-    CAMPOS_WIS = {'name', 'default_code', 'description', 'active', 'integracion_wms', 'barcode',
-                  'list_price', 'standard_price', 'taxes_id', 'uom_id', 'uom_po_id'}
+    # Campos que efectivamente viajan en el payload de WIS
+    # (ver `_build_producto_payload` en models.py). Cualquier otro campo NO
+    # debe disparar una llamada HTTP: `standard_price`, por ejemplo, se
+    # recalcula solo con AVCO/FIFO al validar cada recepción, y tenerlo acá
+    # hacía que validar una recepción de N líneas disparara N llamadas a WIS
+    # dentro de la transacción.
+    CAMPOS_WIS = {'name', 'active', 'integracion_wms', 'barcode',
+                  'list_price', 'weight', 'uom_id', 'categ_id'}
 
     def write(self, vals):
         avoid_recursion = self.env.context.get('_avoid_wms', False)
@@ -379,8 +505,15 @@ class Product(models.Model):
         if not avoid_recursion and self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             hay_cambios_relevantes = bool(self.CAMPOS_WIS & set(vals.keys()))
             if hay_cambios_relevantes:
-                for record in self:
-                    if record.integracion_wms and record.type == 'product':
+                a_sincronizar = self.filtered(
+                    lambda r: r.integracion_wms and r.type == 'product'
+                )
+                # Con muchas variantes conviene un solo lote en vez de una
+                # llamada HTTP por registro.
+                if len(a_sincronizar) > 1:
+                    a_sincronizar._enviar_wms_en_lote(motivo='actualización masiva')
+                else:
+                    for record in a_sincronizar:
                         try:
                             record.enviarWS()
                             _logger.info(f"Producto {record.name} actualizado en WMS")
@@ -388,3 +521,38 @@ class Product(models.Model):
                             _logger.error(f"Error enviando producto {record.name} a WMS: {str(e)}")
 
         return res
+
+    def _enviar_wms_en_lote(self, motivo=''):
+        """Envía este recordset a WIS en lotes (una llamada cada N productos).
+
+        Es el camino rápido: `enviarWS()` hace 1 request por producto (más 2 por
+        código de barras). Para 232 variantes eso son ~696 requests; por lote
+        son 2. Devuelve el dict de resultado de `insertarProductosMasivo`.
+        """
+        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
+        if not datosAPI or not datosAPI.apiLink:
+            raise ValidationError("No se encuentran todos los datos para una consulta a la API")
+
+        variantes = self.filtered(lambda v: v.type == 'product')
+        if not variantes:
+            return {'enviados': 0, 'errores': 0, 'errores_detalle': [], 'barcodes_enviados': 0}
+
+        _logger.info("[WIS] Envío en lote de %d variantes (%s)", len(variantes), motivo or 's/motivo')
+        resultado = datosAPI.insertarProductosMasivo(variantes)
+
+        # Un log por variante, con el resultado del lote.
+        errores_texto = "\n".join(resultado.get('errores_detalle', []))
+        for variante in variantes:
+            fallo = variante.codigo_unico and any(
+                variante.codigo_unico in e for e in resultado.get('errores_detalle', [])
+            )
+            variante._agregar_log_wms(
+                operacion='enviar_producto',
+                resultado='error' if fallo else 'success',
+                detalle=(f"Envío en lote ({motivo}). "
+                         f"Enviados: {resultado['enviados']} | Errores: {resultado['errores']}"
+                         + (f"\n{errores_texto}" if fallo else '')),
+                response_data=None,
+            )
+
+        return resultado

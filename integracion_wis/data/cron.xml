@@ -53,5 +53,18 @@
       <field name="active" eval="True"/>
     </record>
 
+    <!-- Procesamiento en segundo plano de la cola de integración de productos -->
+    <record id="ir_cron_wis_procesar_cola_productos" model="ir.cron">
+      <field name="name">WIS: Cola de integración de productos</field>
+      <field name="model_id" ref="model_wis_sync_queue"/>
+      <field name="state">code</field>
+      <field name="code">model._cron_procesar_cola()</field>
+      <field name="interval_number">5</field>
+      <field name="interval_type">minutes</field>
+      <field name="numbercall">-1</field>
+      <field name="doall" eval="False"/>
+      <field name="active" eval="True"/>
+    </record>
+
   </data>
 </odoo>

@@ -59,6 +59,14 @@
           <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
           <field name="ultima_sync_productos" readonly="1"/>
           </group>
+          <group string="Integración de productos">
+            <field name="chunk_size_productos"/>
+            <field name="verificar_barcode_existente"/>
+            <field name="cola_productos_por_corrida"/>
+            <field name="cola_max_intentos"/>
+            <field name="exigir_integracion_oc"/>
+            <field name="bloquear_oc_sin_integrar"/>
+          </group>
           <group string="Ajustes WIS">
             <field name="picking_type_ajuste_wis_id"
                    options="{'no_create': True}"

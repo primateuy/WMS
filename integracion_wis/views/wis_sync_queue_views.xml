@@ -1,0 +1,143 @@
+<odoo>
+  <data>
+
+    <record id="view_wis_sync_queue_tree" model="ir.ui.view">
+      <field name="name">wis.sync.queue.tree</field>
+      <field name="model">wis.sync.queue</field>
+      <field name="arch" type="xml">
+        <tree string="Cola de integración de productos"
+              create="false"
+              default_order="prioridad asc, create_date asc"
+              decoration-success="estado == 'hecho'"
+              decoration-danger="estado == 'error'"
+              decoration-warning="estado == 'procesando'"
+              decoration-muted="estado == 'cancelado'">
+          <field name="create_date" string="Encolado"/>
+          <field name="product_id"/>
+          <field name="codigo_unico" string="Código WIS"/>
+          <field name="prioridad"/>
+          <field name="origen"/>
+          <field name="origen_ref" string="Referencia"/>
+          <field name="intentos"/>
+          <field name="fecha_procesado" optional="hide"/>
+          <field name="ultimo_error" optional="hide"/>
+          <field name="estado" widget="badge"
+                 decoration-success="estado == 'hecho'"
+                 decoration-danger="estado == 'error'"
+                 decoration-warning="estado == 'procesando'"
+                 decoration-info="estado == 'pendiente'"/>
+          <field name="company_id" groups="base.group_multi_company" optional="hide"/>
+        </tree>
+      </field>
+    </record>
+
+    <record id="view_wis_sync_queue_form" model="ir.ui.view">
+      <field name="name">wis.sync.queue.form</field>
+      <field name="model">wis.sync.queue</field>
+      <field name="arch" type="xml">
+        <form string="Entrada de la cola" create="false">
+          <header>
+            <button name="action_procesar_ahora" type="object"
+                    string="Procesar ahora" class="btn-primary"
+                    invisible="estado not in ('pendiente', 'error')"/>
+            <button name="action_reintentar" type="object"
+                    string="Reintentar" class="btn-secondary"
+                    invisible="estado not in ('error', 'cancelado')"/>
+            <button name="action_cancelar" type="object"
+                    string="Cancelar" class="btn-secondary"
+                    invisible="estado not in ('pendiente', 'error')"/>
+            <field name="estado" widget="statusbar"
+                   statusbar_visible="pendiente,procesando,hecho"/>
+          </header>
+          <sheet>
+            <group>
+              <group>
+                <field name="product_id" readonly="1"/>
+                <field name="codigo_unico" readonly="1"/>
+                <field name="prioridad"/>
+              </group>
+              <group>
+                <field name="origen" readonly="1"/>
+                <field name="origen_ref" readonly="1"/>
+                <field name="intentos" readonly="1"/>
+                <field name="fecha_procesado" readonly="1"/>
+                <field name="company_id" groups="base.group_multi_company" readonly="1"/>
+              </group>
+            </group>
+            <group string="Último error" invisible="not ultimo_error">
+              <field name="ultimo_error" nolabel="1" readonly="1" widget="text"/>
+            </group>
+          </sheet>
+        </form>
+      </field>
+    </record>
+
+    <record id="view_wis_sync_queue_search" model="ir.ui.view">
+      <field name="name">wis.sync.queue.search</field>
+      <field name="model">wis.sync.queue</field>
+      <field name="arch" type="xml">
+        <search string="Cola de integración">
+          <field name="product_id"/>
+          <field name="origen_ref"/>
+          <filter name="filtro_pendiente" string="Pendientes"
+                  domain="[('estado', '=', 'pendiente')]"/>
+          <filter name="filtro_error" string="Con error"
+                  domain="[('estado', '=', 'error')]"/>
+          <filter name="filtro_hecho" string="Integrados"
+                  domain="[('estado', '=', 'hecho')]"/>
+          <separator/>
+          <filter name="filtro_urgente" string="Urgentes"
+                  domain="[('prioridad', '&lt;=', 1)]"/>
+          <group expand="0" string="Agrupar por">
+            <filter name="group_estado" string="Estado" context="{'group_by': 'estado'}"/>
+            <filter name="group_origen" string="Origen" context="{'group_by': 'origen'}"/>
+            <filter name="group_ref" string="Referencia" context="{'group_by': 'origen_ref'}"/>
+          </group>
+        </search>
+      </field>
+    </record>
+
+    <record id="action_wis_sync_queue" model="ir.actions.act_window">
+      <field name="name">Cola de productos</field>
+      <field name="res_model">wis.sync.queue</field>
+      <field name="view_mode">tree,form</field>
+      <field name="search_view_id" ref="view_wis_sync_queue_search"/>
+      <field name="context">{'search_default_filtro_pendiente': 1}</field>
+      <field name="help" type="html">
+        <p class="o_view_nocontent_smiling_face">
+          No hay variantes en cola
+        </p>
+        <p>
+          Acá aparecen las variantes esperando integrarse con WIS. Se procesan
+          en segundo plano por orden de prioridad, sin bloquear la operación.
+        </p>
+      </field>
+    </record>
+
+    <menuitem id="menu_wis_sync_queue"
+              name="Cola de productos"
+              parent="menu_integracion_wis_root"
+              action="action_wis_sync_queue"
+              sequence="35"/>
+
+    <!-- Acciones masivas "Integrar en WMS" desde los listados de producto -->
+    <record id="action_integrar_wms_template" model="ir.actions.server">
+      <field name="name">Integrar en WMS</field>
+      <field name="model_id" ref="product.model_product_template"/>
+      <field name="binding_model_id" ref="product.model_product_template"/>
+      <field name="binding_view_types">list,form</field>
+      <field name="state">code</field>
+      <field name="code">action = records.action_integrar_wms_masivo()</field>
+    </record>
+
+    <record id="action_integrar_wms_variante" model="ir.actions.server">
+      <field name="name">Integrar en WMS</field>
+      <field name="model_id" ref="product.model_product_product"/>
+      <field name="binding_model_id" ref="product.model_product_product"/>
+      <field name="binding_view_types">list,form</field>
+      <field name="state">code</field>
+      <field name="code">action = records.action_integrar_wms_masivo()</field>
+    </record>
+
+  </data>
+</odoo>

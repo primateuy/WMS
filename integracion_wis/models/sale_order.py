@@ -18,7 +18,7 @@ class SaleOrder(models.Model):
             for picking in pickings:
                 if picking.move_ids:
                     
-                    datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+                    datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
 
                     if (datosAPI and datosAPI.apiLink and datosAPI.comunicacion_activa and
                             picking.state == picking.picking_type_id.estado_disparo_wis):

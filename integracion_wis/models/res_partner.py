@@ -133,7 +133,7 @@ class ResPartner(models.Model):
         if self.integracion_wms == False:
             raise ValidationError("El agente no está marcado para integración con WIS")
 
-        datosAPI = self.env['integracion_wis.integracion_wis'].search([], limit=1)
+        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
         if not datosAPI or not datosAPI.apiLink:
             raise ValidationError("No se encuentran todos los datos para una consulta a la API")
 
