@@ -1,0 +1,4 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_primate_stock_import_session_user,primate_stock_import.session user,model_primate_stock_import_session,group_primate_stock_import_user,1,1,1,0
+access_primate_stock_import_session_manager,primate_stock_import.session manager,model_primate_stock_import_session,stock.group_stock_manager,1,1,1,1
+access_primate_stock_import_wizard_user,primate_stock_import.wizard user,model_primate_stock_import_wizard,group_primate_stock_import_user,1,1,1,1

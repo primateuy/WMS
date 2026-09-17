@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="primate_stock_import_wizard_view_form" model="ir.ui.view">
+        <field name="name">primate_stock_import.wizard.form</field>
+        <field name="model">primate_stock_import.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Importar operaciones de inventario">
+                <field name="state" invisible="1"/>
+                <field name="has_errors" invisible="1"/>
+                <field name="template_file" invisible="1"/>
+                <field name="template_file_name" invisible="1"/>
+
+                <!-- PASO 1: CARGA -->
+                <div invisible="state != 'upload'">
+                    <div class="alert alert-info" role="status">
+                        <ol class="mb-0">
+                            <li>Descargá la plantilla y completá una fila por línea de movimiento.</li>
+                            <li>Las filas con la misma <code>operation_ref</code> forman una sola operación.</li>
+                            <li>Subí el archivo y validá. En este paso no se crea nada.</li>
+                        </ol>
+                    </div>
+                    <group>
+                        <field name="file" filename="file_name" widget="binary"/>
+                        <field name="file_name" invisible="1"/>
+                        <field name="session_id" invisible="not session_id"/>
+                    </group>
+                </div>
+
+                <!-- PASO 2: RESULTADO DE VALIDACIÓN -->
+                <div invisible="state != 'validated'">
+                    <div class="alert alert-danger" role="alert" invisible="not has_errors">
+                        El archivo tiene errores bloqueantes. Corregilo y volvé a validarlo.
+                    </div>
+                    <div class="alert alert-success" role="status" invisible="has_errors">
+                        Validación correcta. Podés importar: las operaciones se crearán en borrador.
+                    </div>
+                    <group>
+                        <field name="session_id"/>
+                        <field name="error_count"/>
+                        <field name="warning_count"/>
+                    </group>
+                    <field name="log_html" readonly="1" nolabel="1"/>
+                </div>
+
+                <!-- PASO 3: IMPORTADO -->
+                <div invisible="state != 'done'">
+                    <div class="alert alert-success" role="status">
+                        Importación completada. Las operaciones quedaron en borrador; desde la
+                        lista podés seleccionarlas y usar la acción
+                        <b>Comprobar disponibilidad (importadas)</b>.
+                    </div>
+                    <group>
+                        <field name="session_id"/>
+                        <field name="picking_count"/>
+                        <field name="warning_count"/>
+                    </group>
+                </div>
+
+                <footer>
+                    <!-- Paso 1 -->
+                    <button name="action_validate" type="object" string="Validar"
+                            class="btn-primary" invisible="state != 'upload'"/>
+                    <button name="action_download_template" type="object"
+                            string="Descargar plantilla" class="btn-secondary"
+                            invisible="state != 'upload'"/>
+                    <!-- Paso 2 -->
+                    <button name="action_import" type="object" string="Importar"
+                            class="btn-primary" invisible="state != 'validated' or has_errors"/>
+                    <button name="action_back_to_upload" type="object"
+                            string="Cargar otro archivo" class="btn-secondary"
+                            invisible="state != 'validated'"/>
+                    <!-- Paso 3 -->
+                    <button name="action_view_pickings" type="object"
+                            string="Ver operaciones creadas" class="btn-primary"
+                            invisible="state != 'done'"/>
+                    <button name="action_view_session" type="object"
+                            string="Ver sesión" class="btn-secondary"
+                            invisible="state != 'done'"/>
+                    <button special="cancel" string="Cerrar" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="primate_stock_import_wizard_action" model="ir.actions.act_window">
+        <field name="name">Importar operaciones desde Excel</field>
+        <field name="res_model">primate_stock_import.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+</odoo>
