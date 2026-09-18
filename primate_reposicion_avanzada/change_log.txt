@@ -1,0 +1,285 @@
+Reposición Avanzada — PrimateUY
+===============================
+
+Registro de métodos de terceros overrideados y de los desvíos respecto de la especificación,
+para revisar en cada actualización de las dependencias.
+
+Versiones de referencia (22/08/2026):
+  - setu_advance_reordering            17.0.0.2  (Setu Consulting, OPL-1, de pago)
+  - setu_intercompany_transaction      17.0.1.6  (Setu Consulting, OPL-1, de pago)
+  - automatizacion_reglas_abastecimiento 17.0.0.1 (Avance Software, shared/primateuy/WMS)
+  - automatic_crossdocking             17.0.0.1  (Avance Software, shared/primateuy/WMS)
+  - stock_multiplos_validation         (shared/primateuy/WMS)
+  - Odoo 17.0 Community + Enterprise
+
+Los dos módulos de Setu son de pago: cualquier actualización del vendor puede cambiar la
+firma o el cuerpo de los métodos de abajo. Verificar antes de dar el upgrade por bueno.
+
+
+17.0.1.1.0 — versión inicial
+----------------------------
+
+## Overrides con super() — riesgo bajo
+
+advance.procurement.process.action_procurement_confirm
+    setu_advance_reordering/models/advance_procurement/advance_procurement_process.py:262
+    Post-hook: después del cálculo de demanda de Setu corre primate_process_lines(), que
+    marca fuera de grupo, ajusta al múltiplo, clasifica por factibilidad y reparte.
+    action_recalculate_procurement_demand llama a este método, así que también queda cubierto.
+
+advance.reorder.orderprocess.prepare_reorder_line_vals
+    setu_advance_reordering/models/advance_reorder_demand/advance_reorder_order_process.py:229
+    Post-hook. Ajusta demand_adjustment_qty al múltiplo.
+    OJO: el método base escribe directo sobre las líneas existentes (line_id.write) y solo
+    devuelve tuplas (0,0,{}) para las nuevas. El override corrige los dos caminos. Si el
+    vendor unifica ese doble comportamiento, revisar.
+
+advance.reorder.orderprocess._prepare_purchase_order_line_vals
+    setu_advance_reordering/models/advance_reorder_demand/advance_reorder_order_process.py:476
+    Post-hook. Ajusta product_qty al múltiplo.
+
+advance.reorder.planner.create_real_demand_record
+    setu_advance_reordering/models/advance_reorder_demand/advance_reorder_planner.py:190
+    Post-hook: manda el correo de resumen cuando el auto workflow dejó reposiciones sin
+    validar.
+
+setu.intercompany.transfer.create_direct_picking
+setu.intercompany.transfer.create_two_step_pickings
+setu.intercompany.transfer.create_two_step_reverse_pickings
+    setu_intercompany_transaction/models/setu_intercompany_transfer.py:447, 457, 496
+    Reimplementados SOLO cuando el canal tiene tipo de operación configurado. Sin
+    configuración se delega al super() y el comportamiento base queda intacto.
+    De paso se corrige un descuido del base en create_two_step_pickings: calcula
+    picking_type_id para el primer picking pero solo se lo pasa a prepare_move_vals, no a
+    prepare_picking_vals, con lo cual el picking tomaba el fallback int_type_id. Hoy
+    coincidían en valor; al poder configurarlos dejarían de coincidir.
+    NO se tocan las ramas inter-company de action_validate_reverse_transfer que usan
+    in_type_id / out_type_id: ahí los pickings van contra ubicaciones de cliente y
+    proveedor, y un tipo interno configurable sería incorrecto.
+
+## Reimplementaciones completas — riesgo alto
+
+advance.procurement.process.create_ict_lines
+    setu_advance_reordering/models/advance_procurement/advance_procurement_process.py:423
+    El base calcula la cantidad como order_qty * wh_sharing_percentage / 100, que es la
+    regla de 3 hardcodeada. Acá la cantidad ya viene resuelta por la estrategia elegida con
+    el múltiplo aplicado, así que se usa qty_distributable directamente y se saltean las
+    líneas fuera de grupo y las que quedaron en cero.
+
+stock.rule.create_iwt_lines
+    setu_advance_reordering/models/advance_reorder_orderpoint/stock_rule.py:369
+    No alcanza un post-hook: la cantidad enviada y el remanente que pasa al siguiente canal
+    de la cadena se calculan juntos en el mismo loop.
+    Mitigación: si ningún producto del lote tiene mutiplos_distribucion > 1 se delega
+    directo al super().
+    Criterio para productos con múltiplo:
+      - redondeo según channel.multiplo_rounding_method (por defecto ceil), salvo que el
+        resultado no quepa en el stock del origen: ahí baja al múltiplo inferior. El stock
+        disponible es un tope duro, no una preferencia.
+      - si no entra ni un múltiplo, se omite el producto y queda todo pendiente.
+      - si el remanente pendiente es menor al múltiplo, se descarta: cubrirlo desde otro
+        origen obligaría a mandar un pack entero de más.
+
+## Motor de distribución reusable (sección 5.9 de la especificación)
+
+primate.distribution.strategy.mixin (AbstractModel) con compute_partial_distribution().
+Las 5 estrategias viven ahí, sobre listas de dicts en vez de recordsets, para que otros
+módulos las reusen sin acoplarse a advance.procurement.process. Primer consumidor externo:
+forum_reorder_origin, que las aplica sobre reglas de reabastecimiento.
+
+advance.procurement.process hereda el mixin y delega: _primate_distribuir() solo arma los
+candidatos (key, demand_qty, ads, sequence) y la lista de prioridad.
+
+OJO con el _name explícito: al pasar _inherit a lista, Odoo toma el nombre de la CLASE como
+_name si no se declara, y el modelo falla al inicializar con "The _name attribute
+AdvanceProcurementProcess is not valid".
+
+Dos cambios de comportamiento del refactor, ambos verificados:
+
+1. Desempate entre demandas iguales. Antes se usaba el orden del recordset de líneas; ahora
+   el 'sequence' del candidato, que es warehouse_id (orden de creación del almacén). Con
+   demandas distintas los resultados son idénticos; con 10 demandas iguales de 10 sobre 90
+   disponibles cambia CUÁL destino queda sin cubrir, no el total ni los múltiplos.
+
+2. Paso de reparto cuando el producto no tiene múltiplo. Se agregó el parámetro
+   precision_rounding (0.01 por defecto): sin él, un reparto fraccionario redondeado por la
+   precisión decimal del campo destino sumaba MÁS que el disponible (33 candidatos a
+   39.8484… se guardan como 39.85 y totalizan 1315.05 sobre 1315). Ahora se redondea hacia
+   abajo al paso y el sobrante se reparte en pasos exactos: 1314.99, nunca por encima.
+
+## Campos agregados
+
+advance.procurement.process:      product_category_ids, warehouse_group_ids,
+                                  distribution_strategy, strategy_warehouse_ids,
+                                  multiplo_rounding_method
+advance.procurement.process.line: multiplo_distribucion, qty_adjusted,
+                                  qty_available_fulfiller, qty_distributable,
+                                  execution_status, warehouse_group_mismatch
+advance.reorder.orderprocess:     product_category_ids, warehouse_group_ids,
+                                  multiplo_rounding_method
+create.reordering:                warehouse_group_ids
+                                  (product_category_ids ya existía en el base, sin efecto
+                                   sobre product_ids: solo filtraba el histórico de ventas)
+setu.interwarehouse.channel:      picking_type_id, requestor_picking_type_id,
+                                  picking_type_wms_integration,
+                                  requestor_picking_type_wms_integration,
+                                  multiplo_rounding_method
+setu.intercompany.channel:        picking_type_id, requestor_picking_type_id,
+                                  picking_type_wms_integration,
+                                  requestor_picking_type_wms_integration
+
+No se agrega ningún modelo nuevo, así que no hay ACLs ni grupos propios.
+
+
+DESVÍOS RESPECTO DE LA ESPECIFICACIÓN
+--------------------------------------
+
+Todos verificados contra el código y aprobados el 22/08/2026.
+
+1. La spec (3.3) deriva qty_adjusted de "qty_to_order de setu". Ese campo no existe en
+   advance.procurement.process.line: es de stock.warehouse.orderpoint. La cantidad en la
+   línea de reposición vive en demand_adjustment_qty (Integer, "To be delivered"), y es de
+   ahí que se calcula qty_adjusted.
+
+2. qty_available_fulfiller no es el stock bruto del origen: es el stock menos la demanda
+   propia del origen, replicando prepare_reorder_summary_vals:302 de Setu. Sin ese descuento
+   el reparto le come al origen el stock que necesita para sí mismo.
+
+3. La clasificación de factibilidad (5.5) se evalúa **agregada por producto**, no línea por
+   línea. Con 8 destinos pidiendo 10 y el origen con 50, la spec literal daría las 8 líneas
+   como ejecutables, ninguna estrategia correría (5.6 las limita a las parciales) y se
+   generarían transferencias por 80 sobre un stock de 50. Se compara la suma de qty_adjusted
+   de todos los destinos del producto contra el stock disponible: si excede, todas las
+   líneas de ese producto pasan a parcial.
+
+3.b El criterio se define DESPUÉS de conocer la falta, no durante el cálculo (aclarado con
+   Diego el 22/08/2026). Al confirmar:
+     - los productos cuyo origen cubre toda su demanda se resuelven solos → Ejecutable con
+       la cantidad completa;
+     - los productos en falta quedan con TODAS sus líneas en "A definir criterio" y en
+       cantidad cero. El sistema no elige a quién cubrir al 100% y a quién recortar: con 10
+       destinos pidiendo 10 y 90 en origen hay muchas formas de "cumplir lo que se puede"
+       (9 completos y uno en cero, nueve a cada uno, 10 a algunos y 8 a otros), y elegir
+       entre ellas ES la decisión del usuario.
+   Por eso distribution_strategy NO tiene default: el reparto ocurre al presionar "Aplicar
+   criterio", o cargando las cantidades a mano línea por línea. La etiqueta del estado
+   'partial' es "A definir criterio", no "Parcial", para que se lea como lo que es.
+   Complementos: campo qty_shortfall (almacenado, filtrable) que muestra a quién se recortó
+   y cuánto; botón "Derivar lo pendiente a un proceso nuevo" que arma otro proceso con los
+   productos y almacenes sin resolver; y las líneas se pueden borrar a mano (el árbol de
+   Setu ya lo permitía en estado inprogress).
+
+4. No se agrega execution_mode a advance.reorder.planner (5.7). El flujo automático ya se
+   configura con advance.reorder.process.auto.workflow, que tiene create_replenishment,
+   validate_replenishment y verify_replenishment con onchange en cascada. El "modo
+   notificación" es create_replenishment activo; este módulo solo le suma el correo.
+   PENDIENTE DE DEFINICIÓN: el auto workflow de Setu nunca genera transferencias
+   (action_procurement_internal_transfer solo se dispara desde el botón de la vista), y
+   verify_replenishment es un campo muerto: se declara pero nunca se lee. O sea que el
+   "modo auto" de la spec no existe en Setu y necesitaría un flag nuevo si se lo quiere.
+
+5. El alcance de la spec es IWT; se incluye también setu.intercompany.channel (ICT) porque
+   el resolver de canal de setu_intercompany_transfer maneja los dos casos y discriminar por
+   tipo sin motivo agregaría código muerto.
+
+6. La spec describe un solo picking_type_id por canal. Se implementan dos
+   (picking_type_id + requestor_picking_type_id) porque el traslado en dos pasos necesita un
+   tipo por almacén: origen → tránsito y tránsito → destino.
+
+6.b El "filtro rápido por estado" dentro de la pestaña (sección 6) no es implementable: una
+   lista One2many embebida en un formulario no tiene barra de búsqueda en Odoo, así que una
+   vista `search` no aplica ahí. Se resolvió sin ocultar nada: contadores por estado en la
+   propia pestaña (ejecutables / a definir / sin ejecución / sin demanda / fuera de grupo) y
+   un botón que abre las líneas en una lista propia, donde la búsqueda, los filtros y el
+   agrupar sí funcionan.
+
+7. strategy_warehouse_ids no conserva el orden de carga: un Many2many de Odoo devuelve los
+   registros según el _order del comodelo, no según el orden en que el usuario los agregó.
+   La prioridad efectiva es el campo "Secuencia" de stock.warehouse (que es su _order). Los
+   almacenes con demanda que no figuren en la lista se atienden al final. Para una prioridad
+   arbitraria haría falta un One2many con campo de secuencia, o sea un modelo nuevo, que la
+   spec descarta explícitamente.
+
+8. La ventana de la estrategia por rotación queda fija en 90 días (constante ROTACION_DIAS),
+   como pide la spec. Además: si ningún almacén tiene historial de ventas en la ventana, la
+   estrategia cae al orden de prioridad manual en vez de dejar el orden indefinido.
+   ATENCIÓN: hoy product.sales.history está vacío y su cron (data/ir_cron.xml de Setu) viene
+   con active=False, así que por_rotacion no va a ordenar por nada hasta que se pueble.
+
+
+VERIFICACIÓN
+------------
+
+63 checks funcionales en verde sobre o17_forum (22/08/2026): redondeo ceil/floor y tope
+duro; carga por categoría Y grupo; derivación de destinos con validación de canal;
+clasificación sin escasez / con escasez agregada / sin ejecución; las 5 estrategias con
+demandas [20,10,6] sobre stock 20 y múltiplo 2; fuera de grupo; constraints de edición
+manual; create_ict_lines con qty_distributable; tipo de operación en traslado directo y en
+dos pasos; y paridad del fallback sin configurar.
+
+
+MÓDULO PREDECESOR
+-----------------
+
+Reemplaza a forum_advance_reorder_ext (clients/forum/forum), que implementaba una
+arquitectura anterior de la especificación. De ahí se portaron, ya probados: la expansión de
+grupos de almacén a config_ids, los campos de tipo de operación en los canales, los tres
+overrides de setu_intercompany_transfer con la corrección del bug del base, el ajuste al
+múltiplo en el wizard de demanda y en la línea de compra, y la reimplementación de
+stock_rule.create_iwt_lines. Ese módulo fue desinstalado y retirado del repo.
+
+
+AÑADIDO 22/08/2026 — campos de Setu movidos a una pestaña en la orden de venta
+-------------------------------------------------------------------------------
+
+setu_intercompany_transaction/views/ict_sale_order_form.xml declara, después de
+payment_term_id, un bloque de campos en el encabezado de la orden de venta, visible siempre
+aunque la mayoría de las órdenes no usen la funcionalidad. Se movieron a una pestaña propia,
+"Inter-Compañía / Inter-Almacén", que se oculta cuando
+stock_replenishment_priority == 'do_nothing'.
+
+Campos movidos: intercompany_transfer_id, intercompany_channel_id, sale_iwt_option,
+interwarehouse_channel_id, distributed_replenish.
+
+Se dejan en el encabezado los del vendor con invisible="1" (create_ict_option,
+create_iwt_option, stock_replenishment_priority, interwarehouse_channel_ids,
+intercompany_channel_ids): son soporte de los invisible=/readonly= de otros campos y no
+ocupan lugar. stock_replenishment_priority además se necesita ahí para ocultar la pestaña.
+
+No se toca la columna interwarehouse_channel_id de la grilla de líneas.
+
+DOS TRAMPAS DEL position="move", las dos encontradas en la práctica:
+
+1. Un <field name="x" position="move"/> NO mueve nada. Odoo lo interpreta como una
+   declaración nueva y el campo queda DUPLICADO: una vez en el encabezado y otra en la
+   pestaña. Hay que usar <xpath expr="..." position="move"/>.
+
+2. El move solo se procesa para hijos DIRECTOS del elemento posicionador
+   (odoo/tools/template_inheritance.py:37, `for child in spec`). Anidados dentro de un
+   <group> del mismo bloque se ignoran EN SILENCIO: la pestaña queda vacía, los campos no se
+   mueven y no hay ningún error. Por eso la vista va en dos pasos: primero crea la pestaña
+   con los grupos vacíos y nombrados, después cada campo se mueve dentro de su grupo.
+
+Los xpath van anclados a following-sibling::field de payment_term_id, que es donde el vendor
+los declara. Es lo que evita tocar la columna homónima de la grilla de líneas, que no es
+hermana de payment_term_id.
+
+Prioridad de la vista: 100. La del vendor (ict_sale_order_form) tiene 99 y tiene que
+aplicarse antes para que los campos existan al momento de moverlos.
+
+
+AÑADIDO 22/08/2026 — el paso de reparto sale de la unidad de medida
+--------------------------------------------------------------------
+
+compute_partial_distribution tiene precision_rounding con default 0,01, que se usa como paso
+cuando el producto no tiene múltiplo de distribución (múltiplo 1). En productos que se
+manejan por unidad eso reparte cantidades como 0,28.
+
+El default se deja en 0,01 por compatibilidad, pero los consumidores tienen que pasar el
+redondeo de la unidad de medida del producto. Ya lo hacen los dos:
+
+  advance.procurement.process._primate_distribuir    precision_rounding=product.uom_id.rounding
+  forum.reorder.distribution.wizard.action_apply     precision_rounding=product_uom.rounding
+
+Para la UoM "Units" el rounding es 1,0 y el reparto queda en unidades enteras. Si se agrega un
+consumidor nuevo del mixin, pasarlo también: sin eso el reparto sale con dos decimales.

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- setu_intercompany_transaction mete sus campos de reposición en el encabezado de la
+         orden, justo después de payment_term_id, visibles siempre aunque la mayoría de las
+         órdenes no usen la funcionalidad. Acá se mueven a una pestaña propia.
+
+         Prioridad 100: la vista del vendor (setu_intercompany_transaction.ict_sale_order_form)
+         tiene 99, así que esta tiene que aplicarse después para que los campos ya existan
+         cuando se los mueve.
+
+         Sobre el mecanismo de move, que tiene dos trampas:
+
+         1. Un <field name="x" position="move"/> NO mueve nada: Odoo lo interpreta como una
+            declaración nueva y el campo queda DUPLICADO, una vez en el encabezado y otra en
+            la pestaña. Hay que usar <xpath expr="..." position="move"/>.
+
+         2. El move solo funciona para hijos DIRECTOS del elemento posicionador
+            (odoo/tools/template_inheritance.py:37, `for child in spec`). Si se anidan dentro
+            de un <group> del mismo bloque, se ignoran en silencio: la pestaña queda vacía y
+            los campos no se mueven. Por eso va en dos pasos — primero se crea la pestaña con
+            los grupos vacíos, después cada campo se mueve dentro de su grupo.
+
+         Los xpath van anclados a following-sibling de payment_term_id, que es donde el
+         vendor los declara. Esto importa sobre todo para interwarehouse_channel_id, que
+         además existe como columna en la grilla de líneas: esa no es hermana de
+         payment_term_id, así que no se toca.
+
+         Los campos con invisible="1" del vendor (create_ict_option, create_iwt_option,
+         stock_replenishment_priority, interwarehouse_channel_ids, intercompany_channel_ids)
+         se dejan donde están: son soporte de los invisible=/readonly= de otros campos y no
+         ocupan lugar en pantalla. stock_replenishment_priority además se necesita en el
+         encabezado para poder ocultar la pestaña entera. -->
+    <record id="view_order_form_primate_ict_tab" model="ir.ui.view">
+        <field name="name">sale.order.form.primate.ict.tab</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="priority">100</field>
+        <field name="arch" type="xml">
+
+            <!-- Paso 1: la pestaña con los grupos vacíos. -->
+            <xpath expr="//notebook" position="inside">
+                <page string="Inter-Compañía / Inter-Almacén"
+                      name="primate_ict_iwt"
+                      invisible="stock_replenishment_priority == 'do_nothing'">
+                    <group>
+                        <group name="primate_ict_documento" string="Documento generado"/>
+                        <group name="primate_ict_canales" string="Canales"/>
+                    </group>
+                    <group>
+                        <group name="primate_ict_criterio" string="Criterio de reposición"/>
+                    </group>
+                </page>
+            </xpath>
+
+            <!-- Paso 2: mover cada campo a su grupo, como hijo directo del posicionador. -->
+            <xpath expr="//group[@name='primate_ict_documento']" position="inside">
+                <xpath expr="//field[@name='payment_term_id']/following-sibling::field[@name='intercompany_transfer_id']"
+                       position="move"/>
+            </xpath>
+
+            <xpath expr="//group[@name='primate_ict_canales']" position="inside">
+                <xpath expr="//field[@name='payment_term_id']/following-sibling::field[@name='intercompany_channel_id']"
+                       position="move"/>
+            </xpath>
+            <xpath expr="//group[@name='primate_ict_canales']" position="inside">
+                <xpath expr="//field[@name='payment_term_id']/following-sibling::field[@name='interwarehouse_channel_id']"
+                       position="move"/>
+            </xpath>
+
+            <xpath expr="//group[@name='primate_ict_criterio']" position="inside">
+                <xpath expr="//field[@name='payment_term_id']/following-sibling::field[@name='sale_iwt_option']"
+                       position="move"/>
+            </xpath>
+            <xpath expr="//group[@name='primate_ict_criterio']" position="inside">
+                <xpath expr="//field[@name='payment_term_id']/following-sibling::field[@name='distributed_replenish']"
+                       position="move"/>
+            </xpath>
+
+        </field>
+    </record>
+</odoo>
