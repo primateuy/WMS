@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <menuitem id="menu_primate_stock_import_wizard"
+              name="Importar operaciones desde Excel"
+              parent="stock.menu_stock_warehouse_mgmt"
+              action="primate_stock_import_wizard_action"
+              groups="primate_stock_import.group_primate_stock_import_user"
+              sequence="50"/>
+
+    <menuitem id="menu_primate_stock_import_session"
+              name="Sesiones de importación"
+              parent="stock.menu_stock_warehouse_mgmt"
+              action="primate_stock_import_session_action"
+              groups="primate_stock_import.group_primate_stock_import_user"
+              sequence="51"/>
+</odoo>

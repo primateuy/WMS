@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="group_primate_stock_import_user" model="res.groups">
+        <field name="name">Importación de operaciones desde Excel</field>
+        <field name="category_id" ref="base.module_category_inventory_inventory"/>
+        <field name="implied_ids" eval="[(4, ref('stock.group_stock_user'))]"/>
+        <field name="comment">Puede importar operaciones de inventario desde Excel y consultar
+las sesiones de importación.</field>
+    </record>
+
+    <!-- Los responsables de inventario importan sin configuración extra. -->
+    <record id="stock.group_stock_manager" model="res.groups">
+        <field name="implied_ids" eval="[(4, ref('group_primate_stock_import_user'))]"/>
+    </record>
+</odoo>

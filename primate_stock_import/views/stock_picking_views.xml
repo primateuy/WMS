@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_picking_form_inherit_primate_stock_import" model="ir.ui.view">
+        <field name="name">stock.picking.form.inherit.primate_stock_import</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <field name="origin" position="after">
+                <field name="import_session_id" invisible="not import_session_id"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_picking_internal_search_inherit_primate_stock_import" model="ir.ui.view">
+        <field name="name">stock.picking.search.inherit.primate_stock_import</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_internal_search"/>
+        <field name="arch" type="xml">
+            <filter name="draft" position="after">
+                <filter name="is_imported" string="Importadas desde Excel"
+                        domain="[('is_imported', '=', True)]"/>
+            </filter>
+            <field name="origin" position="after">
+                <field name="import_session_id"/>
+            </field>
+        </field>
+    </record>
+
+    <!-- Acción masiva en la lista de operaciones -->
+    <record id="action_check_availability_batch" model="ir.actions.server">
+        <field name="name">Comprobar disponibilidad (importadas)</field>
+        <field name="model_id" ref="stock.model_stock_picking"/>
+        <field name="binding_model_id" ref="stock.model_stock_picking"/>
+        <field name="binding_view_types">list</field>
+        <field name="state">code</field>
+        <field name="code">action = records.action_check_availability_batch()</field>
+    </record>
+</odoo>

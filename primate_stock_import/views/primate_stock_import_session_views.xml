@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="primate_stock_import_session_view_tree" model="ir.ui.view">
+        <field name="name">primate_stock_import.session.tree</field>
+        <field name="model">primate_stock_import.session</field>
+        <field name="arch" type="xml">
+            <tree string="Sesiones de importación" create="false">
+                <field name="name"/>
+                <field name="date_import"/>
+                <field name="user_id" widget="many2one_avatar_user"/>
+                <field name="file_name"/>
+                <field name="total_rows"/>
+                <field name="picking_count"/>
+                <field name="move_count"/>
+                <field name="error_count"/>
+                <field name="warning_count"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="state" widget="badge"
+                       decoration-success="state == 'imported'"
+                       decoration-info="state == 'validated'"
+                       decoration-danger="state == 'failed'"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="primate_stock_import_session_view_form" model="ir.ui.view">
+        <field name="name">primate_stock_import.session.form</field>
+        <field name="model">primate_stock_import.session</field>
+        <field name="arch" type="xml">
+            <form string="Sesión de importación" create="false" edit="false">
+                <header>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="pending,validated,imported"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_view_pickings" type="object" class="oe_stat_button"
+                                icon="fa-truck" invisible="not picking_count">
+                            <field name="picking_count" widget="statinfo" string="Operaciones"/>
+                        </button>
+                    </div>
+                    <div class="oe_title">
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="date_import"/>
+                            <field name="user_id" widget="many2one_avatar_user"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                        </group>
+                        <group>
+                            <field name="file" filename="file_name"/>
+                            <field name="file_name" invisible="1"/>
+                            <field name="total_rows"/>
+                            <field name="move_count"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Resultado de validación" name="log">
+                            <field name="log_html" readonly="1" nolabel="1"/>
+                        </page>
+                        <page string="Operaciones creadas" name="pickings">
+                            <field name="picking_ids" readonly="1">
+                                <tree>
+                                    <field name="name"/>
+                                    <field name="picking_type_id"/>
+                                    <field name="partner_id"/>
+                                    <field name="origin"/>
+                                    <field name="scheduled_date"/>
+                                    <field name="state" widget="badge"/>
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="primate_stock_import_session_view_search" model="ir.ui.view">
+        <field name="name">primate_stock_import.session.search</field>
+        <field name="model">primate_stock_import.session</field>
+        <field name="arch" type="xml">
+            <search string="Sesiones de importación">
+                <field name="name"/>
+                <field name="file_name"/>
+                <field name="user_id"/>
+                <filter name="imported" string="Importadas" domain="[('state', '=', 'imported')]"/>
+                <filter name="failed" string="Con errores" domain="[('state', '=', 'failed')]"/>
+                <filter name="my_sessions" string="Mis sesiones" domain="[('user_id', '=', uid)]"/>
+                <group expand="0" string="Agrupar por">
+                    <filter name="group_by_state" string="Estado" context="{'group_by': 'state'}"/>
+                    <filter name="group_by_user" string="Usuario" context="{'group_by': 'user_id'}"/>
+                    <filter name="group_by_date" string="Fecha" context="{'group_by': 'date_import:day'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="primate_stock_import_session_action" model="ir.actions.act_window">
+        <field name="name">Sesiones de importación</field>
+        <field name="res_model">primate_stock_import.session</field>
+        <field name="view_mode">tree,form</field>
+        <field name="search_view_id" ref="primate_stock_import_session_view_search"/>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Todavía no hay sesiones de importación</p>
+            <p>Cada vez que se valida o importa un Excel de operaciones queda registrada acá,
+               con el archivo original y el detalle de errores y advertencias por fila.</p>
+        </field>
+    </record>
+</odoo>
