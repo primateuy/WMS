@@ -30,8 +30,8 @@ Flujo:
    (importadas)* confirma y reserva las operaciones seleccionadas, dejando en
    el chatter de cada una el error si lo hubo, sin bloquear al resto.
 
-Sin dependencias Python adicionales: la lectura usa ``xlrd`` y la plantilla se
-genera con ``xlsxwriter``, ambos requisitos estándar de Odoo 17.
+La lectura usa ``openpyxl`` para .xlsx y ``xlrd`` para .xls; la plantilla se
+genera con ``xlsxwriter``.
     """,
     'depends': ['stock'],
     'data': [

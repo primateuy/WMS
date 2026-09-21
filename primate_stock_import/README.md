@@ -80,8 +80,10 @@ resto. Las operaciones hechas o canceladas se omiten.
 
 ## Dependencias
 
-Solo `stock`. La lectura usa `xlrd` (1.2.x) y la plantilla `xlsxwriter`, ambos
-requisitos estándar de Odoo 17.
+Solo `stock`. Los `.xlsx` se leen con `openpyxl` y los `.xls` con `xlrd`; la
+plantilla se genera con `xlsxwriter`. No se usa `xlrd` para `.xlsx` porque desde
+su versión 2.0 dejó de soportar ese formato (`Excel xlsx file; not supported`) y
+la versión instalada varía según el servidor.
 
 ## Tests
 
