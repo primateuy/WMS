@@ -7,8 +7,8 @@
             <field name="model">stock.location</field>
             <field name="inherit_id" ref="stock.view_location_form"/>
             <field name="arch" type="xml">
-                <xpath expr="//group[@name='additional_info']" position="inside">
-                    <group string="Integración WIS">
+                <xpath expr="//group[@name='additional_info']" position="after">
+                    <group string="Integración WIS" name="integracion_wis">
                         <field name="wis_no_requiere_eremito"/>
                     </group>
                 </xpath>
