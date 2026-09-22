@@ -5,6 +5,13 @@ La integración de un producto con muchas variantes puede demorar varios
 minutos. Este modelo permite encolar variantes y procesarlas por lote desde un
 cron, para que el usuario no quede bloqueado esperando a WIS.
 
+**Ningún camino automático llama a WIS dentro de su transacción**: el alta de un
+producto, tildar la casilla en la ficha, agregar un atributo y la acción masiva
+encolan todos acá. El único envío inmediato es el botón «Integrar ahora con
+WIS», que es una decisión explícita del usuario. Al encolar se dispara el cron
+(`_disparar_cron`), así que el trabajo arranca en segundos y no en el próximo
+ciclo de 5 minutos.
+
 No se usa `queue_job` de la OCA porque no está disponible en este addons-path:
 esta cola cubre el caso concreto (integración de productos) sin sumar
 infraestructura de servidor. Si más adelante entra `queue_job`, se reemplaza el
@@ -130,7 +137,30 @@ class WisSyncQueue(models.Model):
 
         _logger.info("[WIS] Encoladas %d variantes (origen=%s ref=%s prioridad=%d)",
                      len(entradas), origen, origen_ref or '-', prioridad)
+        self._disparar_cron()
         return entradas | a_priorizar
+
+    @api.model
+    def _disparar_cron(self):
+        """Pide que el cron corra apenas termine esta transacción.
+
+        Sin esto la cola espera hasta el próximo ciclo —5 minutos—, y para un
+        producto de tres variantes ese retraso se ve como si no hubiera pasado
+        nada. Con el trigger el trabajo arranca a los segundos y encolar deja
+        de ser un compromiso entre no bloquear al usuario y que el producto
+        quede integrado ya.
+
+        Nunca puede tumbar al que encola: si el cron no está o falla el
+        disparo, la cola igual se procesa en el ciclo normal.
+        """
+        cron = self.env.ref('integracion_wis.ir_cron_wis_procesar_cola_productos',
+                            raise_if_not_found=False)
+        if not cron:
+            return
+        try:
+            cron.sudo()._trigger()
+        except Exception as e:
+            _logger.warning("[WIS] No se pudo disparar el cron de la cola: %s", e)
 
     # ------------------------------------------------------------------
     # Procesamiento

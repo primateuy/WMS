@@ -10,12 +10,26 @@
                     <page string="Integración WIS" name="wis_integration">
                         <group name="wis_template_group">
                             <field name="integracion_wms" readonly="not active or type != 'product'"/>
+                            <field name="wis_variantes_en_cola" readonly="1"
+                                   invisible="not integracion_wms or wis_variantes_en_cola == 0"/>
                         </group>
+                        <div class="alert alert-info" role="alert"
+                             invisible="not integracion_wms or wis_variantes_en_cola == 0">
+                            Las variantes se integran <b>en segundo plano</b>: podés seguir
+                            trabajando. El avance se ve en Integración WIS → Cola de productos.
+                            Si necesitás que salgan ahora, usá «Integrar ahora con WIS».
+                        </div>
                         <group>
                             <button name="consultaStock" 
                                     type="object" 
                                     class="btn-primary" 
                                     string="Consultar Stock"
+                                    invisible="not integracion_wms"/>
+                            <button name="enviar_variantes_wms"
+                                    type="object"
+                                    class="btn-secondary"
+                                    string="Integrar ahora con WIS"
+                                    confirm="Se van a enviar todas las variantes a WIS en este momento. Con muchas variantes la pantalla puede quedar esperando la respuesta. ¿Continuar?"
                                     invisible="not integracion_wms"/>
                         </group>
                     </page>

@@ -346,3 +346,209 @@ class TestOrdenCompraPendientes(TransactionCase):
         orden.invalidate_recordset()
         self.assertEqual(orden.wis_cantidad_pendientes, 0)
         self.config.comunicacion_activa = True
+
+
+@tagged('post_install', '-at_install', 'wis_productos')
+class TestMarcadoEnLaFichaEncola(TransactionCase):
+    """Tildar «Integración con WMS» y guardar NO puede llamar a WIS.
+
+    Era el último camino automático que mandaba adentro de su transacción: con
+    muchas variantes el guardado quedaba minutos esperando la respuesta, con la
+    plantilla y todas sus variantes bloqueadas.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.config = cls.env['integracion_wis.integracion_wis'].search(
+            [('company_id', '=', cls.env.company.id)], limit=1
+        )
+        if not cls.config:
+            cls.config = cls.env['integracion_wis.integracion_wis'].create({
+                'client_id': 'test',
+                'client_secret': 'test',
+                'empresa_id': 1,
+                'url_access_token': 'https://example.invalid/token',
+                'apiLink': 'https://example.invalid/api',
+                'company_id': cls.env.company.id,
+                'comunicacion_activa': True,
+            })
+        else:
+            cls.config.write({'comunicacion_activa': True})
+        cls.Cola = cls.env['wis.sync.queue']
+
+    def _template_con_variantes(self, cantidad=3):
+        """Template SIN marcar (así el alta no encola) y con `cantidad` variantes."""
+        atributo = self.env['product.attribute'].create({
+            'name': 'Talle prueba WIS',
+            'value_ids': [(0, 0, {'name': f'T{i}'}) for i in range(cantidad)],
+        })
+        return self.env['product.template'].create({
+            'name': 'Template con variantes WIS',
+            'type': 'product',
+            'attribute_line_ids': [(0, 0, {
+                'attribute_id': atributo.id,
+                'value_ids': [(6, 0, atributo.value_ids.ids)],
+            })],
+        })
+
+    def test_marcar_la_casilla_no_llama_a_wis(self):
+        template = self._template_con_variantes(3)
+
+        def explotar(*args, **kwargs):
+            raise AssertionError("El guardado llamó a WIS: tiene que encolar.")
+
+        with patch.object(type(self.env['product.product']),
+                          '_enviar_wms_en_lote', explotar), \
+             patch.object(type(self.env['product.product']), 'enviarWS', explotar):
+            template.write({'integracion_wms': True})
+
+        entradas = self.Cola.search([
+            ('product_id', 'in', template.product_variant_ids.ids),
+            ('estado', '=', 'pendiente'),
+        ])
+        self.assertEqual(len(entradas), 3)
+
+    def test_marcar_la_casilla_marca_las_variantes(self):
+        template = self._template_con_variantes(3)
+        with patch.object(type(self.env['product.product']), '_enviar_wms_en_lote',
+                          lambda *a, **k: {}):
+            template.write({'integracion_wms': True})
+        self.assertTrue(all(template.product_variant_ids.mapped('integracion_wms')))
+
+    def test_marcar_deja_constancia_en_el_chatter(self):
+        """Un `write` no devuelve notificación: si no hay rastro, el usuario
+        guarda y no ve nada."""
+        template = self._template_con_variantes(2)
+        mensajes_antes = len(template.message_ids)
+        template.write({'integracion_wms': True})
+        cuerpos = template.message_ids.mapped('body')
+        self.assertGreater(len(template.message_ids), mensajes_antes)
+        self.assertTrue(any('en cola' in (c or '') for c in cuerpos))
+
+    def test_marcar_dos_veces_no_duplica_la_cola(self):
+        template = self._template_con_variantes(3)
+        template.write({'integracion_wms': True})
+        template.write({'integracion_wms': False})
+        template.write({'integracion_wms': True})
+        entradas = self.Cola.search([
+            ('product_id', 'in', template.product_variant_ids.ids),
+            ('estado', 'in', ('pendiente', 'procesando')),
+        ])
+        self.assertEqual(len(entradas), 3)
+
+    def test_el_contador_de_la_ficha_cuenta_lo_pendiente(self):
+        template = self._template_con_variantes(3)
+        template.write({'integracion_wms': True})
+        template.invalidate_recordset(['wis_variantes_en_cola'])
+        self.assertEqual(template.wis_variantes_en_cola, 3)
+
+    def test_alta_de_variante_marcada_encola(self):
+        """Crear una variante marcada, con su template sin marcar, tampoco
+        puede mandar: un WIS caído no bloquea el maestro de productos."""
+
+        def explotar(*args, **kwargs):
+            raise AssertionError("El alta llamó a WIS: tiene que encolar.")
+
+        with patch.object(type(self.env['product.product']),
+                          '_enviar_wms_en_lote', explotar), \
+             patch.object(type(self.env['product.product']), 'enviarWS', explotar):
+            variante = self.env['product.product'].create({
+                'name': 'Variante suelta marcada',
+                'type': 'product',
+                'integracion_wms': True,
+            })
+
+        self.assertTrue(self.Cola.search([('product_id', '=', variante.id),
+                                          ('estado', '=', 'pendiente')]))
+
+    def test_actualizar_una_integrada_sigue_yendo_en_el_momento(self):
+        """La ACTUALIZACIÓN de lo ya integrado no cambia: son pocos registros
+        y el usuario espera verlo reflejado."""
+        variante = self.env['product.product'].create({
+            'name': 'Variante ya integrada',
+            'type': 'product',
+        })
+        variante.with_context(_avoid_wms=True).write({
+            'integracion_wms': True, 'codigo_unico': 'PRD-TEST'})
+
+        llamadas = []
+        with patch.object(type(self.env['product.product']), 'enviarWS',
+                          lambda self, *a, **k: llamadas.append(self.id)):
+            variante.write({'name': 'Nombre nuevo'})
+
+        self.assertEqual(llamadas, [variante.id])
+
+    def test_encolar_dispara_el_cron(self):
+        """Sin el trigger la cola espera hasta 5 minutos y encolar se parece
+        demasiado a no haber hecho nada.
+
+        Se verifica que se PIDE el disparo, no que aparezca el `ir.cron.trigger`:
+        con el cron desactivado —como está en las bases locales, a propósito—
+        `_trigger_list` descarta el pedido y no crea la fila. El test no puede
+        depender de esa configuración.
+        """
+        cron = self.env.ref('integracion_wis.ir_cron_wis_procesar_cola_productos')
+        disparos = []
+        original = type(cron)._trigger
+
+        def espiar(self, at=None):
+            disparos.append(self.id)
+            return original(self, at=at)
+
+        template = self._template_con_variantes(2)
+        with patch.object(type(cron), '_trigger', espiar):
+            template.write({'integracion_wms': True})
+
+        self.assertIn(cron.id, disparos)
+
+    def test_el_fallo_del_disparo_no_rompe_el_guardado(self):
+        """Encolar no puede depender de que el cron esté disponible."""
+        cron = self.env.ref('integracion_wis.ir_cron_wis_procesar_cola_productos')
+
+        def fallar(self, at=None):
+            raise ValueError("cron no disponible")
+
+        template = self._template_con_variantes(2)
+        with patch.object(type(cron), '_trigger', fallar):
+            template.write({'integracion_wms': True})
+
+        entradas = self.Cola.search([
+            ('product_id', 'in', template.product_variant_ids.ids),
+            ('estado', '=', 'pendiente'),
+        ])
+        self.assertEqual(len(entradas), 2)
+
+    def test_boton_integrar_ahora_si_manda(self):
+        template = self._template_con_variantes(2)
+        template.write({'integracion_wms': True})
+
+        llamadas = []
+
+        def fingir(self, motivo=''):
+            llamadas.append(len(self))
+            return {'enviados': len(self), 'errores': 0, 'errores_detalle': []}
+
+        with patch.object(type(self.env['product.product']),
+                          '_enviar_wms_en_lote', fingir):
+            template.enviar_variantes_wms()
+
+        self.assertEqual(llamadas, [2])
+        pendientes = self.Cola.search([
+            ('product_id', 'in', template.product_variant_ids.ids),
+            ('estado', '=', 'pendiente'),
+        ])
+        self.assertFalse(pendientes, "Integrar ahora tiene que cerrar lo encolado.")
+
+    def test_boton_integrar_ahora_propaga_el_error(self):
+        """Antes se logueaba y la pantalla decía que había salido bien."""
+        template = self._template_con_variantes(2)
+        template.write({'integracion_wms': True})
+
+        def fallar(*args, **kwargs):
+            raise ValueError("WIS no responde")
+
+        with patch.object(type(self.env['product.product']),
+                          '_enviar_wms_en_lote', fallar):
+            with self.assertRaises(ValueError):
+                template.enviar_variantes_wms()

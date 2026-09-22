@@ -16,6 +16,38 @@ class ProductTemplate(models.Model):
         help='Habilitar la integración con el sistema de WIS',
         default=False,
     )
+
+    wis_variantes_en_cola = fields.Integer(
+        string='Variantes en cola de WIS',
+        compute='_compute_wis_variantes_en_cola',
+        help='Variantes de este producto esperando a integrarse con WIS. '
+             'Se procesan en segundo plano; el detalle está en '
+             'Integración WIS → Cola de productos.',
+    )
+
+    def _compute_wis_variantes_en_cola(self):
+        """Cuántas variantes están esperando en la cola.
+
+        Es lo que le contesta al usuario «¿y esto cuándo se integra?» después
+        de guardar: sin un número a la vista, encolar se parece demasiado a no
+        haber hecho nada.
+        """
+        if not self.ids:
+            for template in self:
+                template.wis_variantes_en_cola = 0
+            return
+        grupos = self.env['wis.sync.queue']._read_group(
+            [('product_id.product_tmpl_id', 'in', self.ids),
+             ('estado', 'in', ('pendiente', 'procesando', 'error'))],
+            groupby=['product_id'],
+            aggregates=['__count'],
+        )
+        por_template = {}
+        for variante, cantidad in grupos:
+            por_template.setdefault(variante.product_tmpl_id.id, 0)
+            por_template[variante.product_tmpl_id.id] += cantidad
+        for template in self:
+            template.wis_variantes_en_cola = por_template.get(template.id, 0)
         
     def consultaStock(self):
         """Método específico para template que consulta stock de todas las variantes"""
@@ -66,23 +98,49 @@ class ProductTemplate(models.Model):
             
 
     def enviar_variantes_wms(self):
-        """Envía todas las variantes del template a WMS, en lote.
+        """Envía YA todas las variantes del template a WMS, en lote.
 
-        Es una acción explícita del usuario sobre un template concreto: se
-        resuelve en el momento. Con el envío por lote, un template de 232
-        variantes son 2 llamadas HTTP y no 232.
+        Es el camino inmediato y **explícito**: lo pide el usuario con el botón
+        «Integrar ahora con WIS». Ningún camino automático llama acá — guardar
+        la ficha encola (ver `_encolar_variantes_wms`), porque un template con
+        cientos de variantes deja la transacción del guardado esperando a WIS
+        con sus filas bloqueadas.
+
+        🔴 **No atrapa la excepción a propósito.** Si el usuario pidió «ahora»,
+        tiene que enterarse de que falló; antes se logueaba y la pantalla decía
+        que todo salió bien.
         """
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
 
         variantes = self.mapped('product_variant_ids').filtered(lambda v: v.type == 'product')
         if not variantes:
-            return
+            raise ValidationError("El producto no tiene variantes almacenables para integrar.")
 
-        try:
-            variantes._enviar_wms_en_lote(motivo='envío de variantes del template')
-        except Exception as e:
-            _logger.error(f"Error enviando variantes a WMS: {str(e)}")
+        variantes.filtered(lambda v: not v.integracion_wms).with_context(
+            _avoid_wms=True).write({'integracion_wms': True})
+
+        resultado = variantes._enviar_wms_en_lote(motivo='botón Integrar ahora')
+
+        # Lo que quedó encolado de estas mismas variantes ya no hace falta.
+        self.env['wis.sync.queue'].search([
+            ('product_id', 'in', variantes.ids),
+            ('estado', '=', 'pendiente'),
+        ]).write({'estado': 'hecho', 'fecha_procesado': fields.Datetime.now()})
+
+        errores = (resultado or {}).get('errores', 0)
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': 'Integración con WIS',
+                'message': (f"{(resultado or {}).get('enviados', 0)} variante(s) enviadas"
+                            + (f", {errores} con error (ver Logs WIS)." if errores
+                               else " correctamente.")),
+                'type': 'warning' if errores else 'success',
+                'sticky': bool(errores),
+            },
+        }
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -96,37 +154,52 @@ class ProductTemplate(models.Model):
         )
         for template in a_procesar:
             try:
-                self._procesar_variantes_wms_directo(template)
+                self._encolar_variantes_wms(template, motivo='alta del producto')
             except Exception as e:
-                _logger.error(f"Error procesando variantes para template {template.name}: {str(e)}")
+                _logger.error(f"Error encolando variantes para template {template.name}: {str(e)}")
 
         return templates
 
-    def _procesar_variantes_wms_directo(self, template):
+    def _encolar_variantes_wms(self, template, motivo=''):
         """Marca las variantes del template y las encola para integrar.
 
-        El alta de un template es un camino automático: no se hace la llamada
-        a WIS acá adentro para no dejar al usuario esperando (un template con
-        cientos de variantes tarda minutos). Va a la cola, que las procesa por
-        lote en segundo plano.
+        🔴 **Ningún camino automático llama a WIS dentro de su transacción.**
+        Ni el alta del template ni tildar la casilla en la ficha: los dos
+        encolan y devuelven el control en el acto. Un template con cientos de
+        variantes son varios minutos de HTTP con la plantilla y todas sus
+        variantes bloqueadas, y el worker se come el timeout con las filas
+        tomadas. La cola las procesa por lote en segundo plano.
+
+        Para integrar en el momento está el botón «Integrar ahora con WIS»
+        (`enviar_variantes_wms`), que es una decisión explícita del usuario.
         """
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
-            return
+            return self.env['wis.sync.queue'].browse()
 
         variantes = template.product_variant_ids.filtered(lambda v: v.type == 'product')
         if not variantes:
-            return
+            return self.env['wis.sync.queue'].browse()
 
-        _logger.info(f"Encolando {len(variantes)} variantes para template {template.name}")
+        _logger.info("[WIS] Encolando %d variantes del template %s (%s)",
+                     len(variantes), template.name, motivo or 's/motivo')
 
         variantes.with_context(_avoid_wms=True).write({'integracion_wms': True})
 
-        self.env['wis.sync.queue']._encolar(
+        entradas = self.env['wis.sync.queue']._encolar(
             variantes,
             origen='template',
             origen_ref=template.name,
             prioridad=PRIORIDAD_NORMAL,
         )
+
+        # Un `write` no puede devolver una notificación de cliente, así que la
+        # constancia va al chatter: si no, el usuario guarda y no ve nada.
+        if entradas:
+            template.message_post(body=(
+                f"Integración con WIS: {len(entradas)} variante(s) en cola. "
+                f"Se integran en segundo plano; el avance se ve en "
+                f"Integración WIS → Cola de productos."))
+        return entradas
 
     def write(self, vals):
         res = super(ProductTemplate, self).write(vals)
@@ -137,17 +210,16 @@ class ProductTemplate(models.Model):
         if self.env.context.get('_avoid_wms'):
             return res
 
+        # 🔴 Tildar la casilla ENCOLA, no envía. Este era el último camino que
+        # llamaba a WIS adentro de la transacción del guardado: con muchas
+        # variantes el save quedaba minutos esperando la respuesta, con la
+        # plantilla y todas sus variantes bloqueadas. El alta, `_create_variant_ids`
+        # y la acción masiva ya encolaban; faltaba éste.
         if vals.get('integracion_wms') and self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             for record in self:
                 if record.type == 'product':
-                    record.product_variant_ids.with_context(_avoid_wms=True).write({
-                        'integracion_wms': True
-                    })
-                    
-                    record.enviar_variantes_wms()
+                    self._encolar_variantes_wms(record, motivo='marcado en la ficha')
 
-                    
-        
         return res
 
     def _create_variant_ids(self):
@@ -371,6 +443,18 @@ class Product(models.Model):
             )
             raise
 
+    def enviar_variantes_wms(self):
+        """Delega en la plantilla. Existe por la MISMA razón que `consultaStock`:
+
+        el formulario de la variante hereda la página «Integración WIS» de la
+        plantilla, así que todo botón de esa página tiene que existir en los
+        dos modelos o la vista no valida —y Odoo rechaza la vista entera con un
+        error que apunta al registro, no al botón—. Desde una variante,
+        «Integrar ahora» manda todas las variantes de su producto, que es lo
+        que dice el botón.
+        """
+        return self.mapped('product_tmpl_id').enviar_variantes_wms()
+
     def action_integrar_wms_masivo(self):
         """Acción masiva desde el listado de Variantes: encola las seleccionadas."""
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
@@ -469,7 +553,7 @@ class Product(models.Model):
             return records
 
         # Las variantes de un template marcado para WMS las maneja
-        # `_create_variant_ids` / `_procesar_variantes_wms_directo`, en lote.
+        # `_create_variant_ids` / `_encolar_variantes_wms`, por la cola.
         a_enviar = records.filtered(
             lambda r: r.integracion_wms and r.type == 'product'
             and not r.product_tmpl_id.integracion_wms
@@ -477,13 +561,18 @@ class Product(models.Model):
         if not a_enviar:
             return records
 
-        try:
-            if len(a_enviar) > 1:
-                a_enviar._enviar_wms_en_lote(motivo='alta de variantes')
-            else:
-                a_enviar.enviarWS()
-        except Exception as e:
-            raise ValidationError(f"Error enviando producto {a_enviar[0].name} a WMS: {str(e)}")
+        # 🔴 A la cola, no a WIS. Antes esto mandaba adentro del `create` y, si
+        # fallaba, levantaba ValidationError: un WIS caído impedía crear la
+        # variante en Odoo. El WMS no bloquea el maestro de productos —es la
+        # misma razón por la que `_create_variant_ids` dejó de lanzar—, y una
+        # importación de miles de variantes deja de ser miles de requests
+        # dentro de la transacción.
+        self.env['wis.sync.queue']._encolar(
+            a_enviar,
+            origen='template',
+            origen_ref=a_enviar[0].display_name if len(a_enviar) == 1 else f"{len(a_enviar)} variante(s)",
+            prioridad=PRIORIDAD_NORMAL,
+        )
 
         return records
 
@@ -508,6 +597,21 @@ class Product(models.Model):
                 a_sincronizar = self.filtered(
                     lambda r: r.integracion_wms and r.type == 'product'
                 )
+                # 🔴 El ALTA (la casilla entrando en True) va a la cola, igual
+                # que en el template: marcar variantes de a miles no puede
+                # dejar el guardado esperando a WIS. La ACTUALIZACIÓN de las
+                # que ya están integradas sigue yendo en el momento: es el
+                # camino de siempre y son pocos registros.
+                if vals.get('integracion_wms'):
+                    self.env['wis.sync.queue']._encolar(
+                        a_sincronizar,
+                        origen='manual',
+                        origen_ref=(a_sincronizar[0].display_name if len(a_sincronizar) == 1
+                                    else f"{len(a_sincronizar)} variante(s)"),
+                        prioridad=PRIORIDAD_NORMAL,
+                    )
+                    return res
+
                 # Con muchas variantes conviene un solo lote en vez de una
                 # llamada HTTP por registro.
                 if len(a_sincronizar) > 1:
