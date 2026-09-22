@@ -194,12 +194,18 @@ class WisSyncQueue(models.Model):
         ahora = fields.Datetime.now()
 
         for entrada in entradas:
-            codigo = entrada.product_id.codigo_unico
-            fallo = bool(codigo) and any(codigo in e for e in errores_detalle)
-            if fallo or not codigo:
-                detalle = next((e for e in errores_detalle if codigo and codigo in e),
-                               'La variante no obtuvo código WIS.')
-                entrada._registrar_fallo(detalle, config)
+            variante = entrada.product_id
+            # 🔴 El `codigo_unico` se persiste RECIÉN cuando WIS acepta la
+            # variante, así que la rechazada no lo tiene y buscar su error por
+            # ese campo no encontraba nada: la entrada quedaba con «La variante
+            # no obtuvo código WIS» y tapaba el motivo que WIS había dado, que
+            # sí estaba en el detalle. El código es determinístico: se
+            # recalcula igual que al armar el envío.
+            codigo = variante.codigo_unico or config._wis_codigo_producto(variante)
+            detalle = next((e for e in errores_detalle if codigo and codigo in e), None)
+            if detalle or not variante.codigo_unico:
+                entrada._registrar_fallo(
+                    detalle or 'La variante no obtuvo código WIS.', config)
             else:
                 entrada.write({
                     'estado': 'hecho',

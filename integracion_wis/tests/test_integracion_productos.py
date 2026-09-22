@@ -552,3 +552,24 @@ class TestMarcadoEnLaFichaEncola(TransactionCase):
                           '_enviar_wms_en_lote', fallar):
             with self.assertRaises(ValueError):
                 template.enviar_variantes_wms()
+
+    def test_el_error_de_la_cola_dice_lo_que_dijo_wis(self):
+        """La variante rechazada no tiene `codigo_unico` —se persiste recién
+        cuando WIS acepta—, y buscar su error por ese campo tapaba el motivo."""
+        template = self._template_con_variantes(2)
+        template.write({'integracion_wms': True})
+        variantes = template.product_variant_ids
+        codigo = self.config._wis_codigo_producto(variantes[0])
+
+        def fingir(self, motivo=''):
+            return {'enviados': 1, 'errores': 1, 'barcodes_enviados': 0,
+                    'errores_detalle': [f"{codigo}: Error en la API: 400 - producto rechazado"]}
+
+        entradas = self.Cola.search([('product_id', 'in', variantes.ids)])
+        with patch.object(type(self.env['product.product']),
+                          '_enviar_wms_en_lote', fingir):
+            entradas.procesar()
+
+        fallada = entradas.filtered(lambda e: e.product_id == variantes[0])
+        self.assertIn('producto rechazado', fallada.ultimo_error or '')
+        self.assertEqual(fallada.intentos, 1)
