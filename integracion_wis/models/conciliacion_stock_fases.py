@@ -57,6 +57,18 @@ class ConciliacionStockFases(models.Model):
     cs_started_at = fields.Datetime(string='Inicio de la consulta', readonly=True, copy=False)
     cs_ended_at = fields.Datetime(string='Fin de la consulta', readonly=True, copy=False)
     cs_cancel_requested = fields.Boolean(string='Cancelación pedida', readonly=True, copy=False)
+    cs_tope_a_cero_pct = fields.Integer(
+        string='Tope de variantes a cero (%)', default=10,
+        help="Si el ajuste dejaría en cero más de este porcentaje de las "
+             "variantes consultadas, no se genera y hay que revisar. Un WIS a "
+             "medio responder se parece mucho a un inventario vacío.",
+    )
+    # 🔴 Referencia SUELTA al batch de inventario, a propósito: un Many2one
+    # obligaría a este módulo —que es compartido entre clientes— a depender de
+    # `forum_partner_import`, que es de Forum. Se guarda el id y se abre por
+    # acción, que no necesita el comodel declarado.
+    cs_batch_id = fields.Integer(string='Batch de ajuste', readonly=True, copy=False)
+    cs_batch_nombre = fields.Char(string='Nombre del batch', readonly=True, copy=False)
 
     # ------------------------------------------------------------------
     # La tabla de trabajo
@@ -303,6 +315,89 @@ class ConciliacionStockFases(models.Model):
                resumen['sin_respuesta'], resumen['a_cero']),
             nivel='warning' if resumen['sin_respuesta'] else 'info')
         self.env.cr.commit()
+
+    # ------------------------------------------------------------------
+    # Fase 2: entregar el conteo al motor de ajuste de inventario
+    # ------------------------------------------------------------------
+    def action_generar_ajuste(self):
+        """Arma el ajuste con las diferencias y lo deja listo para aplicar.
+
+        No aplica ni publica nada: crea el batch de inventario con el conteo y
+        lo deja en «listo», para que una persona mire las diferencias y decida.
+        De ahí en adelante son las acciones del motor —aplicar, publicar,
+        conciliar—, todas por tandas.
+
+        🔴 El conteo que se entrega es `cantidad_wis`, **el stock que debe
+        quedar**, no la diferencia. Y sólo van las filas que WIS contestó: una
+        fila sin respuesta no es un cero.
+        """
+        self.ensure_one()
+        if self.fase != 'consultado':
+            raise UserError(_("Primero hay que terminar la consulta a WIS."))
+
+        Batch = self.env.get('forum.import.batch')
+        if Batch is None:
+            raise UserError(_(
+                "El motor de ajuste de inventario (forum_partner_import) no está "
+                "instalado en esta base. La consulta a WIS quedó hecha y las "
+                "diferencias se pueden revisar, pero el ajuste hay que armarlo a mano."))
+
+        config = self._cs_config()
+        resumen = self._cs_resumen()
+        if not resumen['con_diferencia']:
+            raise UserError(_("No hay diferencias que ajustar."))
+
+        # Tope de seguridad: un WIS a medio responder se parece mucho a un
+        # inventario vacío, y poner en cero no se deshace con un undo.
+        if resumen['consultadas'] and self.cs_tope_a_cero_pct:
+            pct = 100.0 * resumen['a_cero'] / resumen['consultadas']
+            if pct > self.cs_tope_a_cero_pct:
+                raise UserError(_(
+                    "El ajuste dejaría en cero %(n)d de %(t)d variantes (%(pct).1f %%), "
+                    "más que el tope de %(tope)d %%. Revisá la consulta antes de "
+                    "seguir: si WIS contestó a medias, esto vacía stock real.",
+                    n=resumen['a_cero'], t=resumen['consultadas'], pct=pct,
+                    tope=self.cs_tope_a_cero_pct))
+
+        minimo = config.diferenciaMinima or 0
+        self.env.cr.execute("""
+            SELECT product_id, location_id, cantidad_wis
+              FROM {t}
+             WHERE estado = 'ok' AND diferencia <> 0 AND abs(diferencia) >= %(min)s
+             ORDER BY row_num
+        """.format(t=self._cs_tabla()), {'min': minimo})
+        filas = [{'product_id': p, 'location_id': l, 'cantidad': float(c)}
+                 for p, l, c in self.env.cr.fetchall()]
+
+        motivo = "Conciliación de stock WIS %s (#%d)" % (
+            fields.Date.to_string(fields.Date.context_today(self)), self.id)
+        batch = Batch.create({
+            'name': motivo,
+            'import_type': 'inventario',
+            'inventory_user_id': self.env.user.id,
+            'inventory_reason': motivo,
+        })
+        batch.cargar_celdas_externas(filas, origen="WIS (conciliación #%d)" % self.id)
+
+        self.write({'fase': 'ajuste', 'cs_batch_id': batch.id,
+                    'cs_batch_nombre': batch.display_name})
+        self._cs_log("Ajuste generado con %d celda(s) en el batch %s. "
+                     "Revisá las diferencias y aplicá desde ahí."
+                     % (len(filas), batch.display_name))
+        return self.action_abrir_batch()
+
+    def action_abrir_batch(self):
+        """Abre el batch del ajuste. Por acción y no por Many2one: ver arriba."""
+        self.ensure_one()
+        if not self.cs_batch_id:
+            raise UserError(_("Todavía no se generó el ajuste."))
+        return {
+            'type': 'ir.actions.act_window',
+            'res_model': 'forum.import.batch',
+            'res_id': self.cs_batch_id,
+            'view_mode': 'form',
+            'target': 'current',
+        }
 
     # ------------------------------------------------------------------
     # Resumen y log

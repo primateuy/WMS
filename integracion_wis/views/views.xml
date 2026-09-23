@@ -341,6 +341,16 @@
                     string="Reanudar"
                     type="object"
                     invisible="not cs_cancel_requested"/>
+            <button name="action_generar_ajuste"
+                    string="3. Generar ajuste"
+                    type="object"
+                    class="btn-primary"
+                    invisible="fase != 'consultado'"
+                    help="Crea el ajuste de inventario con las diferencias y lo deja listo para revisar. No aplica ni publica nada."/>
+            <button name="action_abrir_batch"
+                    string="Abrir el ajuste"
+                    type="object"
+                    invisible="not cs_batch_id"/>
             <button name="conciliarStock"
                     string="Conciliar Stocks (modo anterior)"
                     type="object"
@@ -348,7 +358,7 @@
                     confirm="Es el proceso anterior: consulta TODO de una vez y escribe los conteos sin tandas. Para conciliaciones grandes usá las fases. ¿Continuar?"/>
 
             <field name="fase" widget="statusbar"
-                   statusbar_visible="borrador,tabla,consultando,consultado"/>
+                   statusbar_visible="borrador,tabla,consultando,consultado,ajuste"/>
             <field name="estado" widget="statusbar"
                    statusbar_visible="borrador,en_proceso,completado,completado_con_errores,error"/>
           </header>
@@ -378,6 +388,9 @@
                 <field name="cs_step" readonly="1" invisible="fase != 'consultando'"/>
                 <field name="cs_started_at" readonly="1" invisible="not cs_started_at"/>
                 <field name="cs_ended_at" readonly="1" invisible="not cs_ended_at"/>
+                <field name="cs_tope_a_cero_pct"/>
+                <field name="cs_batch_nombre" readonly="1" invisible="not cs_batch_id"/>
+                <field name="cs_batch_id" invisible="1"/>
                 <field name="cs_cancel_requested" invisible="1"/>
               </group>
               <group string="Información General">

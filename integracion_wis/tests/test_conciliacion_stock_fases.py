@@ -174,3 +174,60 @@ class TestConciliacionStockFases(TransactionCase):
         conc.action_cancelar_consulta()
         self.assertTrue(conc.cs_cancel_requested)
         self.assertTrue(conc._cs_tabla_existe())
+
+    # --- fase 2: la costura con el motor de ajuste ---------------------
+    def _consultar_todo(self, conc, respuestas):
+        with patch(f'{MODELO_API}.consultaStockCodigo',
+                   lambda self, codigo: respuestas.get(codigo)):
+            while conc._cs_consultar_tanda():
+                pass
+        conc.write({'fase': 'consultado'})
+
+    def test_genera_el_ajuste_con_las_diferencias(self):
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        # 10 -> 7 (diferencia), 5 -> 5 (sin diferencia), 0 -> 4 (diferencia)
+        self._consultar_todo(conc, {'PRD-TEST-0': 7.0, 'PRD-TEST-1': 5.0,
+                                    'PRD-TEST-2': 4.0})
+        conc.action_generar_ajuste()
+
+        self.assertEqual(conc.fase, 'ajuste')
+        batch = self.env['forum.import.batch'].browse(conc.cs_batch_id)
+        self.assertEqual(batch.state, 'ready')
+        self.env.cr.execute("SELECT product_id, cantidad FROM %s ORDER BY row_num"
+                            % batch._staging_name())
+        celdas = dict(self.env.cr.fetchall())
+        self.assertEqual(set(celdas), {self.variantes[0].id, self.variantes[2].id},
+                         "sólo las que tienen diferencia")
+        self.assertEqual(float(celdas[self.variantes[0].id]), 7.0,
+                         "va el stock que debe quedar, no la diferencia")
+
+    def test_las_sin_respuesta_no_llegan_al_ajuste(self):
+        """🔴 El invariante, ahora del otro lado de la costura."""
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        self._consultar_todo(conc, {'PRD-TEST-0': 7.0})   # las otras dan None
+        conc.action_generar_ajuste()
+
+        batch = self.env['forum.import.batch'].browse(conc.cs_batch_id)
+        self.env.cr.execute("SELECT product_id FROM %s" % batch._staging_name())
+        productos = {f[0] for f in self.env.cr.fetchall()}
+        self.assertEqual(productos, {self.variantes[0].id})
+
+    def test_el_tope_de_variantes_a_cero_frena(self):
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        conc.cs_tope_a_cero_pct = 10
+        self._consultar_todo(conc, {'PRD-TEST-0': 0.0, 'PRD-TEST-1': 0.0,
+                                    'PRD-TEST-2': 0.0})
+        with self.assertRaises(UserError):
+            conc.action_generar_ajuste()
+        self.assertFalse(conc.cs_batch_id)
+
+    def test_sin_diferencias_no_genera_nada(self):
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        self._consultar_todo(conc, {'PRD-TEST-0': 10.0, 'PRD-TEST-1': 5.0,
+                                    'PRD-TEST-2': 0.0})
+        with self.assertRaises(UserError):
+            conc.action_generar_ajuste()

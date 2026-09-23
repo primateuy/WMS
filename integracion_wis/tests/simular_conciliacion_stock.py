@@ -119,6 +119,43 @@ def correr(env):
     print("\n   INVARIANTE · filas sin respuesta con cantidad asumida: %d %s"
           % (fugas, "✔" if fugas == 0 else "🔴 FALLA"))
 
+    # --- fase 2: la costura con el motor de ajuste --------------------
+    Batch = env.get('forum.import.batch')
+    if Batch is None:
+        print("\n4) AJUSTE: forum_partner_import no está instalado, se omite.")
+        env.cr.rollback()
+        print("\nrollback hecho: la base queda como estaba")
+        return
+
+    conc.cs_tope_a_cero_pct = 100     # en la simulación los datos son random
+    t0 = time.time()
+    try:
+        conc.action_generar_ajuste()
+    except Exception as e:
+        print("\n4) AJUSTE: no se generó -> %s" % e)
+        env.cr.rollback()
+        print("\nrollback hecho: la base queda como estaba")
+        return
+    batch = Batch.browse(conc.cs_batch_id)
+    env.cr.execute("SELECT count(*) FROM %s" % batch._staging_name())
+    celdas = env.cr.fetchone()[0]
+    print("\n4) AJUSTE: %.1fs | batch %s en estado '%s' | %d celdas"
+          % (time.time() - t0, batch.display_name, batch.state, celdas))
+
+    env.cr.execute("""SELECT accion_efectiva, count(*) FROM %s
+                       GROUP BY 1 ORDER BY 2 DESC""" % batch._staging_name())
+    print("   acción por celda: %s" % dict(env.cr.fetchall()))
+
+    # Que lo entregado sea el stock a dejar y no la diferencia.
+    env.cr.execute("""
+        SELECT count(*) FROM {t} s
+          JOIN {c} w ON w.product_id = s.product_id
+         WHERE s.cantidad IS DISTINCT FROM w.cantidad_wis
+    """.format(t=batch._staging_name(), c=conc._cs_tabla()))
+    desalineadas = env.cr.fetchone()[0]
+    print("\n   INVARIANTE · celdas con cantidad distinta a la de WIS: %d %s"
+          % (desalineadas, "✔" if desalineadas == 0 else "🔴 FALLA"))
+
     env.cr.rollback()
     print("\nrollback hecho: la base queda como estaba")
 
