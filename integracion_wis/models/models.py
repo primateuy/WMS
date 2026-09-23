@@ -69,6 +69,15 @@ class IntegracionWIS(models.Model):
     )
 
     ubicacionReponerStock = fields.Many2one('stock.location', string='Ubicación para Reponer Stock', domain=[('usage', '=', 'internal')])
+    campo_stock_wis = fields.Selection(
+        [('stockGeneral', 'Stock general (disponible + camiones, bloqueados y otros)'),
+         ('stockDisponible', 'Stock disponible')],
+        string='Qué stock de WIS se compara', default='stockGeneral', required=True,
+        help="Los dos los devuelve /ConsultaDeStock/GetData. 'General' incluye lo "
+             "que está en camiones, bloqueado y otros estados; 'Disponible' es "
+             "sólo lo que se puede usar. Cuál corresponde depende de qué "
+             "representa la ubicación de Odoo contra la que se concilia.",
+    )
 
     ultima_sync_productos = fields.Datetime(
         string='Última sincronización de productos',
@@ -1496,8 +1505,38 @@ class IntegracionWIS(models.Model):
     
     
 
+    def consultaStockPaginado(self, pagina, filtros=None):
+        """Una página de `/ConsultaDeStock/GetData` (doc §10.1).
+
+        Devuelve la lista de `{producto, stockGeneral, stockDisponible}`. Lista
+        vacía cuando no hay más páginas. El tamaño de página lo decide WIS
+        —hoy 10—: no se puede pedir más desde acá.
+        """
+        respuesta = self.consultarAPI(
+            link="/ConsultaDeStock/GetData",
+            body={"empresa": self.empresa_id, "pagina": pagina,
+                  "filtros": filtros or {}},
+            params=None, method="POST",
+        )
+        if not isinstance(respuesta, dict):
+            return []
+        return respuesta.get('stock') or []
+
     def consultaStockCodigo(self, codigo):
         """Stock de WIS para un código de producto. `None` si WIS no lo informa.
+
+        🔴 **Sale de `/ConsultaDeStock/GetData`, no de `/Producto/GetProducto`.**
+        Antes se leía `cantidadGenerica` de la ficha del producto, que es un
+        dato del MAESTRO y no el stock. Medido contra el WIS de pruebas:
+
+            producto      cantidadGenerica   stockGeneral
+            PR2                        1,0        4.820,0
+            PRD-1                     12,0          132,0
+            PRD-103779                 0,0        1.117,0
+
+        O sea que la conciliación comparaba el stock de Odoo contra un número
+        que no era stock, y con ese 0 de PRD-103779 habría puesto en cero un
+        producto con 1.117 unidades en WIS.
 
         🔴 Devolver `None` y no `0` es deliberado: quien llama tiene que poder
         distinguir «WIS dice que no hay» de «WIS no contestó». Tomar lo segundo
@@ -1506,15 +1545,10 @@ class IntegracionWIS(models.Model):
         """
         if not codigo:
             return None
-        response = self.consultarAPI(
-            link="/Producto/GetProducto",
-            params={"empresa": self.empresa_id, "codigo": codigo},
-            method="GET",
-            body=None,
-        )
-        if not isinstance(response, dict) or 'cantidadGenerica' not in response:
+        filas = self.consultaStockPaginado(1, {"producto": codigo})
+        if not filas:
             return None
-        return response.get('cantidadGenerica')
+        return filas[0].get(self.campo_stock_wis or 'stockGeneral')
 
     def consultaStock(self, vals):
         return self.consultaStockCodigo(vals['codigo_unico']) or 0

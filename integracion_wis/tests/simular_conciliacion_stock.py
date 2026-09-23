@@ -22,9 +22,10 @@ import time
 
 from odoo.addons.integracion_wis.models import models as mod_models
 
-TANDA = 200
-PCT_SIN_RESPUESTA = 3       # % de variantes que WIS no contesta, a propósito
-MS_POR_REQUEST = 0          # subilo para simular latencia real de WIS
+TANDA = 200                 # filas del listado por tanda
+TAM_PAGINA_WIS = 10         # lo que devuelve WIS hoy por página (lo fija el servidor)
+PCT_NO_INFORMADO = 3        # % de variantes que WIS no lista, a propósito
+MS_POR_REQUEST = 1100       # latencia MEDIDA contra el WIS de pruebas, por página
 
 
 class RespuestaFalsa:
@@ -48,17 +49,23 @@ class WisFalso:
     def get(self, url, **kw):
         return RespuestaFalsa(404, {})
 
+    def cargar_catalogo(self, codigos):
+        """Lo que WIS conoce. Algunos códigos quedan afuera a propósito."""
+        self.catalogo = [c for c in sorted(codigos)
+                         if random.random() >= PCT_NO_INFORMADO / 100.0]
+        self.sin_respuesta = len(codigos) - len(self.catalogo)
+
     def request(self, url=None, method='GET', json=None, params=None, **kw):
-        if 'Producto/GetProducto' in url:
+        if 'ConsultaDeStock/GetData' in url:
             self.requests += 1
             if MS_POR_REQUEST:
                 time.sleep(MS_POR_REQUEST / 1000.0)
-            if random.random() < PCT_SIN_RESPUESTA / 100.0:
-                self.sin_respuesta += 1
-                return RespuestaFalsa(500, {'detail': 'WIS no disponible'})
-            # Stock cualquiera, con diferencias contra Odoo.
-            return RespuestaFalsa(200, {'cantidadGenerica': random.choice(
-                [0, 0, 1, 5, 12, 40])})
+            pagina = (json or {}).get('pagina', 1)
+            desde = (pagina - 1) * TAM_PAGINA_WIS
+            trozo = self.catalogo[desde:desde + TAM_PAGINA_WIS]
+            return RespuestaFalsa(200, {'stock': [
+                {'producto': c, 'stockGeneral': random.choice([0, 0, 1, 5, 12, 40]),
+                 'stockDisponible': 0} for c in trozo]})
         return RespuestaFalsa(200, {'ok': True})
 
 
@@ -84,6 +91,11 @@ def correr(env):
     print("\n1) ARMAR TABLA: %.2fs | %d variantes | ubicación: %s"
           % (time.time() - t0, conc.cs_total, config.ubicacionReponerStock.display_name))
 
+    env.cr.execute("SELECT codigo_unico FROM %s" % conc._cs_tabla())
+    wis.cargar_catalogo([c for (c,) in env.cr.fetchall()])
+    print("   WIS conoce %d de %d (el resto no lo lista, a propósito)"
+          % (len(wis.catalogo), conc.cs_total))
+
     conc.cs_batch_size = TANDA
     conc.write({'fase': 'consultando'})
     env.cr.commit = lambda: None          # el cron commitea por tanda; acá no
@@ -95,8 +107,10 @@ def correr(env):
         if not quedan:
             break
     dt = time.time() - t0
-    print("\n2) CONSULTA A WIS: %.1fs en %d tanda(s) de %d | %d requests | %.1f ms/variante"
-          % (dt, tandas, TANDA, wis.requests, 1000.0 * dt / max(conc.cs_total, 1)))
+    print("\n2) CONSULTA A WIS: %.1fs en %d tanda(s) | %d request(s) de %d filas "
+          "| %.0f ms/variante"
+          % (dt, tandas, wis.requests, TAM_PAGINA_WIS,
+             1000.0 * dt / max(conc.cs_total, 1)))
 
     conc._cs_finalizar_consulta()
     r = conc._cs_resumen()
@@ -104,7 +118,7 @@ def correr(env):
     print("   consultadas OK      : %d" % r['consultadas'])
     print("   con diferencia      : %d  (mínimo configurado: %s)"
           % (r['con_diferencia'], config.diferenciaMinima))
-    print("   SIN respuesta de WIS: %d  -> quedan FUERA del ajuste" % r['sin_respuesta'])
+    print("   que WIS NO informa  : %d  -> quedan FUERA del ajuste" % r['sin_respuesta'])
     print("   quedarían en cero   : %d  <- el número a mirar antes de aplicar" % r['a_cero'])
 
     env.cr.execute("""SELECT estado, count(*) FROM %s GROUP BY estado ORDER BY 2 DESC"""
@@ -116,7 +130,7 @@ def correr(env):
                          AND (cantidad_wis IS NOT NULL OR diferencia IS NOT NULL)"""
                    % conc._cs_tabla())
     fugas = env.cr.fetchone()[0]
-    print("\n   INVARIANTE · filas sin respuesta con cantidad asumida: %d %s"
+    print("\n   INVARIANTE · filas no informadas con cantidad asumida: %d %s"
           % (fugas, "✔" if fugas == 0 else "🔴 FALLA"))
 
     # --- fase 2: la costura con el motor de ajuste --------------------

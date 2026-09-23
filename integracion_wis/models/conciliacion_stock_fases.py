@@ -18,7 +18,9 @@ undo: son movimientos de inventario con su valuación y sus asientos.
 import logging
 import time
 
-from odoo import models, fields, api, _
+from psycopg2.extras import execute_values
+
+from odoo import models, fields, api, tools, _
 from odoo.exceptions import UserError, ValidationError
 from psycopg2.extensions import TransactionRollbackError
 
@@ -45,9 +47,10 @@ class ConciliacionStockFases(models.Model):
     )
     cs_batch_size = fields.Integer(
         string='Variantes por tanda', default=LOTE_CONSULTA, required=True,
-        help="Cada variante es un request a WIS: /Producto/GetProducto no acepta "
-             "lista. La tanda define cada cuánto se hace commit y cuánto se "
-             "rehace si hay que reintentar, no un lote de red.",
+        help="Filas del listado de stock que se traen por tanda. WIS pagina de "
+             "a 10 —el tamaño lo decide el servidor, no se puede pedir más—, "
+             "así que 200 son 20 páginas. Si WIS agranda su página, esto se "
+             "adapta solo: la tanda pide páginas hasta juntar esta cantidad.",
     )
     cs_total = fields.Integer(string='Variantes a consultar', readonly=True, copy=False)
     cs_done = fields.Integer(string='Consultadas', readonly=True, copy=False)
@@ -57,6 +60,7 @@ class ConciliacionStockFases(models.Model):
     cs_started_at = fields.Datetime(string='Inicio de la consulta', readonly=True, copy=False)
     cs_ended_at = fields.Datetime(string='Fin de la consulta', readonly=True, copy=False)
     cs_cancel_requested = fields.Boolean(string='Cancelación pedida', readonly=True, copy=False)
+    cs_pagina = fields.Integer(string='Última página leída', readonly=True, copy=False)
     cs_tope_a_cero_pct = fields.Integer(
         string='Tope de variantes a cero (%)', default=10,
         help="Si el ajuste dejaría en cero más de este porcentaje de las "
@@ -69,6 +73,39 @@ class ConciliacionStockFases(models.Model):
     # acción, que no necesita el comodel declarado.
     cs_batch_id = fields.Integer(string='Batch de ajuste', readonly=True, copy=False)
     cs_batch_nombre = fields.Char(string='Nombre del batch', readonly=True, copy=False)
+    cs_batch_estado = fields.Char(
+        string='Estado del ajuste', compute='_compute_cs_batch_estado',
+        help="En qué fase está el ajuste. Se lee del batch: acá no se duplica.",
+    )
+    cs_batch_avance = fields.Char(string='Avance del ajuste',
+                                  compute='_compute_cs_batch_estado')
+
+    def _compute_cs_batch_estado(self):
+        """Lee el estado del batch sin declararlo como relación.
+
+        `env.get` y no un Many2one: este módulo es compartido y no puede
+        depender de `forum_partner_import`. Si el motor no está, los campos
+        quedan vacíos y los botones no aparecen.
+        """
+        Batch = self.env.get('forum.import.batch')
+        for conc in self:
+            conc.cs_batch_estado = False
+            conc.cs_batch_avance = False
+            if Batch is None or not conc.cs_batch_id:
+                continue
+            batch = Batch.browse(conc.cs_batch_id).exists()
+            if not batch:
+                continue
+            conc.cs_batch_estado = batch.state
+            if batch.state in ('applying', 'applied'):
+                conc.cs_batch_avance = _("Celdas aplicadas: %s de %s") % (
+                    batch.processed, batch.total_rows)
+            elif batch.state in ('posting', 'posted'):
+                conc.cs_batch_avance = _("Asientos publicados: %s de %s") % (
+                    batch.post_done, batch.post_total)
+            elif batch.state in ('reconciling', 'reconciled'):
+                conc.cs_batch_avance = _("Grupos conciliados: %s de %s") % (
+                    batch.rec_done, batch.rec_total)
 
     # ------------------------------------------------------------------
     # La tabla de trabajo
@@ -142,7 +179,7 @@ class ConciliacionStockFases(models.Model):
             'fase': 'tabla', 'estado': 'borrador',
             'cs_total': total, 'cs_done': 0, 'cs_errors': 0, 'cs_con_diferencia': 0,
             'cs_started_at': False, 'cs_ended_at': False, 'cs_step': False,
-            'cs_cancel_requested': False,
+            'cs_cancel_requested': False, 'cs_pagina': 0,
         })
         self._cs_log("Tabla armada con %d variantes integradas. Ubicación: %s."
                      % (total, config.ubicacionReponerStock.display_name))
@@ -248,60 +285,78 @@ class ConciliacionStockFases(models.Model):
         self._cs_encolar_cron()
 
     def _cs_consultar_tanda(self):
-        """Consulta una tanda. Devuelve cuántas filas quedaron pendientes."""
+        """Trae una tanda del LISTADO de stock y la vuelca en la tabla.
+
+        🔴 Va por `/ConsultaDeStock/GetData`, que devuelve muchos productos por
+        request, y no por `/Producto/GetProducto` uno por uno. Medido contra el
+        WIS de pruebas: la consulta individual son 849 ms de promedio —28 min
+        para las 1.963 variantes integradas—; el listado trae 10 por request en
+        ~1,1 s, o sea 3,6 min. Y si WIS agranda su página, esto baja solo.
+
+        Devuelve cuántas filas del listado se procesaron; 0 cuando se terminó.
+        """
         self.ensure_one()
         t0 = time.time()
         cr = self.env.cr
         t = self._cs_tabla()
         config = self._cs_config()
+        campo = config.campo_stock_wis or 'stockGeneral'
 
-        cr.execute("""SELECT row_num, product_id, codigo_unico, cantidad_odoo
-                        FROM {t} WHERE consultado = false
-                       ORDER BY row_num LIMIT %s""".format(t=t), (self.cs_batch_size,))
-        filas = cr.fetchall()
-        if not filas:
-            return 0
-
-        hechas = errores = con_dif = 0
-        for row_num, product_id, codigo, cantidad_odoo in filas:
+        pagina = self.cs_pagina
+        leidas, paginas, fin_del_listado = 0, 0, False
+        while leidas < self.cs_batch_size:
+            pagina += 1
             try:
-                cantidad_wis = config.consultaStockCodigo(codigo)
+                filas = config.consultaStockPaginado(pagina)
             except Exception as e:
-                # 🔴 Sin respuesta NO es cero: la fila queda marcada y fuera
-                # del ajuste.
-                cr.execute("""UPDATE {t} SET consultado = true, estado = 'sin_respuesta',
-                                     error = %s WHERE row_num = %s""".format(t=t),
-                           (str(e)[:500], row_num))
-                errores += 1
-                continue
-            if cantidad_wis is None:
-                cr.execute("""UPDATE {t} SET consultado = true, estado = 'sin_respuesta',
-                                     error = 'WIS no devolvió cantidad para el producto.'
-                               WHERE row_num = %s""".format(t=t), (row_num,))
-                errores += 1
-                continue
-            diferencia = float(cantidad_wis) - float(cantidad_odoo or 0)
-            cr.execute("""UPDATE {t} SET consultado = true, estado = 'ok',
-                                 cantidad_wis = %s, diferencia = %s, error = NULL
-                           WHERE row_num = %s""".format(t=t),
-                       (cantidad_wis, diferencia, row_num))
-            hechas += 1
-            if abs(diferencia) >= (config.diferenciaMinima or 0):
-                if diferencia:
-                    con_dif += 1
+                # Una página que falla no puede dar por terminado el listado:
+                # eso marcaría como «sin respuesta» a todo lo que faltaba.
+                self._cs_log("Error leyendo la página %d del stock de WIS: %s"
+                             % (pagina, tools.ustr(e)[:300]), nivel='error')
+                self.write({'cs_pagina': pagina - 1})
+                raise
+            paginas += 1
+            if not filas:
+                fin_del_listado = True
+                break
+            datos = [(f.get('producto'), f.get(campo)) for f in filas
+                     if f.get('producto') is not None and f.get(campo) is not None]
+            if datos:
+                execute_values(cr, """
+                    UPDATE {t} s SET cantidad_wis = v.cantidad,
+                                     diferencia = v.cantidad - coalesce(s.cantidad_odoo, 0),
+                                     estado = 'ok', error = NULL, consultado = true
+                      FROM (VALUES %s) AS v(codigo, cantidad)
+                     WHERE s.codigo_unico = v.codigo AND s.consultado = false
+                """.format(t=t), datos, template="(%s, %s::numeric)")
+            leidas += len(filas)
 
-        self.write({
-            'cs_done': self.cs_done + hechas + errores,
-            'cs_errors': self.cs_errors + errores,
-            'cs_con_diferencia': self.cs_con_diferencia + con_dif,
-            'cs_step': _("Consultando WIS: %d de %d") % (
-                self.cs_done + hechas + errores, self.cs_total),
-        })
-        _logger.info("[WIS][conciliación %s] tanda de %d variantes en %.1fs "
-                     "(%.0f ms/variante) | ok=%d sin respuesta=%d",
-                     self.id, len(filas), time.time() - t0,
-                     1000.0 * (time.time() - t0) / len(filas), hechas, errores)
-        return len(filas) if len(filas) == self.cs_batch_size else 0
+        cr.execute("""SELECT count(*) FILTER (WHERE consultado), count(*) FILTER (WHERE estado = 'ok'),
+                             count(*) FILTER (WHERE estado = 'ok' AND diferencia <> 0)
+                        FROM {t}""".format(t=t))
+        consultadas, ok, con_dif = cr.fetchone()
+
+        vals = {'cs_pagina': pagina, 'cs_done': consultadas, 'cs_con_diferencia': con_dif,
+                'cs_step': _("Consultando WIS: %d de %d") % (consultadas, self.cs_total)}
+
+        if fin_del_listado:
+            # 🔴 Lo que el listado NO trajo no es cero: es «WIS no lo informa».
+            cr.execute("""UPDATE {t} SET consultado = true, estado = 'sin_respuesta',
+                                 error = 'WIS no lo informa en la consulta de stock.'
+                           WHERE consultado = false""".format(t=t))
+            sin_respuesta = cr.rowcount
+            cr.execute("SELECT count(*) FROM {t} WHERE estado = 'sin_respuesta'".format(t=t))
+            vals['cs_errors'] = cr.fetchone()[0]
+            vals['cs_done'] = self.cs_total
+            self._cs_log("Listado de stock recorrido entero: %d página(s). "
+                         "%d variante(s) que WIS no informa quedan fuera del ajuste."
+                         % (pagina, sin_respuesta))
+
+        self.write(vals)
+        _logger.info("[WIS][conciliación %s] tanda: %d página(s), %d fila(s) del listado "
+                     "en %.1fs | consultadas %d de %d",
+                     self.id, paginas, leidas, time.time() - t0, vals['cs_done'], self.cs_total)
+        return 0 if fin_del_listado else leidas
 
     def _cs_finalizar_consulta(self):
         self.ensure_one()
@@ -385,6 +440,32 @@ class ConciliacionStockFases(models.Model):
                      "Revisá las diferencias y aplicá desde ahí."
                      % (len(filas), batch.display_name))
         return self.action_abrir_batch()
+
+    # --- las fases del motor, disparadas desde acá -----------------------
+    # Son delegaciones de una línea: la lógica vive en el motor y no se copia.
+    # Están para no obligar a saltar de pantalla, que era lo pedido: todo el
+    # proceso se maneja desde Conciliación de Stock.
+    def _cs_batch(self):
+        self.ensure_one()
+        Batch = self.env.get('forum.import.batch')
+        if Batch is None or not self.cs_batch_id:
+            raise UserError(_("Todavía no se generó el ajuste."))
+        batch = Batch.browse(self.cs_batch_id).exists()
+        if not batch:
+            raise UserError(_("El ajuste ya no existe."))
+        return batch
+
+    def action_aplicar_ajuste(self):
+        """Fase 3: crea quants, capas de valuación y asientos EN BORRADOR."""
+        return self._cs_batch().action_aplicar_ajuste()
+
+    def action_publicar_asientos(self):
+        """Fase 4: publica los asientos, por tandas."""
+        return self._cs_batch().action_publicar_asientos()
+
+    def action_conciliar_asientos(self):
+        """Fase 5: concilia las líneas de los asientos."""
+        return self._cs_batch().action_conciliar()
 
     def action_abrir_batch(self):
         """Abre el batch del ajuste. Por acción y no por Many2one: ver arriba."""

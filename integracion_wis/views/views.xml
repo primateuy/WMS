@@ -347,8 +347,23 @@
                     class="btn-primary"
                     invisible="fase != 'consultado'"
                     help="Crea el ajuste de inventario con las diferencias y lo deja listo para revisar. No aplica ni publica nada."/>
+            <button name="action_aplicar_ajuste"
+                    string="4. Aplicar ajuste"
+                    type="object"
+                    class="btn-primary"
+                    invisible="cs_batch_estado != 'ready'"
+                    confirm="Va a crear los movimientos de inventario y los asientos EN BORRADOR. ¿Continuar?"/>
+            <button name="action_publicar_asientos"
+                    string="5. Publicar asientos"
+                    type="object"
+                    class="btn-primary"
+                    invisible="cs_batch_estado != 'applied'"/>
+            <button name="action_conciliar_asientos"
+                    string="6. Conciliar asientos"
+                    type="object"
+                    invisible="cs_batch_estado != 'posted'"/>
             <button name="action_abrir_batch"
-                    string="Abrir el ajuste"
+                    string="Ver el ajuste"
                     type="object"
                     invisible="not cs_batch_id"/>
             <button name="conciliarStock"
@@ -390,6 +405,8 @@
                 <field name="cs_ended_at" readonly="1" invisible="not cs_ended_at"/>
                 <field name="cs_tope_a_cero_pct"/>
                 <field name="cs_batch_nombre" readonly="1" invisible="not cs_batch_id"/>
+                <field name="cs_batch_estado" readonly="1" invisible="not cs_batch_id"/>
+                <field name="cs_batch_avance" readonly="1" invisible="not cs_batch_avance"/>
                 <field name="cs_batch_id" invisible="1"/>
                 <field name="cs_cancel_requested" invisible="1"/>
               </group>
