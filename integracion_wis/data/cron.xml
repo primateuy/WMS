@@ -66,5 +66,20 @@
       <field name="active" eval="True"/>
     </record>
 
+    <!-- Avance por tandas de la conciliación de stock. NO sale a conciliar
+         por su cuenta: sólo lleva adelante lo que un usuario arrancó desde la
+         pantalla, igual que el cron de la importación masiva. -->
+    <record id="ir_cron_wis_conciliar_stock_tandas" model="ir.cron">
+      <field name="name">WIS: Conciliación de stock (tandas)</field>
+      <field name="model_id" ref="model_conciliacion_stock"/>
+      <field name="state">code</field>
+      <field name="code">model._cron_consultar_tandas()</field>
+      <field name="interval_number">5</field>
+      <field name="interval_type">minutes</field>
+      <field name="numbercall">-1</field>
+      <field name="doall" eval="False"/>
+      <field name="active" eval="True"/>
+    </record>
+
   </data>
 </odoo>

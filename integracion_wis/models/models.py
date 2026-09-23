@@ -1496,21 +1496,28 @@ class IntegracionWIS(models.Model):
     
     
 
-    def consultaStock(self, vals):
+    def consultaStockCodigo(self, codigo):
+        """Stock de WIS para un código de producto. `None` si WIS no lo informa.
 
-        payload = {
-            "empresa": self.empresa_id,
-            "codigo": vals['codigo_unico']
-        }
-
+        🔴 Devolver `None` y no `0` es deliberado: quien llama tiene que poder
+        distinguir «WIS dice que no hay» de «WIS no contestó». Tomar lo segundo
+        como cero pone en cero productos que sólo no se pudieron consultar, y
+        eso termina en movimientos de inventario con valuación y asientos.
+        """
+        if not codigo:
+            return None
         response = self.consultarAPI(
             link="/Producto/GetProducto",
-            params=payload,
+            params={"empresa": self.empresa_id, "codigo": codigo},
             method="GET",
-            body=None
+            body=None,
         )
+        if not isinstance(response, dict) or 'cantidadGenerica' not in response:
+            return None
+        return response.get('cantidadGenerica')
 
-        return response.get('cantidadGenerica', 0)
+    def consultaStock(self, vals):
+        return self.consultaStockCodigo(vals['codigo_unico']) or 0
 
     def consultaStockBulk(self, variantes):
         
@@ -1522,17 +1529,7 @@ class IntegracionWIS(models.Model):
             if not var.codigo_unico:
                 continue
             try:
-                payload = {
-                    "empresa": self.empresa_id,
-                    "codigo": var.codigo_unico,
-                }
-                response = self.consultarAPI(
-                    link="/Producto/GetProducto",
-                    params=payload,
-                    method="GET",
-                    body=None,
-                )
-                resultado[var.id] = response.get('cantidadGenerica', 0)
+                resultado[var.id] = self.consultaStockCodigo(var.codigo_unico)
             except Exception as e:
                 _logger.warning(f"No se pudo obtener stock WIS para {var.display_name}: {str(e)}")
                 resultado[var.id] = None

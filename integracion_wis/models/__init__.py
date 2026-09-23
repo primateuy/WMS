@@ -16,6 +16,7 @@ from . import WizardStock
 from . import product_wms_log
 from . import conciliacionMaestros
 from . import ConciliacionStock
+from . import conciliacion_stock_fases
 from . import webhook_log
 from . import sale_order
 from . import uom_wis
