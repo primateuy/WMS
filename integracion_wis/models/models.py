@@ -293,33 +293,90 @@ class IntegracionWIS(models.Model):
         return True;
 
 
+    # Largo máximo de `descripcion` en /Producto/CreateOrUpdate (doc 24.1).
+    LARGO_DESCRIPCION_WIS = 65
+    # Largo máximo de `descripcionDisplay` (doc 24.1).
+    LARGO_DESCRIPCION_DISPLAY_WIS = 100
+
+    @api.model
+    def _wis_descripcion_producto(self, variante, limite=None):
+        """`nombre (atributos)` acotado al largo que acepta WIS.
+
+        🔴 **Cuando no entra, cede el NOMBRE, nunca los atributos**, que son lo
+        único que distingue una variante de sus hermanas. Medido sobre las 1.963
+        variantes integradas de Forum: mandando el `display_name` tal cual, 625
+        pasan de 65 caracteres y **580 perderían el atributo en el recorte**
+        —el `[código]` del principio se come 19 caracteres y el corte se lleva
+        la cola—. Con este formato son 7 las que hay que recortar y **ninguna**
+        pierde el atributo.
+
+        El código no va acá: viaja en `codigo` y en `codigoProductoEmpresa`.
+        """
+        limite = limite or self.LARGO_DESCRIPCION_WIS
+        nombre = (variante.name or '').strip()
+        atributos = variante.product_template_attribute_value_ids._get_combination_name()
+        if not atributos:
+            return nombre[:limite]
+        cola = " (%s)" % atributos
+        if len(nombre) + len(cola) <= limite:
+            return nombre + cola
+        disponible = limite - len(cola)
+        if disponible <= 0:
+            # Atributos más largos que todo el campo: se manda lo que entre de
+            # ellos, que sigue siendo más útil que el nombre repetido.
+            return atributos[:limite]
+        return nombre[:disponible].rstrip() + cola
+
     def _build_producto_payload(self, vals):
         """Construye el dict de un producto para /Producto/CreateOrUpdate.
 
-        manejoIdentificador y tipoManejoFecha son campos de creación:
-        WIS no permite modificarlos si el producto ya tiene movimientos.
-        Solo se incluyen cuando el producto todavía no tiene codigo_unico
-        (primera sincronización).
+        Los nombres de los campos son los de la doc oficial (WIS - WMS API 10.2,
+        sección 24.1). Tres que estaban mal y se corrigieron:
+
+        - `codigoProducto` **no existe** en el contrato: WIS lo ignoraba. El
+          código del producto es `codigo`, y para el código adicional está
+          `codigoProductoEmpresa`.
+        - `activo` **no existe**: la situación del producto es `situacion`,
+          15 (activo) o 16 (inactivo). O sea que desactivar un producto en Odoo
+          no lo estaba desactivando en WIS.
+        - `familia` y `clase` se llaman `codigoFamilia` y `codigoClase`.
+
+        🔴 **`codigoProductoEmpresa` es por qué WIS mostraba el mismo `PRD-…` en
+        el código adicional**: la doc dice que *«si no se usa se le asigna el
+        mismo código de artículo»*, y nunca se lo mandábamos. Ahí va el código
+        de barras, que en Forum es el mismo valor que el SKU en 1.874 de 1.975
+        variantes.
+
+        manejoIdentificador y tipoManejoFecha son campos de creación: WIS no
+        permite modificarlos si el producto ya tiene movimientos. Solo se
+        incluyen cuando el producto todavía no tiene codigo_unico.
         """
-        nombre = vals.name[:65] if len(vals.name) > 65 else vals.name
         unidad_wis = (vals.uom_id.wis_code or '').strip() or 'UND'
         # Las variantes nuevas todavía no tienen codigo_unico: se les asigna
         # acá para que el alta inicial también pueda viajar por lote.
         codigo = self._wis_codigo_producto(vals)
         payload = {
-            "codigoProducto": codigo,
-            "codigo":         codigo,
-            "descripcion":    nombre,
-            "familia":        1,
-            "unidadMedida":   unidad_wis,
-            "clase":          1,
-            "ramo":           1,
-            "pesoNeto":       vals.weight,
-            "precioVenta":    vals.list_price,
-            "categoria1":     vals.categ_id.name if vals.categ_id else "",
-            "unidadBulto":    1,
-            "activo":         vals.active,
+            "codigo":             codigo,
+            "descripcion":        self._wis_descripcion_producto(vals) or codigo,
+            # El display_name COMPLETO entra acá: mide 87 en el peor caso de
+            # Forum y el campo acepta 100.
+            "descripcionDisplay": (vals.display_name or '')[:self.LARGO_DESCRIPCION_DISPLAY_WIS],
+            "codigoFamilia":      1,
+            "unidadMedida":       unidad_wis,
+            "codigoClase":        "1",
+            "ramo":               1,
+            "pesoNeto":           vals.weight,
+            "precioVenta":        vals.list_price,
+            "categoria1":         (vals.categ_id.name or '')[:40] if vals.categ_id else "",
+            "unidadBulto":        1,
+            "situacion":          15 if vals.active else 16,
         }
+        # Código adicional: el de barras y, si no tiene, la referencia interna.
+        # Si no hay ninguno se omite y WIS hace lo de siempre (repetir el
+        # código de artículo), que es el comportamiento anterior.
+        codigo_empresa = (vals.barcode or vals.default_code or '').strip()
+        if codigo_empresa:
+            payload["codigoProductoEmpresa"] = codigo_empresa[:40]
         # Solo en la creación inicial (producto nuevo en WIS)
         if not vals.codigo_unico:
             tracking = vals.tracking
@@ -489,64 +546,25 @@ class IntegracionWIS(models.Model):
         return codigo
 
     def insertarProducto(self, vals):
+        """Alta/actualización de UNA variante.
 
-
-        productos = [];
-        unidad_wis = (vals.uom_id.wis_code or '').strip() if vals.uom_id else 'UND'
-        unidad_wis = unidad_wis or 'UND'
-
-        _logger.info("Nombre del producto => {}".format(vals.name));
-        _logger.info("DISPLAY NAME => {}".format(vals.display_name));
-
-        # OJO: `vals` es el record del producto. Truncar sobre `vals.name`
-        # escribía el nombre recortado en la base de Odoo (y en el template,
-        # o sea en TODAS sus variantes). El recorte es solo para el payload.
-        nombre = vals.name[:65] if len(vals.name) > 65 else vals.name
-        if len(vals.name) > 65:
-            _logger.info("El producto supera los 65 caracteres, se trunca solo para el payload de WIS");
-
+        🔴 Arma el payload con `_build_producto_payload`, el mismo del lote.
+        Antes tenía su propia copia y las dos se fueron separando: ésta mandaba
+        SIEMPRE `manejoIdentificador` y `tipoManejoFecha`, que son campos de
+        creación, y por eso WIS devolvía «No se permite modificar
+        ManejoIdentificador» en productos con movimientos. Dos armadores del
+        mismo payload son dos versiones de la verdad.
+        """
         codigo = self._wis_codigo_producto(vals)
+        productos = [self._build_producto_payload(vals)]
 
-
-        tracking = vals.tracking
-        tipo_manejo_fecha    = 'F' if tracking in ('lot', 'serial') else 'D'
-        manejo_identificador = 'L' if tracking in ('lot', 'serial') else 'P'
-
-        productos = [{
-                "codigoProducto": codigo,
-                "codigo": codigo,
-                "descripcion": f"{nombre}",
-                "familia": 1,
-                "unidadMedida": unidad_wis,
-                "clase": 1,
-                "ramo": 1,
-                "pesoNeto": vals.weight,
-                "manejoIdentificador": manejo_identificador,
-                "tipoManejoFecha": tipo_manejo_fecha,
-                "precioVenta": vals.list_price,
-
-                "categoria1": vals.categ_id.name if vals.categ_id else "",
-                "unidadBulto": 1,
-                "activo": vals.active
-
-            }]
-
-        
-
-        _logger.info("Payload del producto a enviar => {}".format(productos));
-        
-
-        
-
+        _logger.info("Payload del producto a enviar => %s", productos)
 
         payload = {
             "empresa": self.empresa_id,
             "dsReferencia": f"PRODUCTO: {vals.display_name} desde Odoo",
             "productos": productos
         }
-
-
-        
 
         response = self.consultarAPI(
             link="/Producto/CreateOrUpdate",

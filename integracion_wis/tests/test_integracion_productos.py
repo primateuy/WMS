@@ -119,7 +119,8 @@ class TestIntegracionProductosWIS(TransactionCase):
     def test_campos_wis_son_los_del_payload(self):
         """CAMPOS_WIS no debe tener campos que no viajan a WIS."""
         campos_payload = {'name', 'active', 'integracion_wms', 'barcode',
-                          'list_price', 'weight', 'uom_id', 'categ_id'}
+                          'default_code', 'list_price', 'weight', 'uom_id',
+                          'categ_id'}
         self.assertEqual(self.env['product.product'].CAMPOS_WIS, campos_payload)
 
     # ------------------------------------------------------------------
@@ -573,3 +574,122 @@ class TestMarcadoEnLaFichaEncola(TransactionCase):
         fallada = entradas.filtered(lambda e: e.product_id == variantes[0])
         self.assertIn('producto rechazado', fallada.ultimo_error or '')
         self.assertEqual(fallada.intentos, 1)
+
+
+@tagged('post_install', '-at_install', 'wis_productos')
+class TestPayloadProductoSegunDoc(TransactionCase):
+    """El payload del maestro, contrastado contra WIS - WMS API 10.2 §24.1."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.config = cls.env['integracion_wis.integracion_wis'].search(
+            [('company_id', '=', cls.env.company.id)], limit=1)
+        if not cls.config:
+            cls.config = cls.env['integracion_wis.integracion_wis'].create({
+                'client_id': 'test', 'client_secret': 'test', 'empresa_id': 1,
+                'url_access_token': 'https://example.invalid/token',
+                'apiLink': 'https://example.invalid/api',
+                'company_id': cls.env.company.id, 'comunicacion_activa': True,
+            })
+        cls.atributo = cls.env['product.attribute'].create({
+            'name': 'Color prueba WIS',
+            'value_ids': [(0, 0, {'name': 'Gris Claro Melange'}), (0, 0, {'name': 'Marino'})],
+        })
+
+    def _variante(self, nombre='Producto WIS', **vals):
+        tmpl = self.env['product.template'].create(dict({
+            'name': nombre, 'type': 'product',
+            'attribute_line_ids': [(0, 0, {
+                'attribute_id': self.atributo.id,
+                'value_ids': [(6, 0, self.atributo.value_ids.ids)]})],
+        }, **vals))
+        return tmpl.product_variant_ids[0]
+
+    # --- campos que la doc NO tiene, y los que sí ---------------------
+    def test_no_manda_campos_inexistentes(self):
+        """`codigoProducto`, `activo`, `familia` y `clase` no están en §24.1:
+        WIS los ignoraba."""
+        payload = self.config._build_producto_payload(self._variante())
+        for campo in ('codigoProducto', 'activo', 'familia', 'clase'):
+            self.assertNotIn(campo, payload)
+
+    def test_situacion_reemplaza_a_activo(self):
+        """15 activo / 16 inactivo. Con `activo` desactivar en Odoo no
+        desactivaba en WIS."""
+        variante = self._variante()
+        self.assertEqual(self.config._build_producto_payload(variante)['situacion'], 15)
+        variante.with_context(_avoid_wms=True).write({'active': False})
+        self.assertEqual(self.config._build_producto_payload(variante)['situacion'], 16)
+
+    def test_familia_y_clase_con_el_nombre_de_la_doc(self):
+        payload = self.config._build_producto_payload(self._variante())
+        self.assertEqual(payload['codigoFamilia'], 1)
+        self.assertEqual(payload['codigoClase'], "1")
+
+    # --- el código adicional -----------------------------------------
+    def test_codigo_producto_empresa_lleva_el_barcode(self):
+        """Por qué WIS repetía el PRD-: la doc dice que si no se manda, le
+        asigna el mismo código de artículo."""
+        variante = self._variante()
+        variante.with_context(_avoid_wms=True).write({'barcode': '7790001234567'})
+        payload = self.config._build_producto_payload(variante)
+        self.assertEqual(payload['codigoProductoEmpresa'], '7790001234567')
+        self.assertNotEqual(payload['codigoProductoEmpresa'], payload['codigo'])
+
+    def test_codigo_producto_empresa_cae_en_default_code(self):
+        variante = self._variante()
+        variante.with_context(_avoid_wms=True).write({'default_code': 'SKU-123'})
+        self.assertEqual(
+            self.config._build_producto_payload(variante)['codigoProductoEmpresa'],
+            'SKU-123')
+
+    def test_sin_barcode_ni_sku_no_se_manda_el_campo(self):
+        """Se omite y WIS hace lo de siempre, que es el comportamiento previo."""
+        variante = self._variante()
+        variante.with_context(_avoid_wms=True).write({'barcode': False,
+                                                      'default_code': False})
+        self.assertNotIn('codigoProductoEmpresa',
+                         self.config._build_producto_payload(variante))
+
+    # --- la descripción ----------------------------------------------
+    def test_descripcion_lleva_los_atributos(self):
+        variante = self._variante('Calzado Deportivo Dama')
+        desc = self.config._build_producto_payload(variante)['descripcion']
+        self.assertIn('Calzado Deportivo Dama', desc)
+        self.assertIn(variante.product_template_attribute_value_ids._get_combination_name(), desc)
+
+    def test_al_recortar_ceden_el_nombre_y_no_los_atributos(self):
+        """🔴 Lo que distingue a la variante son los atributos: el recorte no
+        puede llevárselos, que es lo que pasaba mandando el display_name."""
+        variante = self._variante('N' * 90)
+        desc = self.config._build_producto_payload(variante)['descripcion']
+        atributos = variante.product_template_attribute_value_ids._get_combination_name()
+        self.assertLessEqual(len(desc), 65)
+        self.assertTrue(desc.endswith('(%s)' % atributos), desc)
+
+    def test_descripcion_display_lleva_el_nombre_completo(self):
+        variante = self._variante('Buzo de Felpa Cuello Base Estampado Sidney')
+        payload = self.config._build_producto_payload(variante)
+        self.assertEqual(payload['descripcionDisplay'],
+                         variante.display_name[:100])
+        self.assertIn(variante.display_name[:60], payload['descripcionDisplay'])
+
+    # --- los dos armadores, uno solo ---------------------------------
+    def test_insertar_producto_usa_el_mismo_payload(self):
+        """Tenían copias separadas y se fueron separando: la individual mandaba
+        siempre manejoIdentificador, que es campo de creación."""
+        variante = self._variante()
+        variante.with_context(_avoid_wms=True).write({'codigo_unico': 'PRD-TEST-1'})
+        capturado = {}
+
+        def fingir(self, link, body=None, params=None, method='GET'):
+            capturado['body'] = body
+            return {'numeroInterfaz': 'IF-1'}
+
+        with patch(f'{MODELO_API}.consultarAPI', fingir):
+            self.config.insertarProducto(variante)
+
+        enviado = capturado['body']['productos'][0]
+        self.assertEqual(enviado, self.config._build_producto_payload(variante))
+        self.assertNotIn('manejoIdentificador', enviado)

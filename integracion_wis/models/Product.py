@@ -584,7 +584,9 @@ class Product(models.Model):
     # recalcula solo con AVCO/FIFO al validar cada recepción, y tenerlo acá
     # hacía que validar una recepción de N líneas disparara N llamadas a WIS
     # dentro de la transacción.
-    CAMPOS_WIS = {'name', 'active', 'integracion_wms', 'barcode',
+    # `default_code` entró con `codigoProductoEmpresa`: es el respaldo del
+    # código adicional cuando la variante no tiene código de barras.
+    CAMPOS_WIS = {'name', 'active', 'integracion_wms', 'barcode', 'default_code',
                   'list_price', 'weight', 'uom_id', 'categ_id'}
 
     def write(self, vals):
