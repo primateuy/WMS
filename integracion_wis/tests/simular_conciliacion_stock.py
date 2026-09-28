@@ -108,8 +108,10 @@ def correr(env):
 
     t0 = time.time()
     conc.action_armar_tabla()
-    print("\n1) ARMAR TABLA: %.2fs | %d variantes | ubicación: %s"
-          % (time.time() - t0, conc.cs_total, config.ubicacionReponerStock.display_name))
+    print("\n1) ARMAR TABLA: %.2fs | %d variantes | %d ubicaciones comparadas | "
+          "diferencia en: %s"
+          % (time.time() - t0, conc.cs_total, len(conc._cs_ids_ubicaciones()),
+             config.ubicacionReponerStock.display_name))
 
     env.cr.execute("SELECT codigo_unico FROM %s" % conc._cs_tabla())
     wis.cargar_catalogo([c for (c,) in env.cr.fetchall()])
@@ -181,14 +183,25 @@ def correr(env):
                        GROUP BY 1 ORDER BY 2 DESC""" % batch._staging_name())
     print("   acción por celda: %s" % dict(env.cr.fetchall()))
 
-    # Que lo entregado sea el stock a dejar y no la diferencia.
+    # Que, por variante, lo que mueven las celdas sea exactamente la
+    # diferencia contra WIS: el total de Odoo tiene que quedar igual a WIS.
     env.cr.execute("""
-        SELECT count(*) FROM {t} s
-          JOIN {c} w ON w.product_id = s.product_id
-         WHERE s.cantidad IS DISTINCT FROM w.cantidad_wis
+        WITH mov AS (
+            SELECT s.product_id,
+                   sum(s.cantidad - coalesce((SELECT sum(q.quantity) FROM stock_quant q
+                                               WHERE q.product_id = s.product_id
+                                                 AND q.location_id = s.location_id
+                                                 AND q.lot_id IS NULL AND q.package_id IS NULL
+                                                 AND q.owner_id IS NULL), 0)) AS delta
+              FROM {t} s GROUP BY s.product_id
+        )
+        SELECT count(*) FROM mov JOIN {c} w ON w.product_id = mov.product_id
+         WHERE abs(mov.delta - w.diferencia) > 0.0001
     """.format(t=batch._staging_name(), c=conc._cs_tabla()))
     desalineadas = env.cr.fetchone()[0]
-    print("\n   INVARIANTE · celdas con cantidad distinta a la de WIS: %d %s"
+    env.cr.execute("SELECT count(*) FROM %s WHERE cantidad < 0" % batch._staging_name())
+    print("   celdas que dejan la de diferencias en negativo: %d" % env.cr.fetchone()[0])
+    print("\n   INVARIANTE · variantes cuyo total no queda igual a WIS: %d %s"
           % (desalineadas, "✔" if desalineadas == 0 else "🔴 FALLA"))
 
     env.cr.rollback()

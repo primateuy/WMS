@@ -11,7 +11,7 @@
     'author': "Avance Software",
     'website': "https://avancesoftware.us/",
     'category': 'Uncategorized',
-    'version': '0.6',
+    'version': '0.7',
     'application': True,
     'installable': True,
     'icon': '/integracion_wis/static/description/icon.png',

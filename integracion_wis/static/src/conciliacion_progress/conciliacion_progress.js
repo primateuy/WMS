@@ -28,7 +28,7 @@ const MODELO = "conciliacion.stock";
 const INTERVALO_POLL = 4000;
 const INTERVALO_RELOJ = 1000;
 // Estados del batch en los que su cron está trabajando.
-const BATCH_VIVO = ["applying", "posting", "reconciling"];
+const BATCH_VIVO = ["processing", "applying", "posting", "reconciling"];
 const CAMPOS = [
     "fase", "estado", "cs_total", "cs_done", "cs_encontradas", "cs_sin_stock",
     "cs_no_existe", "cs_err_filas", "cs_errors", "cs_con_diferencia", "cs_step",
@@ -38,6 +38,7 @@ const CAMPOS = [
     "cs_ajuste_started_at", "cs_ajuste_ended_at", "cs_ajuste_celdas",
     "cs_requests", "cs_requests_error", "cs_ultimo_request",
     "cs_batch_estado", "cs_b_fase",
+    "cs_b_carga_total", "cs_b_carga_done", "cs_b_carga_started_at", "cs_b_carga_ended_at",
     "cs_b_apply_total", "cs_b_apply_done", "cs_b_applied", "cs_b_apply_errors",
     "cs_b_apply_started_at", "cs_b_apply_ended_at",
     "cs_b_post_total", "cs_b_post_done", "cs_b_post_errors",
@@ -179,7 +180,7 @@ function faseAjuste(d) {
         fin: d.cs_ajuste_ended_at,
         unidad: _t("celdas/s"),
         filasContadores: [[
-            { etiqueta: _t("Celdas con diferencia"), valor: d.cs_ajuste_celdas },
+            { etiqueta: _t("Celdas del ajuste (en la ubicación de diferencias)"), valor: d.cs_ajuste_celdas },
         ]],
     };
 }
@@ -198,10 +199,27 @@ function estadoBatch(d, fase, terminados) {
     return null;
 }
 
+function faseCarga(d) {
+    return {
+        clave: "carga",
+        titulo: _t("Fase 3 · Carga del conteo en los quants"),
+        corriendo: d.cs_batch_estado === "processing",
+        estadoFinal: estadoBatch(d, "carga", ["done", "applying", "applied", "posting", "posted", "reconciling", "reconciled"]),
+        hecho: d.cs_b_carga_done,
+        total: d.cs_b_carga_total,
+        inicio: d.cs_b_carga_started_at,
+        fin: d.cs_b_carga_ended_at,
+        unidad: _t("celdas/s"),
+        filasContadores: [[
+            { etiqueta: _t("Celdas cargadas"), valor: d.cs_b_carga_done, clase: "text-success" },
+        ]],
+    };
+}
+
 function faseAplicar(d) {
     return {
         clave: "aplicar",
-        titulo: _t("Fase 3 · Aplicación del ajuste"),
+        titulo: _t("Fase 4 · Aplicación del ajuste"),
         corriendo: d.cs_batch_estado === "applying",
         estadoFinal: estadoBatch(d, "apply", ["applied", "posting", "posted", "reconciling", "reconciled"]),
         hecho: d.cs_b_apply_done,
@@ -219,7 +237,7 @@ function faseAplicar(d) {
 function fasePublicar(d) {
     return {
         clave: "publicar",
-        titulo: _t("Fase 4 · Publicación de los asientos"),
+        titulo: _t("Fase 5 · Publicación de los asientos"),
         corriendo: d.cs_batch_estado === "posting",
         estadoFinal: estadoBatch(d, "post", ["posted", "reconciling", "reconciled"]),
         hecho: d.cs_b_post_done,
@@ -237,7 +255,7 @@ function fasePublicar(d) {
 function faseConciliar(d) {
     return {
         clave: "conciliar",
-        titulo: _t("Fase 5 · Conciliación de los asientos"),
+        titulo: _t("Fase 6 · Conciliación de los asientos"),
         corriendo: d.cs_batch_estado === "reconciling",
         estadoFinal: estadoBatch(d, "rec", ["reconciled"]),
         hecho: d.cs_b_rec_done,
@@ -275,6 +293,9 @@ export function fasesConciliacion(d) {
         fases.push(faseAjuste(d));
     }
     const b = d.cs_batch_estado;
+    if (b && (d.cs_b_carga_started_at || ["processing", "done", "applying", "applied", "posting", "posted", "reconciling", "reconciled"].includes(b))) {
+        fases.push(faseCarga(d));
+    }
     if (b && (d.cs_b_apply_started_at || ["applying", "applied", "posting", "posted", "reconciling", "reconciled"].includes(b))) {
         fases.push(faseAplicar(d));
     }

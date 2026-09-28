@@ -122,6 +122,17 @@ class ConciliacionStockFases(models.Model):
     cs_ajuste_started_at = fields.Datetime(string='Inicio del ajuste', readonly=True, copy=False)
     cs_ajuste_ended_at = fields.Datetime(string='Ajuste generado', readonly=True, copy=False)
     cs_ajuste_celdas = fields.Integer(string='Celdas del ajuste', readonly=True, copy=False)
+    # Con qué ubicaciones se armó la tabla: la configuración puede cambiar entre
+    # la fase 0 y la 2, y el ajuste tiene que repartir sobre las mismas.
+    cs_ubicacion_ids = fields.Many2many(
+        'stock.location', 'conciliacion_stock_ubicacion_rel', 'conciliacion_id',
+        'location_id', string='Ubicaciones comparadas', readonly=True, copy=False,
+        help="Las «Ubicaciones a Consultar» de la configuración de WIS más la "
+             "de reposición, con sus sububicaciones.")
+    cs_reposicion_id = fields.Many2one(
+        'stock.location', string='Ubicación de reposición', readonly=True, copy=False,
+        ondelete='restrict',
+        help="Donde se registra la diferencia contra WIS.")
     cs_tope_a_cero_pct = fields.Integer(
         string='Tope de variantes a cero (%)', default=10,
         help="Si el ajuste dejaría en cero más de este porcentaje de las "
@@ -150,6 +161,10 @@ class ConciliacionStockFases(models.Model):
     # Espejo del avance del batch, para las barras de esta pantalla. Mismo
     # criterio: se leen del batch, no se guardan.
     cs_b_fase = fields.Char(compute='_compute_cs_batch_estado')
+    cs_b_carga_total = fields.Integer(compute='_compute_cs_batch_estado')
+    cs_b_carga_done = fields.Integer(compute='_compute_cs_batch_estado')
+    cs_b_carga_started_at = fields.Datetime(compute='_compute_cs_batch_estado')
+    cs_b_carga_ended_at = fields.Datetime(compute='_compute_cs_batch_estado')
     cs_b_apply_total = fields.Integer(compute='_compute_cs_batch_estado')
     cs_b_apply_done = fields.Integer(compute='_compute_cs_batch_estado')
     cs_b_applied = fields.Integer(compute='_compute_cs_batch_estado')
@@ -171,6 +186,8 @@ class ConciliacionStockFases(models.Model):
     # Campos del batch que se espejan: (campo acá, campo en el batch).
     _CS_ESPEJO_BATCH = [
         ('cs_b_fase', 'current_phase'),
+        ('cs_b_carga_total', 'total_rows'), ('cs_b_carga_done', 'processed'),
+        ('cs_b_carga_started_at', 'started_at'), ('cs_b_carga_ended_at', 'ended_at'),
         ('cs_b_apply_total', 'apply_total'), ('cs_b_apply_done', 'apply_processed'),
         ('cs_b_applied', 'applied_count'), ('cs_b_apply_errors', 'apply_errors'),
         ('cs_b_apply_started_at', 'apply_started_at'), ('cs_b_apply_ended_at', 'apply_ended_at'),
@@ -204,7 +221,10 @@ class ConciliacionStockFases(models.Model):
             for campo, origen in self._CS_ESPEJO_BATCH:
                 if origen in batch._fields:
                     conc[campo] = batch[origen]
-            if batch.state in ('applying', 'applied'):
+            if batch.state in ('processing', 'done'):
+                conc.cs_batch_avance = _("Celdas cargadas: %s de %s") % (
+                    batch.processed, batch.total_rows)
+            elif batch.state in ('applying', 'applied'):
                 conc.cs_batch_avance = _("Celdas aplicadas: %s de %s") % (
                     batch.processed, batch.total_rows)
             elif batch.state in ('posting', 'posted'):
@@ -263,18 +283,39 @@ class ConciliacionStockFases(models.Model):
             'cs_error_msg': False,
         }
 
+    def _cs_ids_ubicaciones(self):
+        """Ids de todas las ubicaciones comparadas, con sus sububicaciones.
+
+        TODAS, internas o no (una hija de tránsito, por ejemplo): esto es sólo
+        para saber cuánto tiene la variante en Odoo. Ajustar, se ajusta
+        únicamente la de reposición.
+        """
+        self.ensure_one()
+        return self.env['stock.location'].with_context(active_test=False).search(
+            [('id', 'child_of', self.cs_ubicacion_ids.ids)]).ids
+
     def action_armar_tabla(self):
         """Fase 0: la tabla de trabajo, que es «el Excel» de este proceso.
 
         Una fila por variante integrada con código WIS, con el stock que hoy
-        tiene Odoo en la ubicación de reposición. La cantidad de WIS queda
+        tiene Odoo en las «Ubicaciones a Consultar» de la configuración MÁS la
+        de reposición, sububicaciones incluidas. La cantidad de WIS queda
         vacía: la completa la fase 1.
+
+        🔴 Hasta el 28-09-2026 se tomaba SÓLO la de reposición («Auditoría -
+        Diferencias», casi vacía): Odoo daba 0 y la diferencia era todo el
+        stock de WIS, que el ajuste habría sumado encima de Existencias. La de
+        reposición entra en el total porque ahí se acumulan las diferencias
+        anteriores: sin ella, cada corrida volvería a sumar las mismas.
         """
         self.ensure_one()
         config = self._cs_config()
         if not config.ubicacionReponerStock:
             raise UserError(_("Falta la ubicación de reposición en la configuración de WIS: "
-                              "es la ubicación contra la que se compara y se ajusta."))
+                              "es donde se registra la diferencia."))
+        if not config.ubicacionesAConsultar:
+            raise UserError(_("Faltan las «Ubicaciones a Consultar» en la configuración de "
+                              "WIS: son las que se suman para comparar contra WIS."))
         if self.fase == 'consultando' and self.estado != 'error':
             raise UserError(_("Hay una consulta en curso. Cancelala antes de rearmar la tabla."))
 
@@ -289,6 +330,7 @@ class ConciliacionStockFases(models.Model):
                 codigo_unico  varchar,
                 location_id   integer NOT NULL,
                 cantidad_odoo numeric,
+                cantidad_reposicion numeric,
                 cantidad_wis  numeric,
                 diferencia    numeric,
                 estado        varchar DEFAULT 'pendiente',
@@ -299,11 +341,22 @@ class ConciliacionStockFases(models.Model):
         cr.execute("CREATE INDEX {t}_pend_idx ON {t} (row_num) WHERE consultado = false".format(t=t))
         cr.execute("CREATE INDEX {t}_cod_idx ON {t} (codigo_unico)".format(t=t))
 
-        # El stock de Odoo se toma UNA vez, acá, y de la ubicación de
-        # reposición: es contra ésa que se ajusta.
+        repo = config.ubicacionReponerStock
+        self.write({'cs_ubicacion_ids': [fields.Command.set(
+                        (config.ubicacionesAConsultar | repo).ids)],
+                    'cs_reposicion_id': repo.id})
+        ubicaciones = self._cs_ids_ubicaciones()
+
+        # El stock de Odoo se toma UNA vez, acá. Cuenta TODO —paquetes y lotes
+        # incluidos—, porque WIS informa el total; qué se puede ajustar se ve
+        # recién en la fase 2.
         cr.execute("""
-            INSERT INTO {t} (product_id, codigo_unico, location_id, cantidad_odoo)
+            INSERT INTO {t} (product_id, codigo_unico, location_id, cantidad_odoo,
+                             cantidad_reposicion)
             SELECT p.id, p.codigo_unico, %(ubic)s,
+                   coalesce((SELECT sum(q.quantity) FROM stock_quant q
+                              WHERE q.product_id = p.id
+                                AND q.location_id = ANY(%(ubics)s)), 0),
                    coalesce((SELECT sum(q.quantity) FROM stock_quant q
                               WHERE q.product_id = p.id AND q.location_id = %(ubic)s), 0)
               FROM product_product p
@@ -313,7 +366,7 @@ class ConciliacionStockFases(models.Model):
                AND p.codigo_unico IS NOT NULL
                AND pt.type = 'product'
              ORDER BY p.id
-        """.format(t=t), {'ubic': config.ubicacionReponerStock.id})
+        """.format(t=t), {'ubic': repo.id, 'ubics': ubicaciones})
         total = cr.rowcount
 
         vals = self._cs_vals_consulta_en_cero()
@@ -321,8 +374,10 @@ class ConciliacionStockFases(models.Model):
                      'cs_tabla_started_at': inicio,
                      'cs_tabla_ended_at': fields.Datetime.now()})
         self.write(vals)
-        self._cs_log("Tabla armada con %d variantes integradas. Ubicación: %s."
-                     % (total, config.ubicacionReponerStock.display_name))
+        self._cs_log("Tabla armada con %d variantes integradas. Stock de Odoo sumado en "
+                     "%d ubicación(es) (las «Ubicaciones a Consultar», la de reposición y "
+                     "sus sububicaciones). La diferencia se registra en %s."
+                     % (total, len(ubicaciones), repo.display_name))
         if not total:
             raise UserError(_("No hay variantes integradas con código WIS para conciliar."))
         return True
@@ -740,6 +795,13 @@ class ConciliacionStockFases(models.Model):
                 "diferencias se pueden revisar, pero el ajuste hay que armarlo a mano."))
 
         config = self._cs_config()
+        if not self.cs_reposicion_id or not self.cs_ubicacion_ids:
+            # 🔴 Tablas armadas antes del 28-09-2026: comparaban sólo contra la
+            # de reposición, y su ajuste duplicaría el stock. No se reparan.
+            raise UserError(_(
+                "Esta tabla se armó con la versión anterior, que comparaba WIS sólo "
+                "contra la ubicación de reposición. Volvé a armarla y a consultar WIS: "
+                "ajustar con estas diferencias duplicaría el stock."))
         resumen = self._cs_resumen()
         if not resumen['con_diferencia']:
             raise UserError(_("No hay diferencias que ajustar."))
@@ -757,15 +819,7 @@ class ConciliacionStockFases(models.Model):
                     tope=self.cs_tope_a_cero_pct))
 
         inicio = fields.Datetime.now()
-        minimo = config.diferenciaMinima or 0
-        self.env.cr.execute("""
-            SELECT product_id, location_id, cantidad_wis
-              FROM {t}
-             WHERE estado IN %(estados)s AND diferencia <> 0 AND abs(diferencia) >= %(min)s
-             ORDER BY row_num
-        """.format(t=self._cs_tabla()), {'min': minimo, 'estados': ESTADOS_AJUSTE})
-        filas = [{'product_id': p, 'location_id': l, 'cantidad': float(c)}
-                 for p, l, c in self.env.cr.fetchall()]
+        filas = self._cs_celdas_ajuste(config.diferenciaMinima or 0)
 
         motivo = "Conciliación de stock WIS %s (#%d)" % (
             fields.Date.to_string(fields.Date.context_today(self)), self.id)
@@ -775,7 +829,10 @@ class ConciliacionStockFases(models.Model):
             'inventory_user_id': self.env.user.id,
             'inventory_reason': motivo,
         })
-        batch.cargar_celdas_externas(filas, origen="WIS (conciliación #%d)" % self.id)
+        # Con negativos: la de reposición puede quedar en negativo (ver
+        # `_cs_celdas_ajuste`).
+        batch.cargar_celdas_externas(filas, origen="WIS (conciliación #%d)" % self.id,
+                                     permitir_negativos=True)
 
         self.write({'fase': 'ajuste', 'cs_batch_id': batch.id,
                     'cs_batch_nombre': batch.display_name,
@@ -786,6 +843,38 @@ class ConciliacionStockFases(models.Model):
                      "Revisá las diferencias y aplicá desde ahí."
                      % (len(filas), batch.display_name))
         return self.action_abrir_batch()
+
+    def _cs_celdas_ajuste(self, minimo):
+        """Una celda por variante: la diferencia entera va a la de reposición.
+
+        La diferencia se calcula contra el TOTAL de las ubicaciones comparadas
+        y se registra en la de reposición («Auditoría - Diferencias»), sea
+        positiva o negativa. Si WIS tiene menos, esa ubicación queda en
+        negativo: el operador la regulariza después con un movimiento desde
+        las ubicaciones que tienen el stock, y la deja en cero. Decidido con
+        Daryl el 28-09-2026.
+
+        🔴 La celda lleva el stock que debe QUEDAR en el quant suelto (sin
+        lote, paquete ni propietario) de la de reposición, que es el que ajusta
+        el motor: lo que ya tiene más la diferencia.
+        """
+        self.ensure_one()
+        cr = self.env.cr
+        repo = self.cs_reposicion_id.id
+        cr.execute("""
+            SELECT s.product_id, s.diferencia
+                   + coalesce((SELECT sum(q.quantity) FROM stock_quant q
+                                WHERE q.product_id = s.product_id AND q.location_id = %(repo)s
+                                  AND q.lot_id IS NULL AND q.package_id IS NULL
+                                  AND q.owner_id IS NULL), 0)
+              FROM {t} s
+             WHERE s.estado IN %(estados)s AND s.diferencia <> 0
+               AND abs(s.diferencia) >= %(min)s
+             ORDER BY s.row_num
+        """.format(t=self._cs_tabla()),
+                   {'repo': repo, 'min': minimo, 'estados': ESTADOS_AJUSTE})
+        return [{'product_id': p, 'location_id': repo, 'cantidad': float(c)}
+                for p, c in cr.fetchall()]
 
     # --- las fases del motor, disparadas desde acá -----------------------
     # Son delegaciones de una línea: la lógica vive en el motor y no se copia.
@@ -801,16 +890,21 @@ class ConciliacionStockFases(models.Model):
             raise UserError(_("El ajuste ya no existe."))
         return batch
 
+    def action_cargar_conteo(self):
+        """Fase 3: carga el conteo en los quants. El motor lo exige antes de
+        aplicar (`action_aplicar_ajuste` pide el batch en «done»)."""
+        return self._cs_batch().action_iniciar()
+
     def action_aplicar_ajuste(self):
-        """Fase 3: crea quants, capas de valuación y asientos EN BORRADOR."""
+        """Fase 4: crea movimientos, capas de valuación y asientos EN BORRADOR."""
         return self._cs_batch().action_aplicar_ajuste()
 
     def action_publicar_asientos(self):
-        """Fase 4: publica los asientos, por tandas."""
+        """Fase 5: publica los asientos, por tandas."""
         return self._cs_batch().action_publicar_asientos()
 
     def action_conciliar_asientos(self):
-        """Fase 5: concilia las líneas de los asientos."""
+        """Fase 6: concilia las líneas de los asientos."""
         return self._cs_batch().action_conciliar()
 
     def action_abrir_batch(self):
@@ -842,7 +936,8 @@ class ConciliacionStockFases(models.Model):
 
         self.env.cr.execute("""
             SELECT s.codigo_unico, p.default_code, p.barcode, s.product_id,
-                   s.cantidad_odoo, s.cantidad_wis, s.diferencia, s.estado, s.error
+                   s.cantidad_odoo, s.cantidad_reposicion, s.cantidad_wis, s.diferencia,
+                   s.estado, s.error
               FROM {t} s
               JOIN product_product p ON p.id = s.product_id
              ORDER BY s.row_num
@@ -863,13 +958,15 @@ class ConciliacionStockFases(models.Model):
         hoja = libro.add_worksheet(_("Detalle"))
         negrita = libro.add_format({'bold': True, 'bg_color': '#DDDDDD'})
         encabezado = [_("Código WIS"), _("Referencia"), _("Código de barras"), _("Variante"),
-                      _("Stock Odoo"), _("Stock WIS"), _("Diferencia"), _("Estado"),
-                      _("Detalle")]
+                      _("Stock Odoo (total comparado)"), _("De eso, en reposición"),
+                      _("Stock WIS"), _("Diferencia"), _("Estado"), _("Detalle")]
         hoja.write_row(0, 0, encabezado, negrita)
-        for i, (cod, ref, barra, pid, odoo, wis, dif, estado, error) in enumerate(filas, 1):
+        for i, (cod, ref, barra, pid, odoo, repo, wis, dif, estado, error) \
+                in enumerate(filas, 1):
             hoja.write_row(i, 0, [
                 cod or '', ref or '', barra or '', nombres.get(pid, pid),
                 float(odoo) if odoo is not None else '',
+                float(repo) if repo is not None else '',
                 float(wis) if wis is not None else '',
                 float(dif) if dif is not None else '',
                 etiquetas.get(estado, estado), error or ''])
@@ -877,8 +974,8 @@ class ConciliacionStockFases(models.Model):
         hoja.freeze_panes(1, 0)
         hoja.set_column(0, 2, 16)
         hoja.set_column(3, 3, 45)
-        hoja.set_column(4, 6, 11)
-        hoja.set_column(7, 8, 34)
+        hoja.set_column(4, 7, 13)
+        hoja.set_column(8, 9, 34)
         libro.close()
 
         nombre = "conciliacion_stock_%d.xlsx" % self.id

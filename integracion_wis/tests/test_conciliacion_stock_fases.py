@@ -42,8 +42,18 @@ class TestConciliacionStockFases(TransactionCase):
                 'apiLink': 'https://example.invalid/api',
                 'company_id': cls.env.company.id, 'comunicacion_activa': True,
             })
+        # Las «Ubicaciones a Consultar»: una con una sububicación. El stock de
+        # Odoo que se compara es la suma de éstas más la de reposición.
+        cls.existencias = cls.env['stock.location'].create({
+            'name': 'WIS Existencias prueba', 'usage': 'internal',
+            'location_id': cls.env.ref('stock.stock_location_locations').id,
+        })
+        cls.estante = cls.env['stock.location'].create({
+            'name': 'Estante', 'usage': 'internal', 'location_id': cls.existencias.id,
+        })
         cls.config.write({'comunicacion_activa': True,
                           'ubicacionReponerStock': cls.ubicacion.id,
+                          'ubicacionesAConsultar': [(6, 0, cls.existencias.ids)],
                           'diferenciaMinima': 1})
 
         # 🔴 La fase 0 toma TODAS las variantes integradas de la base, y en
@@ -575,3 +585,150 @@ class TestConciliacionStockFases(TransactionCase):
         adjunto = self.env['ir.attachment'].search(
             [('res_model', '=', 'conciliacion.stock'), ('res_id', '=', conc.id)])
         self.assertTrue(adjunto.datas)
+
+    # --- las «Ubicaciones a Consultar» (28-09-2026) ----------------------
+    def _poner(self, variante, ubicacion, cantidad, paquete=None):
+        self.env['stock.quant']._update_available_quantity(
+            variante, ubicacion, cantidad, package_id=paquete)
+
+    def _celdas(self, conc):
+        batch = self.env['forum.import.batch'].browse(conc.cs_batch_id)
+        self.env.cr.execute("SELECT product_id, location_id, cantidad FROM %s"
+                            % batch._staging_name())
+        return {(p, l): float(c) for p, l, c in self.env.cr.fetchall()}
+
+    def test_suma_las_ubicaciones_a_consultar_y_sus_hijas(self):
+        """🔴 El bug: sólo se miraba la de reposición y Odoo daba 0."""
+        v = self.variantes[2]            # sin stock en reposición
+        self._poner(v, self.existencias, 6)
+        self._poner(v, self.estante, 3)
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        self.env.cr.execute("SELECT cantidad_odoo, cantidad_reposicion FROM %s "
+                            "WHERE product_id = %%s" % conc._cs_tabla(), (v.id,))
+        self.assertEqual(tuple(map(float, self.env.cr.fetchone())), (9.0, 0.0))
+        self.assertEqual(conc.cs_reposicion_id, self.ubicacion)
+        self.assertEqual(set(conc.cs_ubicacion_ids.ids), {self.ubicacion.id, self.existencias.id})
+
+    def test_la_reposicion_entra_en_el_total(self):
+        """Ahí se acumulan las diferencias anteriores: sin ella, cada corrida
+        volvería a sumar las mismas."""
+        v = self.variantes[0]            # 10 en reposición
+        self._poner(v, self.existencias, 5)
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        self.env.cr.execute("SELECT cantidad_odoo, cantidad_reposicion FROM %s "
+                            "WHERE product_id = %%s" % conc._cs_tabla(), (v.id,))
+        self.assertEqual(tuple(map(float, self.env.cr.fetchone())), (15.0, 10.0))
+
+    def test_sin_ubicaciones_a_consultar_no_arranca(self):
+        self.config.ubicacionesAConsultar = [(5, 0, 0)]
+        with self.assertRaises(UserError):
+            self._nueva().action_armar_tabla()
+
+    def test_sobrante_de_wis_va_a_reposicion(self):
+        v = self.variantes[2]
+        self._poner(v, self.existencias, 10)
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        conc.cs_tope_a_cero_pct = 100
+        self._consultar_todo(conc, {'PRD-TEST-0': 10.0, 'PRD-TEST-1': 5.0, 'PRD-TEST-2': 13.0})
+        conc.action_generar_ajuste()
+        self.assertEqual(self._celdas(conc), {(v.id, self.ubicacion.id): 3.0},
+                         "sólo la diferencia, en reposición; Existencias no se toca")
+
+    def test_faltante_queda_en_negativo_en_reposicion(self):
+        """Decidido el 28-09-2026: la diferencia negativa queda en la de
+        reposición, y el operador la regulariza después con un movimiento."""
+        v = self.variantes[1]            # 5 en reposición
+        self._poner(v, self.existencias, 10)
+        self._poner(v, self.estante, 2)
+        conc = self._nueva()
+        conc.action_armar_tabla()        # total 17
+        conc.cs_tope_a_cero_pct = 100
+        self._consultar_todo(conc, {'PRD-TEST-0': 10.0, 'PRD-TEST-1': 9.0, 'PRD-TEST-2': 0.0})
+        conc.action_generar_ajuste()
+        self.assertEqual(self._celdas(conc), {(v.id, self.ubicacion.id): -3.0},
+                         "5 - 8: Existencias y el estante no se tocan")
+        batch = self.env['forum.import.batch'].browse(conc.cs_batch_id)
+        self.assertTrue(batch.inventory_permite_negativos)
+        self.env.cr.execute("SELECT error FROM %s" % batch._staging_name())
+        self.assertEqual([e for (e,) in self.env.cr.fetchall()], [None],
+                         "el negativo no es un error de la celda")
+
+    def test_reposicion_ya_negativa_acumula(self):
+        v = self.variantes[2]
+        self._poner(v, self.existencias, 10)
+        self._poner(v, self.ubicacion, -3)   # total 7
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        conc.cs_tope_a_cero_pct = 100
+        self._consultar_todo(conc, {'PRD-TEST-0': 10.0, 'PRD-TEST-1': 5.0, 'PRD-TEST-2': 9.0})
+        conc.action_generar_ajuste()
+        self.assertEqual(self._celdas(conc), {(v.id, self.ubicacion.id): -1.0}, "-3 + 2")
+
+    def test_stock_en_paquetes_cuenta_en_el_total(self):
+        v = self.variantes[2]
+        paquete = self.env['stock.quant.package'].create({'name': 'CAJA-PRUEBA'})
+        self._poner(v, self.existencias, 10, paquete)
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        conc.cs_tope_a_cero_pct = 100
+        self._consultar_todo(conc, {'PRD-TEST-0': 10.0, 'PRD-TEST-1': 5.0, 'PRD-TEST-2': 4.0})
+        conc.action_generar_ajuste()
+        self.assertEqual(self._celdas(conc), {(v.id, self.ubicacion.id): -6.0})
+
+    def test_cuenta_las_sububicaciones_que_no_son_internas(self):
+        """Todas cuentan para el total, sean internas o no."""
+        transito = self.env['stock.location'].create({
+            'name': 'Transito', 'usage': 'transit', 'location_id': self.existencias.id})
+        v = self.variantes[2]
+        self._poner(v, transito, 4)
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        self.env.cr.execute("SELECT cantidad_odoo FROM %s WHERE product_id = %%s"
+                            % conc._cs_tabla(), (v.id,))
+        self.assertEqual(float(self.env.cr.fetchone()[0]), 4.0)
+
+    def test_un_excel_sigue_sin_admitir_negativos(self):
+        """El permiso es sólo de quien lo pide: la costura con otros módulos."""
+        batch = self.env['forum.import.batch'].create({
+            'name': 'Negativo sin permiso', 'import_type': 'inventario',
+            'inventory_user_id': self.env.user.id})
+        v = self.variantes[0]
+        batch.cargar_celdas_externas(
+            [{'product_id': v.id, 'location_id': self.ubicacion.id, 'cantidad': -2.0}])
+        self.assertFalse(batch.inventory_permite_negativos)
+        self.env.cr.execute("SELECT error FROM %s" % batch._staging_name())
+        self.assertIn('Cantidad negativa', self.env.cr.fetchone()[0])
+
+    def test_el_negativo_se_aplica_por_el_orm(self):
+        batch = self.env['forum.import.batch'].create({
+            'name': 'Negativo por ORM', 'import_type': 'inventario',
+            'inventory_user_id': self.env.user.id})
+        v = self.variantes[0]
+        batch.cargar_celdas_externas(
+            [{'product_id': v.id, 'location_id': self.ubicacion.id, 'cantidad': -2.0}],
+            permitir_negativos=True)
+        self.env.cr.execute("SELECT row_num FROM %s" % batch._staging_name())
+        filas = [r for (r,) in self.env.cr.fetchall()]
+        self.assertIn(v.id, batch._apl_productos_orm(batch._staging_name(), filas))
+
+    def test_cargar_conteo_se_dispara_desde_aca(self):
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        self._consultar_todo(conc, {'PRD-TEST-0': 7.0})
+        conc.action_generar_ajuste()
+        llamadas = []
+        Batch = type(self.env['forum.import.batch'])
+        with patch.object(Batch, 'action_iniciar', lambda self: llamadas.append(self.id)):
+            conc.action_cargar_conteo()
+        self.assertEqual(llamadas, [conc.cs_batch_id])
+
+    def test_tabla_de_la_version_anterior_no_genera_ajuste(self):
+        conc = self._nueva()
+        conc.action_armar_tabla()
+        self._consultar_todo(conc, {'PRD-TEST-0': 7.0})
+        conc.write({'cs_reposicion_id': False})
+        with self.assertRaises(UserError):
+            conc.action_generar_ajuste()

@@ -347,21 +347,27 @@
                     string="3. Generar ajuste"
                     type="object"
                     class="btn-primary"
-                    invisible="fase != 'consultado'"
+                    invisible="fase != 'consultado' or not cs_reposicion_id"
                     help="Crea el ajuste de inventario con las diferencias y lo deja listo para revisar. No aplica ni publica nada."/>
-            <button name="action_aplicar_ajuste"
-                    string="4. Aplicar ajuste"
+            <button name="action_cargar_conteo"
+                    string="4. Cargar conteo"
                     type="object"
                     class="btn-primary"
                     invisible="cs_batch_estado != 'ready'"
+                    help="Deja el conteo en los quants. Todavía no mueve stock."/>
+            <button name="action_aplicar_ajuste"
+                    string="5. Aplicar ajuste"
+                    type="object"
+                    class="btn-primary"
+                    invisible="cs_batch_estado != 'done'"
                     confirm="Va a crear los movimientos de inventario y los asientos EN BORRADOR. ¿Continuar?"/>
             <button name="action_publicar_asientos"
-                    string="5. Publicar asientos"
+                    string="6. Publicar asientos"
                     type="object"
                     class="btn-primary"
                     invisible="cs_batch_estado != 'applied'"/>
             <button name="action_conciliar_asientos"
-                    string="6. Conciliar asientos"
+                    string="7. Conciliar asientos"
                     type="object"
                     invisible="cs_batch_estado != 'posted'"/>
             <button name="action_descargar_detalle"
@@ -407,6 +413,17 @@
                 <b><field name="cs_errors" readonly="1" class="oe_inline"/></b> fuera del ajuste
                 (no existen en WIS o dieron error: un silencio de WIS no es un cero).
             </div>
+            <div class="alert alert-warning" role="alert"
+                 invisible="fase == 'borrador' or cs_reposicion_id">
+                <b>Esta tabla se armó con la versión anterior</b>, que comparaba WIS sólo contra
+                la ubicación de reposición. Volvé a armarla («1. Armar tabla»): ajustar con
+                estas diferencias duplicaría el stock.
+            </div>
+            <div class="alert alert-info" role="alert" invisible="not cs_batch_id">
+                La diferencia contra WIS quedó en <b><field name="cs_reposicion_id" readonly="1"
+                class="oe_inline"/></b>, positiva o negativa. Las cantidades negativas se regularizan
+                después con un movimiento desde las ubicaciones que tienen el stock, hasta dejarla en cero.
+            </div>
 
             <!-- Avance en vivo: una barra por fase. El widget hace polling
                  mientras algo corre y se apaga solo. -->
@@ -444,6 +461,9 @@
                 <field name="cs_started_at" readonly="1" invisible="not cs_started_at"/>
                 <field name="cs_ended_at" readonly="1" invisible="not cs_ended_at"/>
                 <field name="cs_tope_a_cero_pct"/>
+                <field name="cs_reposicion_id" readonly="1" invisible="not cs_reposicion_id"/>
+                <field name="cs_ubicacion_ids" readonly="1" widget="many2many_tags"
+                       invisible="not cs_ubicacion_ids"/>
                 <field name="cs_batch_nombre" readonly="1" invisible="not cs_batch_id"/>
                 <field name="cs_batch_estado" readonly="1" invisible="not cs_batch_id"/>
                 <field name="cs_batch_avance" readonly="1" invisible="not cs_batch_avance"/>
