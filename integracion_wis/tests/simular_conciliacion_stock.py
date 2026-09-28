@@ -25,7 +25,14 @@ from odoo.addons.integracion_wis.models import models as mod_models
 TANDA = 200                 # filas del listado por tanda
 TAM_PAGINA_WIS = 10         # lo que devuelve WIS hoy por página (lo fija el servidor)
 PCT_NO_INFORMADO = 3        # % de variantes que WIS no lista, a propósito
-MS_POR_REQUEST = 1100       # latencia MEDIDA contra el WIS de pruebas, por página
+MS_POR_REQUEST = 0          # medido contra el WIS de pruebas: ~1000 ms por request
+
+
+# Lo que contesta el WIS real con 400 (medido el 28-09-2026).
+SIN_STOCK = {'title': 'Errores en la consulta', 'status': 400,
+             'detail': '[{"ItemId":1,"Messages":["No se encontró stock para los filtros enviados."]}]'}
+NO_EXISTE = {'title': 'Errores en la consulta', 'status': 400,
+             'detail': '[{"ItemId":1,"Messages":["Producto: WMSAPI_msg_Error_ProductoNoExiste"]}]'}
 
 
 class RespuestaFalsa:
@@ -54,15 +61,28 @@ class WisFalso:
         self.catalogo = [c for c in sorted(codigos)
                          if random.random() >= PCT_NO_INFORMADO / 100.0]
         self.sin_respuesta = len(codigos) - len(self.catalogo)
+        no_listados = sorted(set(codigos) - set(self.catalogo))
+        self.desconocidos = set(no_listados[::2])
 
     def request(self, url=None, method='GET', json=None, params=None, **kw):
         if 'ConsultaDeStock/GetData' in url:
             self.requests += 1
             if MS_POR_REQUEST:
                 time.sleep(MS_POR_REQUEST / 1000.0)
+            producto = ((json or {}).get('filtros') or {}).get('producto')
+            if producto:
+                # Por código: los que WIS no lista existen sin stock, salvo
+                # algunos que directamente no conoce.
+                if producto in self.desconocidos:
+                    return RespuestaFalsa(400, NO_EXISTE)
+                return RespuestaFalsa(400, SIN_STOCK)
             pagina = (json or {}).get('pagina', 1)
             desde = (pagina - 1) * TAM_PAGINA_WIS
             trozo = self.catalogo[desde:desde + TAM_PAGINA_WIS]
+            if not trozo:
+                # 🔴 Como el WIS real: pasado el final, 400. Este simulador
+                # devolvía una lista vacía y por eso nunca vio el bug.
+                return RespuestaFalsa(400, SIN_STOCK)
             return RespuestaFalsa(200, {'stock': [
                 {'producto': c, 'stockGeneral': random.choice([0, 0, 1, 5, 12, 40]),
                  'stockDisponible': 0} for c in trozo]})
@@ -93,8 +113,8 @@ def correr(env):
 
     env.cr.execute("SELECT codigo_unico FROM %s" % conc._cs_tabla())
     wis.cargar_catalogo([c for (c,) in env.cr.fetchall()])
-    print("   WIS conoce %d de %d (el resto no lo lista, a propósito)"
-          % (len(wis.catalogo), conc.cs_total))
+    print("   WIS lista %d de %d; de las otras, %d no las conoce y el resto no tiene stock"
+          % (len(wis.catalogo), conc.cs_total, len(wis.desconocidos)))
 
     conc.cs_batch_size = TANDA
     conc.write({'fase': 'consultando'})
@@ -107,10 +127,10 @@ def correr(env):
         if not quedan:
             break
     dt = time.time() - t0
-    print("\n2) CONSULTA A WIS: %.1fs en %d tanda(s) | %d request(s) de %d filas "
-          "| %.0f ms/variante"
-          % (dt, tandas, wis.requests, TAM_PAGINA_WIS,
-             1000.0 * dt / max(conc.cs_total, 1)))
+    print("\n2) CONSULTA A WIS: %.1fs en %d tanda(s) | %d request(s) | estrategia %s "
+          "| %d página(s) | %d por código"
+          % (dt, tandas, wis.requests, conc.cs_estrategia, conc.cs_paginas_total,
+             conc.cs_pc_total))
 
     conc._cs_finalizar_consulta()
     r = conc._cs_resumen()
@@ -118,7 +138,8 @@ def correr(env):
     print("   consultadas OK      : %d" % r['consultadas'])
     print("   con diferencia      : %d  (mínimo configurado: %s)"
           % (r['con_diferencia'], config.diferenciaMinima))
-    print("   que WIS NO informa  : %d  -> quedan FUERA del ajuste" % r['sin_respuesta'])
+    print("   sin stock en WIS    : %d  -> entran como cero" % r['sin_stock'])
+    print("   no existen / error  : %d  -> quedan FUERA del ajuste" % r['sin_respuesta'])
     print("   quedarían en cero   : %d  <- el número a mirar antes de aplicar" % r['a_cero'])
 
     env.cr.execute("""SELECT estado, count(*) FROM %s GROUP BY estado ORDER BY 2 DESC"""
@@ -126,7 +147,7 @@ def correr(env):
     print("   estados en la tabla : %s" % dict(env.cr.fetchall()))
 
     env.cr.execute("""SELECT count(*) FROM %s
-                       WHERE estado = 'sin_respuesta'
+                       WHERE estado IN ('sin_respuesta', 'no_existe', 'error')
                          AND (cantidad_wis IS NOT NULL OR diferencia IS NOT NULL)"""
                    % conc._cs_tabla())
     fugas = env.cr.fetchone()[0]

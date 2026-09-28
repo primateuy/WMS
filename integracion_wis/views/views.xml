@@ -340,7 +340,9 @@
             <button name="action_reanudar_consulta"
                     string="Reanudar"
                     type="object"
-                    invisible="not cs_cancel_requested"/>
+                    class="btn-primary"
+                    invisible="not ((fase == 'tabla' and cs_cancel_requested) or (fase == 'consultando' and estado == 'error'))"
+                    help="Sigue la consulta desde donde había quedado."/>
             <button name="action_generar_ajuste"
                     string="3. Generar ajuste"
                     type="object"
@@ -362,6 +364,12 @@
                     string="6. Conciliar asientos"
                     type="object"
                     invisible="cs_batch_estado != 'posted'"/>
+            <button name="action_descargar_detalle"
+                    string="Descargar detalle (Excel)"
+                    type="object"
+                    icon="fa-download"
+                    invisible="fase == 'borrador'"
+                    help="Una fila por variante: stock de Odoo, stock de WIS, diferencia y estado."/>
             <button name="action_abrir_batch"
                     string="Ver el ajuste"
                     type="object"
@@ -386,21 +394,53 @@
               </h1>
             </div>
 
-            <div class="alert alert-info" role="alert" invisible="fase != 'consultado'">
-                Revisá las diferencias antes de aplicar nada.
-                <b><field name="cs_con_diferencia" readonly="1" class="oe_inline"/></b> variante(s) con diferencia ·
-                <b><field name="cs_errors" readonly="1" class="oe_inline"/></b> sin respuesta de WIS
-                (ésas <b>no</b> entran al ajuste: un silencio de WIS no es un cero).
+            <div class="alert alert-danger" role="alert"
+                 invisible="fase != 'consultando' or estado != 'error'">
+                <b>La consulta a WIS se detuvo:</b>
+                <span class="ms-1"><field name="cs_error_msg" readonly="1" class="oe_inline"/></span>
+                <div>Revisá el motivo en «Consultas a WIS» y usá <b>Reanudar</b>: sigue desde donde iba.</div>
             </div>
+            <div class="alert alert-info" role="alert" invisible="fase != 'consultado'">
+                Revisá las diferencias antes de aplicar nada (botón «Descargar detalle»).
+                <b><field name="cs_con_diferencia" readonly="1" class="oe_inline"/></b> variante(s) con diferencia ·
+                <b><field name="cs_sin_stock" readonly="1" class="oe_inline"/></b> sin stock en WIS (entran como cero) ·
+                <b><field name="cs_errors" readonly="1" class="oe_inline"/></b> fuera del ajuste
+                (no existen en WIS o dieron error: un silencio de WIS no es un cero).
+            </div>
+
+            <!-- Avance en vivo: una barra por fase. El widget hace polling
+                 mientras algo corre y se apaga solo. -->
+            <group string="Avance" invisible="fase == 'borrador'">
+              <field name="cs_total" widget="wis_conciliacion_progress" nolabel="1" colspan="2"/>
+              <field name="cs_etapa_consulta" invisible="1"/>
+              <field name="cs_estrategia" invisible="1"/>
+              <field name="cs_pagina" invisible="1"/>
+              <field name="cs_paginas_total" invisible="1"/>
+              <field name="cs_pc_total" invisible="1"/>
+              <field name="cs_pc_done" invisible="1"/>
+              <field name="cs_pc_started_at" invisible="1"/>
+              <field name="cs_encontradas" invisible="1"/>
+              <field name="cs_no_existe" invisible="1"/>
+              <field name="cs_err_filas" invisible="1"/>
+              <field name="cs_tabla_started_at" invisible="1"/>
+              <field name="cs_tabla_ended_at" invisible="1"/>
+              <field name="cs_ajuste_started_at" invisible="1"/>
+              <field name="cs_ajuste_ended_at" invisible="1"/>
+              <field name="cs_ajuste_celdas" invisible="1"/>
+              <field name="cs_requests" invisible="1"/>
+              <field name="cs_requests_error" invisible="1"/>
+              <field name="cs_ultimo_request" invisible="1"/>
+            </group>
 
             <group>
               <group string="Consulta a WIS" invisible="fase == 'borrador'">
                 <field name="cs_batch_size" readonly="fase == 'consultando'"/>
-                <field name="cs_total" readonly="1"/>
-                <field name="cs_done" readonly="1"/>
-                <field name="cs_errors" readonly="1"/>
-                <field name="cs_con_diferencia" readonly="1"/>
-                <field name="cs_step" readonly="1" invisible="fase != 'consultando'"/>
+                <field name="cs_estrategia" readonly="1" invisible="not cs_estrategia"/>
+                <field name="cs_paginas_total" readonly="1" invisible="not cs_estrategia"/>
+                <!-- Mientras corre, esto lo muestra el avance en vivo: acá
+                     quedaría congelado en el valor de cuando se abrió. -->
+                <field name="cs_requests" readonly="1"
+                       invisible="not cs_started_at or fase == 'consultando'"/>
                 <field name="cs_started_at" readonly="1" invisible="not cs_started_at"/>
                 <field name="cs_ended_at" readonly="1" invisible="not cs_ended_at"/>
                 <field name="cs_tope_a_cero_pct"/>
@@ -417,6 +457,53 @@
             </group>
             
             <notebook>
+              <page string="Consultas a WIS" name="consultas_wis_page" invisible="fase == 'borrador'">
+                <field name="cs_consulta_ids" nolabel="1" readonly="1">
+                  <tree string="Requests a WIS" create="false" edit="false" delete="false"
+                        decoration-danger="resultado == 'error'"
+                        decoration-muted="resultado in ('fin', 'no_existe')">
+                    <field name="fecha"/>
+                    <field name="etapa"/>
+                    <field name="endpoint" optional="hide"/>
+                    <field name="pagina"/>
+                    <field name="producto"/>
+                    <field name="http_status"/>
+                    <field name="duracion_ms"/>
+                    <field name="filas"/>
+                    <field name="nuestras"/>
+                    <field name="resultado" widget="badge"
+                           decoration-success="resultado == 'ok'"
+                           decoration-danger="resultado == 'error'"
+                           decoration-info="resultado in ('fin', 'no_existe')"/>
+                    <field name="mensaje" optional="show"/>
+                  </tree>
+                  <form string="Request a WIS">
+                    <group>
+                      <group>
+                        <field name="fecha"/>
+                        <field name="etapa"/>
+                        <field name="endpoint"/>
+                        <field name="pagina"/>
+                        <field name="producto"/>
+                      </group>
+                      <group>
+                        <field name="http_status"/>
+                        <field name="duracion_ms"/>
+                        <field name="filas"/>
+                        <field name="nuestras"/>
+                        <field name="resultado"/>
+                      </group>
+                    </group>
+                    <group string="Enviado">
+                      <field name="body" nolabel="1" colspan="2" widget="text"/>
+                    </group>
+                    <group string="Respuesta de WIS">
+                      <field name="mensaje" colspan="2"/>
+                      <field name="respuesta" nolabel="1" colspan="2" widget="text"/>
+                    </group>
+                  </form>
+                </field>
+              </page>
               <page string="Logs de Conciliación" name="logs_page">
                 <field name="logs" nolabel="1">
                   <tree string="Historial de Logs" create="false" edit="false" delete="false"

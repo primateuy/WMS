@@ -1,7 +1,22 @@
-from odoo import models, fields, api
+from odoo import models, fields, api, tools, _
 from odoo.exceptions import ValidationError
+import json
 import logging
+import time
 _logger = logging.getLogger(__name__)
+
+# Mensajes con los que WIS contesta 400 en `/ConsultaDeStock/GetData` y que NO
+# son errores: ver `_consulta_stock_request`.
+MSG_WIS_SIN_STOCK = "No se encontró stock para los filtros enviados."
+MSG_WIS_PRODUCTO_NO_EXISTE = "ProductoNoExiste"
+
+
+class ErrorConsultaStockWIS(ValidationError):
+    """Error de verdad al consultar stock. Lleva la traza del request."""
+
+    def __init__(self, traza):
+        self.traza = traza
+        super().__init__(traza.get('mensaje') or _("Error consultando el stock de WIS."))
 import datetime;
 import requests;
 import hashlib;
@@ -1505,22 +1520,120 @@ class IntegracionWIS(models.Model):
     
     
 
-    def consultaStockPaginado(self, pagina, filtros=None):
+    def _consulta_stock_request(self, pagina, filtros=None):
+        """Una llamada cruda a `/ConsultaDeStock/GetData`, con su traza.
+
+        No pasa por `consultarAPI` porque ése convierte cualquier status que no
+        sea 200 en excepción, y acá **el 400 es una respuesta normal**. Medido
+        contra el WIS de pruebas (28-09-2026):
+
+            página más allá del final       400 «No se encontró stock para los filtros enviados.»
+            filtro por producto sin stock   400 «No se encontró stock para los filtros enviados.»
+            filtro por producto inexistente 400 «Producto: WMSAPI_msg_Error_ProductoNoExiste»
+
+        🔴 Tomar el primero como error fue lo que dejó la conciliación de
+        producción repitiendo su última tanda durante horas.
+
+        Devuelve un dict con lo enviado, lo recibido y la clase de respuesta:
+        `ok`, `fin` (no hay stock para lo pedido), `no_existe` o `error`.
+        """
+        self.ensure_one()
+        body = {"empresa": self.empresa_id, "pagina": pagina, "filtros": filtros or {}}
+        traza = {
+            'endpoint': '/ConsultaDeStock/GetData', 'body': body, 'pagina': pagina,
+            'producto': (filtros or {}).get('producto'), 'status': 0, 'ms': 0,
+            'filas': [], 'clase': 'error', 'mensaje': False, 'respuesta': False,
+        }
+        t0 = time.time()
+        try:
+            if not self.apiLink or not self.client_id or not self.client_secret \
+                    or not self.url_access_token or not self.empresa_id:
+                raise ValidationError(_("Faltan datos para acceder a la API"))
+            if not self.token or not self.expiracionToken \
+                    or self.expiracionToken < datetime.datetime.now():
+                self.renovarToken()
+            req = requests.request(
+                url=self._get_clean_api_url() + traza['endpoint'], method='POST',
+                json=body, timeout=30,
+                headers={"Content-Type": "application/json", "accept-language": "es",
+                         "Authorization": f"Bearer {self.token}"})
+        except Exception as e:
+            traza.update(ms=int((time.time() - t0) * 1000),
+                         mensaje=tools.ustr(e)[:1000])
+            return traza
+
+        texto = req.text or ''
+        traza.update(status=req.status_code, ms=int((time.time() - t0) * 1000),
+                     respuesta=texto[:4000])
+        # Los mensajes se buscan también en el JSON decodificado: si el
+        # servidor escapa la «ó» como \u00f3, en el texto crudo no aparece.
+        busqueda = texto
+        try:
+            busqueda += json.dumps(req.json(), ensure_ascii=False)
+        except Exception:
+            pass
+        if req.status_code == 200:
+            try:
+                datos = req.json()
+            except ValueError:
+                traza['mensaje'] = _("La respuesta no es JSON.")
+                return traza
+            traza['filas'] = (datos.get('stock') or []) if isinstance(datos, dict) else []
+            traza['clase'] = 'ok' if traza['filas'] else 'fin'
+        elif req.status_code == 400 and MSG_WIS_SIN_STOCK in busqueda:
+            traza.update(clase='fin', mensaje=MSG_WIS_SIN_STOCK)
+        elif req.status_code == 400 and MSG_WIS_PRODUCTO_NO_EXISTE in busqueda:
+            traza.update(clase='no_existe', mensaje=_("El producto no existe en WIS."))
+        else:
+            traza['mensaje'] = "HTTP %s: %s" % (req.status_code, texto[:500])
+        return traza
+
+    def consultaStockPaginado(self, pagina, filtros=None, traza=None):
         """Una página de `/ConsultaDeStock/GetData` (doc §10.1).
 
         Devuelve la lista de `{producto, stockGeneral, stockDisponible}`. Lista
-        vacía cuando no hay más páginas. El tamaño de página lo decide WIS
-        —hoy 10—: no se puede pedir más desde acá.
+        vacía cuando no hay más páginas —WIS lo dice con un 400, ver
+        `_consulta_stock_request`—. El tamaño de página lo decide WIS —hoy
+        10—: no se puede pedir más desde acá.
+
+        Si se pasa `traza` (un dict), se completa con lo enviado y lo recibido.
+        Un error de verdad levanta `ErrorConsultaStockWIS`, que también la lleva.
         """
-        respuesta = self.consultarAPI(
-            link="/ConsultaDeStock/GetData",
-            body={"empresa": self.empresa_id, "pagina": pagina,
-                  "filtros": filtros or {}},
-            params=None, method="POST",
-        )
-        if not isinstance(respuesta, dict):
-            return []
-        return respuesta.get('stock') or []
+        resultado = self._consulta_stock_request(pagina, filtros)
+        if traza is not None:
+            traza.update(resultado)
+        if resultado['clase'] == 'error':
+            raise ErrorConsultaStockWIS(resultado)
+        return resultado['filas']
+
+    def consultaStockProducto(self, codigo, traza=None):
+        """Stock de WIS para UN código, distinguiendo por qué no hay número.
+
+        Devuelve `(clase, cantidad)`:
+            ('ok', n)            WIS informa stock
+            ('sin_stock', 0.0)   el producto existe y WIS dice que no tiene stock
+            ('no_existe', None)  WIS no conoce el producto
+
+        Un error de comunicación levanta `ErrorConsultaStockWIS`.
+        """
+        campo = self.campo_stock_wis or 'stockGeneral'
+        resultado = self._consulta_stock_request(1, {"producto": codigo})
+        if traza is not None:
+            traza.update(resultado)
+        clase = resultado['clase']
+        if clase == 'error':
+            raise ErrorConsultaStockWIS(resultado)
+        if clase == 'no_existe':
+            return 'no_existe', None
+        if clase == 'fin':
+            return 'sin_stock', 0.0
+        filas = [f for f in resultado['filas'] if f.get('producto') == codigo] \
+            or resultado['filas']
+        cantidad = filas[0].get(campo)
+        if cantidad is None:
+            raise ErrorConsultaStockWIS(dict(resultado, mensaje=_(
+                "WIS contestó sin el campo %s.") % campo))
+        return 'ok', float(cantidad)
 
     def consultaStockCodigo(self, codigo):
         """Stock de WIS para un código de producto. `None` si WIS no lo informa.

@@ -11,7 +11,7 @@
     'author': "Avance Software",
     'website': "https://avancesoftware.us/",
     'category': 'Uncategorized',
-    'version': '0.5',
+    'version': '0.6',
     'application': True,
     'installable': True,
     'icon': '/integracion_wis/static/description/icon.png',
@@ -37,6 +37,12 @@
         'data/default_params.xml',
         'views/UomView.xml',
     ],
+    'assets': {
+        'web.assets_backend': [
+            'integracion_wis/static/src/conciliacion_progress/conciliacion_progress.js',
+            'integracion_wis/static/src/conciliacion_progress/conciliacion_progress.xml',
+        ],
+    },
     'demo': [
         'demo/demo.xml',
     ],

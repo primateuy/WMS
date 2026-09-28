@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+  <t t-name="integracion_wis.ConciliacionProgress">
+    <div class="o_integracion_wis_conciliacion_progress">
+      <t t-foreach="secciones" t-as="sec" t-key="sec.clave">
+        <div t-att-class="sec_last ? '' : 'mb-4 pb-3 border-bottom'">
+
+          <h5 class="mb-2" t-esc="sec.titulo"/>
+
+          <!-- Barra -->
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <div class="progress flex-grow-1" style="height: 22px;">
+              <div t-if="sec.cargando"
+                   class="progress-bar progress-bar-striped progress-bar-animated bg-info"
+                   role="progressbar" style="width: 100%;">
+                <span class="fw-bold">Midiendo…</span>
+              </div>
+              <div t-else=""
+                   class="progress-bar"
+                   t-att-class="sec.hayErrores ? 'bg-warning' : (sec.corriendo ? 'progress-bar-striped progress-bar-animated bg-primary' : 'bg-success')"
+                   role="progressbar"
+                   t-attf-style="width: {{ sec.porcentaje }}%;"
+                   t-att-aria-valuenow="sec.porcentaje"
+                   aria-valuemin="0" aria-valuemax="100">
+                <span class="fw-bold"><t t-esc="sec.porcentaje"/>%</span>
+              </div>
+            </div>
+            <span class="text-muted small text-nowrap" t-esc="sec.detalleBarra"/>
+          </div>
+
+          <!-- Motivo de la detención -->
+          <div t-if="sec.errorMsg" class="alert alert-danger py-2 mb-2">
+            <i class="fa fa-exclamation-triangle me-1"/>
+            <strong>La consulta se detuvo.</strong>
+            <span class="ms-1" t-esc="sec.errorMsg"/>
+            <div class="small mt-1">Revisá el motivo y usá «Reanudar»: sigue desde donde iba.</div>
+          </div>
+
+          <!-- Etapa actual -->
+          <div t-if="sec.etapa and sec.corriendo" class="alert alert-info py-2 mb-2">
+            <i class="fa fa-cog fa-spin me-1"/>
+            <strong t-esc="sec.etapa"/>
+            <span class="text-muted ms-2" t-if="sec.textoEtapa" t-esc="sec.textoEtapa"/>
+          </div>
+
+          <!-- Cronómetro, ETA y ritmo -->
+          <div class="d-flex flex-wrap gap-4 mb-2">
+            <div>
+              <span class="text-muted small d-block">Transcurrido</span>
+              <span class="fs-5 font-monospace" t-esc="sec.transcurrido"/>
+            </div>
+            <div t-if="sec.corriendo and !sec.cargando">
+              <span class="text-muted small d-block">Restante estimado</span>
+              <span class="fs-5 font-monospace text-primary" t-esc="sec.eta"/>
+            </div>
+            <div t-if="sec.corriendo and sec.ritmoTexto">
+              <span class="text-muted small d-block">Ritmo</span>
+              <span class="fs-5 font-monospace" t-esc="sec.ritmoTexto"/>
+            </div>
+            <div t-if="sec.estadoFinal">
+              <span class="text-muted small d-block">Estado</span>
+              <span class="fs-5" t-att-class="sec.estadoFinal.clase" t-esc="sec.estadoFinal.texto"/>
+            </div>
+          </div>
+
+          <!-- Contadores -->
+          <t t-foreach="sec.filasContadores" t-as="fila" t-key="fila_index">
+            <div t-att-class="fila_index ? 'row g-2 mt-1' : 'row g-2'">
+              <t t-foreach="fila" t-as="c" t-key="c_index">
+                <div t-att-class="sec.claseColumna(fila)">
+                  <div t-att-class="c.claseCaja">
+                    <div class="text-muted small" t-esc="c.etiqueta"/>
+                    <div t-att-class="c.claseValor" t-esc="c.texto"/>
+                  </div>
+                </div>
+              </t>
+            </div>
+          </t>
+
+          <!-- Lo último que se le pidió a WIS -->
+          <div t-if="sec.nota and sec.corriendo" class="small text-muted mt-2 font-monospace">
+            <i class="fa fa-exchange me-1"/>Último request: <t t-esc="sec.nota"/>
+          </div>
+
+          <div t-if="sec.corriendo" class="text-muted small mt-2">
+            <i class="fa fa-refresh fa-spin me-1"/>
+            Actualizándose solo. Podés cerrar la pantalla: el proceso sigue en segundo plano.
+          </div>
+        </div>
+      </t>
+    </div>
+  </t>
+
+</templates>
