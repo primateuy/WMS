@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+  <record id="view_cluster_proceso_tree" model="ir.ui.view">
+    <field name="name">cluster.proceso.tree</field>
+    <field name="model">cluster.proceso</field>
+    <field name="arch" type="xml">
+      <tree string="Actualización por Cluster" create="false"
+            decoration-info="estado == 'en_proceso'"
+            decoration-danger="estado == 'detenido'"
+            decoration-muted="estado == 'cancelado'">
+        <field name="name"/>
+        <field name="create_date" string="Fecha"/>
+        <field name="origen"/>
+        <field name="user_id"/>
+        <field name="rutas_total"/>
+        <field name="reglas_total"/>
+        <field name="reglas_hecho"/>
+        <field name="fase" widget="badge"/>
+        <field name="estado" widget="badge"
+               decoration-success="estado == 'terminado'"
+               decoration-info="estado == 'en_proceso'"
+               decoration-danger="estado == 'detenido'"/>
+      </tree>
+    </field>
+  </record>
+
+  <record id="view_cluster_proceso_form" model="ir.ui.view">
+    <field name="name">cluster.proceso.form</field>
+    <field name="model">cluster.proceso</field>
+    <field name="arch" type="xml">
+      <form string="Actualización por Cluster" create="false">
+        <header>
+          <button name="action_cancelar" string="Cancelar" type="object"
+                  invisible="estado not in ('en_proceso', 'detenido')"/>
+          <button name="action_reanudar" string="Reanudar" type="object" class="btn-primary"
+                  invisible="estado not in ('detenido', 'cancelado')"
+                  help="Sigue desde donde había quedado."/>
+          <field name="fase" widget="statusbar" statusbar_visible="cola,rutas,reglas,terminado"/>
+        </header>
+        <sheet>
+          <div class="oe_title"><h1><field name="name" readonly="1"/></h1></div>
+          <div class="alert alert-danger" role="alert" invisible="estado != 'detenido'">
+            <b>El proceso se detuvo:</b>
+            <span class="ms-1"><field name="error_msg" readonly="1" class="oe_inline"/></span>
+            <div>Revisá el motivo y usá <b>Reanudar</b>: sigue desde donde iba.</div>
+          </div>
+          <group string="Avance">
+            <field name="reglas_total" widget="cluster_proceso_progress" nolabel="1" colspan="2"/>
+            <field name="estado" invisible="1"/>
+            <field name="con_rutas" invisible="1"/>
+            <field name="rutas_total" invisible="1"/>
+            <field name="rutas_hecho" invisible="1"/>
+            <field name="rutas_cambiadas" invisible="1"/>
+            <field name="rutas_started_at" invisible="1"/>
+            <field name="rutas_ended_at" invisible="1"/>
+            <field name="reglas_hecho" invisible="1"/>
+            <field name="reglas_creadas" invisible="1"/>
+            <field name="reglas_modificadas" invisible="1"/>
+            <field name="reglas_borradas" invisible="1"/>
+            <field name="reglas_sin_cambio" invisible="1"/>
+            <field name="reglas_started_at" invisible="1"/>
+            <field name="reglas_ended_at" invisible="1"/>
+            <field name="etapa" invisible="1"/>
+          </group>
+          <group>
+            <group>
+              <field name="origen"/>
+              <field name="user_id"/>
+              <field name="company_id" groups="base.group_multi_company"/>
+            </group>
+            <group>
+              <field name="create_date" string="Encolado"/>
+              <field name="variantes_por_tanda" readonly="estado == 'en_proceso'"/>
+            </group>
+          </group>
+          <notebook>
+            <page string="Productos" name="productos">
+              <field name="template_ids" readonly="1">
+                <tree><field name="default_code"/><field name="name"/><field name="warehouse_group_id"/></tree>
+              </field>
+            </page>
+            <page string="Variantes sueltas" name="variantes" invisible="not variant_ids">
+              <field name="variant_ids" readonly="1"/>
+            </page>
+            <page string="Registro" name="registro">
+              <field name="log" readonly="1" nolabel="1"/>
+            </page>
+          </notebook>
+        </sheet>
+      </form>
+    </field>
+  </record>
+
+  <record id="action_cluster_proceso" model="ir.actions.act_window">
+    <field name="name">Actualización por Cluster</field>
+    <field name="res_model">cluster.proceso</field>
+    <field name="view_mode">tree,form</field>
+    <field name="help" type="html">
+      <p>Cada cambio de Cluster deja acá un proceso que actualiza rutas y reglas de
+        abastecimiento en segundo plano.</p>
+    </field>
+  </record>
+
+  <menuitem id="menu_cluster_proceso" name="Actualización por Cluster"
+            parent="stock.menu_stock_warehouse_mgmt" action="action_cluster_proceso" sequence="90"/>
+
+  <!-- Ficha del producto: aviso mientras hay un proceso en curso -->
+  <record id="view_product_template_form_cluster_proceso" model="ir.ui.view">
+    <field name="name">product.template.form.cluster.proceso</field>
+    <field name="model">product.template</field>
+    <field name="inherit_id" ref="product.product_template_only_form_view"/>
+    <field name="arch" type="xml">
+      <xpath expr="//sheet" position="before">
+        <div class="alert alert-info mb-0" role="alert" invisible="not cluster_proceso_id">
+          <i class="fa fa-cog fa-spin me-1"/>
+          Las rutas y reglas de abastecimiento de este producto se están actualizando en segundo plano
+          (<field name="cluster_proceso_id" readonly="1" class="oe_inline"
+                  options="{'no_open': False}"/>). Podés seguir trabajando.
+        </div>
+      </xpath>
+    </field>
+  </record>
+
+  <!-- Automatizaciones: la marca visible y editable -->
+  <record id="view_base_automation_form_cluster" model="ir.ui.view">
+    <field name="name">base.automation.form.cluster</field>
+    <field name="model">base.automation</field>
+    <field name="inherit_id" ref="base_automation.view_base_automation_form"/>
+    <field name="arch" type="xml">
+      <xpath expr="//field[@name='model_id']" position="after">
+        <field name="es_de_cluster" invisible="model_name != 'product.template'"/>
+      </xpath>
+    </field>
+  </record>
+
+</odoo>

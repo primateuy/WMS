@@ -5,3 +5,5 @@ from . import stock
 from . import warehouse
 from . import warehouseGroupCategoryRole
 from . import NivelesJerarquia
+from . import cluster_proceso
+from . import base_automation
