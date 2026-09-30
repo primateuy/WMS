@@ -2,3 +2,4 @@
 # Benchmark de productos: bench_productos_wis.py (sin Odoo).
 from . import test_integracion_productos
 from . import test_conciliacion_stock_fases
+from . import test_pedido_memo

@@ -981,6 +981,19 @@ class IntegracionWIS(models.Model):
 
    
 
+    # Largo máximo de `detalles[].memo` en /Pedido/Create (documentación de WIS).
+    LARGO_MEMO_WIS = 200
+
+    def _wis_memo_producto(self, producto):
+        """Código que ve el operario en la terminal de radiofrecuencia.
+
+        WIS pidió el CB (SKU Forum) en `memo`: `codigoProducto` es el PRD-<id>
+        interno, que al operario no le dice nada. Si el producto no tiene código
+        de barras se usa la referencia interna, que en Forum es el mismo SKU.
+        """
+        codigo = (producto.barcode or producto.default_code or '').strip()
+        return codigo[:self.LARGO_MEMO_WIS]
+
     def insertarPedidos(self, vals, tipo):
         
         _logger.info(f"El pedido del tipo es => {tipo}");
@@ -1019,6 +1032,7 @@ class IntegracionWIS(models.Model):
                         "codigoProducto": ml.product_id.codigo_unico,
                         "identificador": "*",
                         "cantidad": 0.0,
+                        "memo": self._wis_memo_producto(ml.product_id),
                     }
                     agrupado[ml.product_id.id] = det
                 det["cantidad"] += cantidad
@@ -1030,7 +1044,8 @@ class IntegracionWIS(models.Model):
                 detalles.append({
                     "codigoProducto": prod.product_id.codigo_unico,
                     "identificador": "*",
-                    "cantidad": prod.product_uom_qty
+                    "cantidad": prod.product_uom_qty,
+                    "memo": self._wis_memo_producto(prod.product_id),
                 })
 
         _logger.info(f"TERMINANDO DE ASIGNAR DETALLES detalles: {detalles}")
