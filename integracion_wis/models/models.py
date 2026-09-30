@@ -385,9 +385,9 @@ class IntegracionWIS(models.Model):
             # El display_name COMPLETO entra acá: mide 87 en el peor caso de
             # Forum y el campo acepta 100.
             "descripcionDisplay": (vals.display_name or '')[:self.LARGO_DESCRIPCION_DISPLAY_WIS],
-            "codigoFamilia":      1,
+            # "codigoFamilia":      1,
             "unidadMedida":       unidad_wis,
-            "codigoClase":        "1",
+            # "codigoClase":        "1",
             "ramo":               1,
             "pesoNeto":           vals.weight,
             "precioVenta":        vals.list_price,
