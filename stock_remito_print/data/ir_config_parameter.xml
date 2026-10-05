@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+
+    <!-- Operaciones que se procesan en cada pedido al servidor. -->
+    <record id="param_batch_size" model="ir.config_parameter">
+        <field name="key">stock_remito_print.batch_size</field>
+        <field name="value">20</field>
+    </record>
+
+    <!-- Tope de operaciones por ejecución de la impresión masiva. -->
+    <record id="param_max_records" model="ir.config_parameter">
+        <field name="key">stock_remito_print.max_records</field>
+        <field name="value">500</field>
+    </record>
+
+    <!--
+        Si está en True, cuando falla la obtención del PDF de UCFE se imprime
+        el reporte estándar y se deja constancia en el chatter. En False (por
+        defecto) la operación se informa como error y no se marca como
+        impresa, para poder reintentarla.
+    -->
+    <record id="param_fallback_on_ucfe_error" model="ir.config_parameter">
+        <field name="key">stock_remito_print.fallback_on_ucfe_error</field>
+        <field name="value">False</field>
+    </record>
+
+    <!-- Segundos de espera máximos para la llamada a UCFE. -->
+    <record id="param_ucfe_timeout" model="ir.config_parameter">
+        <field name="key">stock_remito_print.ucfe_timeout</field>
+        <field name="value">20</field>
+    </record>
+
+</odoo>

@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+    <t t-name="stock_remito_print.BatchAction">
+        <div class="stock_remito_print p-3">
+
+            <div t-if="!state.finished" class="stock_remito_print_progress">
+                <h4>
+                    <t t-esc="modeLabel"/>:
+                    lote <t t-esc="state.currentBatch"/> de <t t-esc="state.totalBatches"/>
+                </h4>
+                <div class="progress mb-3" style="height: 20px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated"
+                         role="progressbar"
+                         t-attf-style="width: {{ progress }}%;">
+                        <t t-esc="progress"/>%
+                    </div>
+                </div>
+                <p class="text-muted" t-if="mode === 'print'">
+                    Si el navegador abre el diálogo de impresión, confirmalo o
+                    cerralo para que siga con el lote siguiente.
+                </p>
+            </div>
+
+            <div t-if="state.finished" class="stock_remito_print_summary">
+                <h4 t-if="state.cancelled">Proceso cancelado</h4>
+                <h4 t-else="">Proceso terminado</h4>
+            </div>
+
+            <div class="row text-center my-3">
+                <div class="col">
+                    <div class="stock_remito_print_kpi"><t t-esc="state.total"/></div>
+                    <div class="text-muted small">Seleccionadas</div>
+                </div>
+                <div class="col">
+                    <div class="stock_remito_print_kpi text-success"><t t-esc="state.ok"/></div>
+                    <div class="text-muted small">Procesadas</div>
+                </div>
+                <div class="col">
+                    <div class="stock_remito_print_kpi"><t t-esc="state.ucfe"/></div>
+                    <div class="text-muted small">PDF de UCFE</div>
+                </div>
+                <div class="col">
+                    <div class="stock_remito_print_kpi"><t t-esc="state.standard"/></div>
+                    <div class="text-muted small">Reporte estándar</div>
+                </div>
+                <div class="col">
+                    <div class="stock_remito_print_kpi text-danger"><t t-esc="state.errors"/></div>
+                    <div class="text-muted small">Con error</div>
+                </div>
+            </div>
+
+            <div t-if="state.errorList.length" class="mt-3">
+                <h5 class="text-danger">Operaciones con error</h5>
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Operación</th>
+                            <th>Motivo</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr t-foreach="state.errorList" t-as="fila" t-key="fila_index">
+                            <td><t t-esc="fila.name"/></td>
+                            <td class="text-muted small"><t t-esc="fila.error"/></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div t-if="state.standardList.length" class="mt-3">
+                <h5>Impresas con reporte estándar</h5>
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>Operación</th>
+                            <th>Motivo</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr t-foreach="state.standardList" t-as="fila" t-key="fila_index">
+                            <td><t t-esc="fila.name"/></td>
+                            <td class="text-muted small">
+                                <t t-if="fila.fallback">Falla al obtener el PDF de UCFE</t>
+                                <t t-else="">No corresponde CFE</t>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="d-flex justify-content-end gap-2 mt-3">
+                <button t-if="state.running"
+                        class="btn btn-secondary"
+                        t-on-click="onCancel"
+                        t-att-disabled="state.cancelRequested ? 'disabled' : undefined">
+                    Cancelar
+                </button>
+                <button t-if="state.finished"
+                        class="btn btn-primary"
+                        t-on-click="onClose">
+                    Cerrar
+                </button>
+            </div>
+
+        </div>
+    </t>
+
+</templates>

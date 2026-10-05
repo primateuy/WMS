@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!--
+        Se ejecuta al instalar y en cada actualización del módulo. Deja al
+        perfil de solo impresión viendo únicamente el menú Remitos, usando
+        la lista blanca de `generic_security_restriction`.
+
+        Si ese módulo no está instalado no hace nada: este módulo no
+        depende de él.
+    -->
+    <function model="res.groups" name="_remito_configurar_menus"/>
+
+</odoo>

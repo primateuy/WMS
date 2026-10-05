@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- Columnas de impresión en la lista estándar de operaciones. -->
+    <record id="vpicktree_remito_print" model="ir.ui.view">
+        <field name="name">stock.picking.tree.remito.print</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.vpicktree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='state']" position="before">
+                <field name="remito_cfe_ref" optional="hide"/>
+                <field name="ucfe_pdf_available" optional="hide" widget="boolean_toggle" readonly="1"/>
+                <field name="remito_printed" optional="hide" widget="boolean_toggle" readonly="1"/>
+                <field name="remito_printed_date" optional="hide"/>
+                <field name="remito_printed_by" optional="hide"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Datos de impresión en el formulario de la operación. -->
+    <record id="view_picking_form_remito_print" model="ir.ui.view">
+        <field name="name">stock.picking.form.remito.print</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Impresión de remito" name="remito_print_page">
+                    <group>
+                        <group string="Estado">
+                            <field name="remito_printed" readonly="1"/>
+                            <field name="remito_printed_date" readonly="1"/>
+                            <field name="remito_printed_by" readonly="1"/>
+                            <field name="remito_print_count" readonly="1"/>
+                            <field name="remito_last_source" readonly="1"/>
+                        </group>
+                        <group string="Comprobante">
+                            <field name="remito_usa_cfe" readonly="1"/>
+                            <field name="remito_cfe_ref" readonly="1"/>
+                            <field name="ucfe_pdf_available" readonly="1"/>
+                        </group>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Filtros de impresión en la búsqueda estándar de operaciones. -->
+    <record id="view_picking_internal_search_remito_print" model="ir.ui.view">
+        <field name="name">stock.picking.search.remito.print</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_internal_search"/>
+        <field name="arch" type="xml">
+            <xpath expr="//filter[@name='backorder']" position="after">
+                <separator/>
+                <filter name="remito_impresas"
+                        string="Remito impreso"
+                        domain="[('remito_printed', '=', True)]"/>
+                <filter name="remito_no_impresas"
+                        string="Remito sin imprimir"
+                        domain="[('remito_printed', '=', False)]"/>
+                <separator/>
+                <filter name="remito_con_pdf_ucfe"
+                        string="Con PDF UCFE"
+                        domain="[('ucfe_pdf_available', '=', True)]"/>
+                <filter name="remito_sin_pdf_ucfe"
+                        string="Sin PDF UCFE"
+                        domain="[('ucfe_pdf_available', '=', False)]"/>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

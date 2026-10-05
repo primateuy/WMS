@@ -1,0 +1,28 @@
+/* Prefijo propio para no chocar con clases de Odoo. */
+.stock_remito_print {
+    min-width: 32rem;
+}
+
+.stock_remito_print_kpi {
+    font-size: 1.75rem;
+    font-weight: 600;
+    line-height: 1.1;
+}
+
+.stock_remito_print .table {
+    margin-bottom: 0;
+}
+
+.stock_remito_print_summary h4 {
+    margin-bottom: 0;
+}
+
+/*
+ * La acción cliente se abre dentro de un ActionDialog, que trae su propio
+ * botón "De acuerdo" en el pie. Como los botones de esta pantalla van en el
+ * cuerpo, quedaban los dos a la vez. Se oculta el pie del diálogo solo
+ * cuando adentro está esta acción.
+ */
+.modal:has(.stock_remito_print) .modal-footer {
+    display: none;
+}

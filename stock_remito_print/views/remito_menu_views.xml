@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- Lista propia del menú Remitos: solo lectura, con el botón de
+         impresión masiva en la cabecera. -->
+    <record id="view_remito_picking_tree" model="ir.ui.view">
+        <field name="name">stock.picking.tree.remito</field>
+        <field name="model">stock.picking</field>
+        <field name="priority">99</field>
+        <field name="arch" type="xml">
+            <tree string="Remitos" create="0" edit="0" delete="0" sample="1">
+                <header>
+                    <button name="%(stock_remito_print.action_remito_print_wizard)d"
+                            type="action"
+                            string="Imprimir remitos"
+                            class="btn-primary"/>
+                </header>
+                <field name="name" decoration-bf="1"/>
+                <field name="picking_type_id"/>
+                <field name="remito_warehouse_id"/>
+                <field name="date_done" string="Fecha efectiva"/>
+                <field name="partner_id"/>
+                <field name="remito_cfe_ref"/>
+                <field name="ucfe_pdf_available" widget="boolean_toggle" readonly="1"/>
+                <field name="remito_printed" widget="boolean_toggle" readonly="1"
+                       decoration-success="remito_printed"/>
+                <field name="remito_printed_date"/>
+                <field name="remito_printed_by"/>
+                <field name="remito_print_count" sum="Impresiones"/>
+                <field name="state" widget="badge"
+                       decoration-success="state == 'done'"
+                       decoration-danger="state == 'cancel'"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- Formulario de solo lectura: sin validar, cancelar ni devolver. -->
+    <record id="view_remito_picking_form" model="ir.ui.view">
+        <field name="name">stock.picking.form.remito</field>
+        <field name="model">stock.picking</field>
+        <field name="priority">99</field>
+        <field name="arch" type="xml">
+            <form string="Remito" create="0" edit="0" delete="0">
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name" readonly="1"/></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="picking_type_id" readonly="1"/>
+                            <field name="remito_warehouse_id" readonly="1"/>
+                            <field name="partner_id" readonly="1"/>
+                            <field name="origin" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="state" readonly="1"/>
+                            <field name="date_done" string="Fecha efectiva" readonly="1"/>
+                            <field name="remito_cfe_ref" readonly="1"/>
+                            <field name="ucfe_pdf_available" readonly="1"/>
+                        </group>
+                    </group>
+                    <group string="Impresión">
+                        <group>
+                            <field name="remito_printed" readonly="1"/>
+                            <field name="remito_printed_date" readonly="1"/>
+                        </group>
+                        <group>
+                            <field name="remito_printed_by" readonly="1"/>
+                            <field name="remito_print_count" readonly="1"/>
+                            <field name="remito_last_source" readonly="1"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Detalle" name="remito_moves">
+                            <field name="move_ids_without_package" readonly="1">
+                                <tree create="0" edit="0" delete="0">
+                                    <field name="product_id"/>
+                                    <field name="description_picking"/>
+                                    <field name="quantity"/>
+                                    <field name="product_uom"/>
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_remito_picking_search" model="ir.ui.view">
+        <field name="name">stock.picking.search.remito</field>
+        <field name="model">stock.picking</field>
+        <field name="arch" type="xml">
+            <search string="Remitos">
+                <field name="name" string="Referencia"
+                       filter_domain="['|', ('name', 'ilike', self), ('origin', 'ilike', self)]"/>
+                <field name="partner_id"/>
+                <field name="picking_type_id"/>
+                <field name="remito_warehouse_id"/>
+                <filter name="filtro_hecho" string="Hecho"
+                        domain="[('state', '=', 'done')]"/>
+                <separator/>
+                <filter name="filtro_impresas" string="Impresas"
+                        domain="[('remito_printed', '=', True)]"/>
+                <filter name="filtro_no_impresas" string="No impresas"
+                        domain="[('remito_printed', '=', False)]"/>
+                <separator/>
+                <filter name="filtro_con_pdf_ucfe" string="Con PDF UCFE"
+                        domain="[('ucfe_pdf_available', '=', True)]"/>
+                <filter name="filtro_sin_pdf_ucfe" string="Sin PDF UCFE"
+                        domain="[('ucfe_pdf_available', '=', False)]"/>
+                <separator/>
+                <filter name="filtro_fecha" string="Fecha efectiva"
+                        date="date_done"/>
+                <group expand="0" string="Agrupar por">
+                    <filter name="group_picking_type" string="Tipo de operación"
+                            domain="[]" context="{'group_by': 'picking_type_id'}"/>
+                    <filter name="group_warehouse" string="Almacén"
+                            domain="[]" context="{'group_by': 'remito_warehouse_id'}"/>
+                    <filter name="group_printed" string="Impresa"
+                            domain="[]" context="{'group_by': 'remito_printed'}"/>
+                    <filter name="group_date_done" string="Fecha efectiva"
+                            domain="[]" context="{'group_by': 'date_done'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_remito_picking" model="ir.actions.act_window">
+        <field name="name">Remitos</field>
+        <field name="res_model">stock.picking</field>
+        <field name="view_mode">tree,form</field>
+        <field name="search_view_id" ref="view_remito_picking_search"/>
+        <field name="context">{'search_default_filtro_hecho': 1, 'search_default_filtro_no_impresas': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No hay remitos pendientes de imprimir
+            </p>
+            <p>
+                Sacá el filtro «No impresas» para ver también los remitos
+                que ya se imprimieron.
+            </p>
+        </field>
+    </record>
+
+    <!-- Las vistas propias se fijan con ir.actions.act_window.view para que
+         la acción no tome las vistas estándar de stock. -->
+    <record id="action_remito_picking_tree_view" model="ir.actions.act_window.view">
+        <field name="sequence" eval="1"/>
+        <field name="view_mode">tree</field>
+        <field name="view_id" ref="view_remito_picking_tree"/>
+        <field name="act_window_id" ref="action_remito_picking"/>
+    </record>
+
+    <record id="action_remito_picking_form_view" model="ir.actions.act_window.view">
+        <field name="sequence" eval="2"/>
+        <field name="view_mode">form</field>
+        <field name="view_id" ref="view_remito_picking_form"/>
+        <field name="act_window_id" ref="action_remito_picking"/>
+    </record>
+
+    <menuitem id="menu_remito_root"
+              name="Remitos"
+              sequence="145"
+              web_icon="stock_remito_print,static/description/icon.png"
+              groups="stock_remito_print.group_remito_print_only,stock.group_stock_user"/>
+
+    <menuitem id="menu_remito_list"
+              name="Remitos"
+              parent="menu_remito_root"
+              action="action_remito_picking"
+              sequence="1"
+              groups="stock_remito_print.group_remito_print_only,stock.group_stock_user"/>
+
+</odoo>
