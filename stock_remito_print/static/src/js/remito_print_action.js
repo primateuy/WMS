@@ -76,6 +76,17 @@ export class RemitoPrintAction extends Component {
     // Proceso por lotes
     // ------------------------------------------------------------------
 
+    /**
+     * Cede el control al navegador para que pinte lo último que se puso en
+     * el estado. Hace falta antes de cualquier trabajo que bloquee el hilo
+     * principal: window.print() lo bloquea, así que sin esto la pantalla se
+     * queda mostrando el lote anterior y los contadores en cero, y parece
+     * que el proceso está colgado.
+     */
+    _repintar() {
+        return new Promise((resolve) => browser.setTimeout(resolve, 0));
+    }
+
     _makeBatches(ids, tamano) {
         const lotes = [];
         for (let indice = 0; indice < ids.length; indice += tamano) {
@@ -92,6 +103,7 @@ export class RemitoPrintAction extends Component {
                 break;
             }
             this.state.currentBatch = indice + 1;
+            await this._repintar();
             const lote = this.batches[indice];
             try {
                 // Los lotes se procesan de a uno: hasta que no termina el
@@ -152,6 +164,9 @@ export class RemitoPrintAction extends Component {
         }
 
         const blob = await response.blob();
+        // Los contadores ya están actualizados: que se vean antes de que
+        // la impresión bloquee el hilo.
+        await this._repintar();
         if (this.mode === "download") {
             this._download(blob, indice);
         } else {
