@@ -10,3 +10,6 @@ __pycache__/
 .vscode/
 *.swp
 .DS_Store
+
+# Scripts de apoyo para bases locales (llevan credenciales de prueba)
+scripts/local/

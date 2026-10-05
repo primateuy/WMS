@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_users_form_remito_restriction" model="ir.ui.view">
+        <field name="name">res.users.form.remito.restriction</field>
+        <field name="model">res.users</field>
+        <field name="inherit_id" ref="base.view_users_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Inventario / Remitos"
+                      name="remito_restriction_page"
+                      groups="base.group_system,stock.group_stock_manager">
+                    <group>
+                        <field name="restrict_picking_types"/>
+                        <field name="allowed_picking_type_ids"
+                               widget="many2many_tags"
+                               options="{'no_create': True}"
+                               invisible="not restrict_picking_types"
+                               required="restrict_picking_types"/>
+                    </group>
+                    <div class="text-muted">
+                        Con la restricción activada el usuario solo ve las
+                        operaciones de inventario de los tipos que tenga
+                        asignados acá. Los procesos internos que corren como
+                        superusuario no se ven afectados.
+                    </div>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

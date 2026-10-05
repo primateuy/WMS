@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_remito_print_wizard_form" model="ir.ui.view">
+        <field name="name">stock.remito.print.wizard.form</field>
+        <field name="model">stock.remito.print.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Imprimir remitos">
+                <field name="picking_ids" invisible="1"/>
+                <group>
+                    <group>
+                        <field name="picking_count"/>
+                        <field name="mode" widget="radio"/>
+                    </group>
+                    <group>
+                        <field name="mark_printed"/>
+                        <field name="batch_size"/>
+                    </group>
+                </group>
+                <div class="text-muted">
+                    Las operaciones se procesan por lotes, uno después del
+                    otro. Podés cancelar en cualquier momento: lo ya
+                    procesado queda impreso y marcado.
+                </div>
+                <footer>
+                    <button name="action_print"
+                            string="Procesar"
+                            type="object"
+                            class="btn-primary"/>
+                    <button string="Cancelar"
+                            class="btn-secondary"
+                            special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_remito_print_wizard" model="ir.actions.act_window">
+        <field name="name">Imprimir remitos</field>
+        <field name="res_model">stock.remito.print.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="stock.model_stock_picking"/>
+        <field name="binding_type">action</field>
+        <field name="binding_view_types">list,form</field>
+        <field name="groups_id" eval="[(4, ref('stock.group_stock_user')), (4, ref('stock_remito_print.group_remito_print_only'))]"/>
+    </record>
+
+</odoo>

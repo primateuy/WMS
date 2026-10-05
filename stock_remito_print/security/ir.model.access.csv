@@ -1,0 +1,19 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_stock_remito_print_wizard_stock_user,stock.remito.print.wizard usuario inventario,model_stock_remito_print_wizard,stock.group_stock_user,1,1,1,0
+access_stock_remito_print_wizard_print_only,stock.remito.print.wizard solo impresion,model_stock_remito_print_wizard,stock_remito_print.group_remito_print_only,1,1,1,0
+access_remito_print_only_stock_picking,Solo impresion - operaciones,stock.model_stock_picking,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_move,Solo impresion - movimientos,stock.model_stock_move,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_move_line,Solo impresion - detalle de movimientos,stock.model_stock_move_line,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_picking_type,Solo impresion - tipos de operacion,stock.model_stock_picking_type,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_location,Solo impresion - ubicaciones,stock.model_stock_location,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_warehouse,Solo impresion - almacenes,stock.model_stock_warehouse,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_lot,Solo impresion - lotes,stock.model_stock_lot,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_quant_package,Solo impresion - paquetes,stock.model_stock_quant_package,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_stock_package_type,Solo impresion - tipos de paquete,stock.model_stock_package_type,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_product_product,Solo impresion - variantes de producto,product.model_product_product,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_product_template,Solo impresion - productos,product.model_product_template,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_product_packaging,Solo impresion - empaquetado,product.model_product_packaging,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_uom_uom,Solo impresion - unidades de medida,uom.model_uom_uom,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_uom_category,Solo impresion - categorias de unidad,uom.model_uom_category,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_res_partner,Solo impresion - contactos,base.model_res_partner,stock_remito_print.group_remito_print_only,1,0,0,0
+access_remito_print_only_res_company,Solo impresion - companias,base.model_res_company,stock_remito_print.group_remito_print_only,1,0,0,0
