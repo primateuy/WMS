@@ -11,7 +11,7 @@
     'website': "https://avancesoftware.us/",
 
     'category': 'Uncategorized',
-    'version': '0.2',
+    'version': '0.4',
 
     'depends': ['base', 'product', 'stock', 'base_automation', 'setu_intercompany_transaction', 'setu_advance_reordering'],
 

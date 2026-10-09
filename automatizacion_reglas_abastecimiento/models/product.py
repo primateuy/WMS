@@ -433,6 +433,31 @@ class ProductProduct(models.Model):
         _logger.info("Reglas creadas: %d", reglas_creadas)
         _logger.info("Errores: %d", errores)
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        """La variante nueva hereda el Cluster de su plantilla y genera sus reglas.
+
+        Antes nacía sin Cluster —el campo es propio de la variante— y por lo tanto sin
+        reglas de reabastecimiento: había que reasignar el Cluster a mano. Las reglas se
+        generan en segundo plano. Si la variante se crea junto con su plantilla (alta del
+        producto), no se encola nada acá: lo hace el alta de la plantilla.
+        """
+        productos = super().create(vals_list)
+        if self.env.context.get('skip_auto_rules'):
+            return productos
+        sin_cluster = productos.filtered(
+            lambda p: not p.warehouse_group_id and p.product_tmpl_id.warehouse_group_id)
+        for grupo in sin_cluster.product_tmpl_id.warehouse_group_id:
+            sin_cluster.filtered(
+                lambda p: p.product_tmpl_id.warehouse_group_id == grupo
+            ).with_context(skip_auto_rules=True).write({'warehouse_group_id': grupo.id})
+        sueltas = productos.filtered(
+            lambda p: p.warehouse_group_id and p.product_tmpl_id.create_date != p.create_date)
+        if sueltas:
+            self.env['cluster.proceso']._encolar(
+                variants=sueltas, con_rutas=False, origen=_("Variantes nuevas"))
+        return productos
+
     def write(self, vals):
         res = super(ProductProduct, self).write(vals)
 
@@ -518,7 +543,7 @@ class ProductProduct(models.Model):
         return objetivo
 
     @api.model
-    def _cluster_sincronizar_reglas(self, variantes, deadline=None):
+    def _cluster_sincronizar_reglas(self, variantes, deadline=None, almacenes=None):
         """Deja las reglas de `variantes` como las dejaría `generarReglasAbastecimiento`.
 
         La versión anterior BORRABA todas las reglas del producto y las volvía a
@@ -535,6 +560,9 @@ class ProductProduct(models.Model):
 
         Si llega `deadline` (time.time()), procesa de a sub-tandas y corta al
         pasarlo. Devuelve contadores y las variantes procesadas.
+
+        Con `almacenes`, sólo se tocan reglas de esos almacenes: las de los demás no se
+        crean, no se modifican y no se borran.
         """
         Op = self.env['stock.warehouse.orderpoint'].with_context(active_test=False)
         company_id = self.env.company.id
@@ -546,9 +574,14 @@ class ProductProduct(models.Model):
                 break
             lote = variantes[i:i + SUBTANDA]
             objetivo = self._cluster_reglas_objetivo(lote)
+            if objetivo and almacenes:
+                objetivo = {pid: [r for r in reglas if r[1] in almacenes.ids]
+                            for pid, reglas in objetivo.items()}
             if objetivo:
-                existentes = Op.search([('product_id', 'in', list(objetivo)),
-                                        ('company_id', '=', company_id)])
+                dominio = [('product_id', 'in', list(objetivo)), ('company_id', '=', company_id)]
+                if almacenes:
+                    dominio.append(('warehouse_id', 'in', almacenes.ids))
+                existentes = Op.search(dominio)
                 # (producto, ubicación, compañía) es único en la base, archivadas
                 # incluidas: no puede haber dos por clave.
                 por_clave = {(op.product_id.id, op.location_id.id): op for op in existentes}
@@ -791,6 +824,59 @@ class ProductTemplate(models.Model):
                     c=template.warehouse_group_id.display_name or _('sin Cluster'),
                     n=len(template.product_variant_ids), p=proceso.name))
         return proceso
+
+    @api.model
+    def _cluster_rutas_contexto(self):
+        """Lo necesario para derivar las rutas del Cluster, leído una vez por tanda.
+
+        La ruta que abastece una sucursal ya la marca Odoo: es la de reabastecimiento entre
+        almacenes, con `supplied_wh_id` = la sucursal. Se gestionan sólo las de almacenes
+        que están en algún Cluster; cualquier otra ruta del producto (Comprar, Fabricar,
+        cross dock, una sucursal fuera de los Clusters) queda como está.
+        """
+        grupos = self.env['stock.warehouse.group'].search([])
+        rutas = self.env['stock.route'].search([
+            ('supplied_wh_id', 'in', grupos.mapped('warehouse_ids').ids),
+            ('product_selectable', '=', True)])
+        por_almacen = {}
+        for ruta in rutas:
+            por_almacen.setdefault(ruta.supplied_wh_id.id, set()).add(ruta.id)
+        return {'grupos': grupos, 'gestionadas': set(rutas.ids), 'por_almacen': por_almacen}
+
+    def _cluster_rutas_objetivo(self, contexto):
+        """Las rutas de sucursal que le corresponden por su Cluster, o None si no tiene.
+
+        Misma jerarquía que las reglas de abastecimiento (`_cluster_reglas_objetivo`): con
+        nivel de jerarquía, los almacenes de todos los Clusters de nivel menor o igual; sin
+        nivel, los de su Cluster. Así cada regla que el proceso crea tiene su ruta.
+        """
+        self.ensure_one()
+        grupo = self.warehouse_group_id
+        if not grupo:
+            return None
+        if grupo.nivel_jerarquia_id:
+            seq = grupo.nivel_jerarquia_id.seq
+            grupos = [g for g in contexto['grupos']
+                      if g.nivel_jerarquia_id and g.nivel_jerarquia_id.seq <= seq]
+        else:
+            grupos = [grupo]
+        objetivo = set()
+        for g in grupos:
+            for almacen in g.warehouse_ids:
+                objetivo |= contexto['por_almacen'].get(almacen.id, set())
+        return objetivo
+
+    def _cluster_aplicar_rutas_desde_cluster(self, contexto):
+        """Deja las rutas de sucursal iguales a los almacenes de su Cluster. True si cambió."""
+        self.ensure_one()
+        objetivo = self._cluster_rutas_objetivo(contexto)
+        if objetivo is None:
+            return False
+        antes = set(self.route_ids.ids)
+        rutas = (antes - contexto['gestionadas']) | objetivo
+        if rutas != antes:
+            self.write({'route_ids': [Command.set(sorted(rutas))]})
+        return rutas != antes
 
     def _cluster_aplicar_rutas(self, automatizaciones):
         """Aplica las automatizaciones de rutas de su Cluster, escribiendo UNA vez.

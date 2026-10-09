@@ -212,3 +212,88 @@ class TestClusterProceso(TransactionCase):
         self.assertEqual(proceso.estado, 'detenido')
         self.assertIn('falla de prueba', proceso.error_msg)
         self.assertNotIn(proceso, self.env['cluster.proceso'].search([('estado', '=', 'en_proceso')]))
+
+    # --- rutas derivadas del Cluster ------------------------------------------
+    def _ruta_de_sucursal(self, almacen, nombre):
+        return self.env['stock.route'].create({
+            'name': nombre, 'product_selectable': True, 'supplied_wh_id': almacen.id})
+
+    def test_rutas_desde_cluster(self):
+        """Con el parámetro, las rutas de sucursal salen de los almacenes del Cluster.
+
+        Las automatizaciones no corren (agregarían la 1 y quitarían la 2), las rutas que no
+        son de sucursal quedan, y la de un almacén que el Cluster ya no tiene se va.
+        """
+        ruta_a = self._ruta_de_sucursal(self.almacen_a, 'Sucursal A prueba')
+        ruta_b = self._ruta_de_sucursal(self.almacen_b, 'Sucursal B prueba')
+        almacen_c = self.env['stock.warehouse'].create({'name': 'Cluster C prueba', 'code': 'CCP'})
+        n3 = self.env['niveles.jerarquia'].create({'nombre': 'Nivel 3 prueba', 'seq': 3})
+        self.env['stock.warehouse.group'].create({
+            'name': 'Grupo C prueba', 'nivel_jerarquia_id': n3.id,
+            'warehouse_ids': [(6, 0, almacen_c.ids)]})
+        ruta_c = self._ruta_de_sucursal(almacen_c, 'Sucursal C prueba')
+        self.plantilla.route_ids = [(6, 0, (self.ruta_2 | ruta_c).ids)]
+        self.env['ir.config_parameter'].sudo().set_param(
+            'automatizacion_reglas_abastecimiento.rutas_desde_cluster', 'True')
+
+        self.plantilla.write({'warehouse_group_id': self.grupo_b.id})
+        proceso = self._procesar(self._ultimo_proceso())
+
+        self.assertEqual(proceso.estado, 'terminado')
+        self.assertEqual(self.plantilla.route_ids, self.ruta_2 | ruta_a | ruta_b,
+                         "B lleva sus almacenes y los del nivel superior (A); C se va")
+        self.assertEqual(proceso.rutas_cambiadas, 1)
+        # Cada regla creada tiene la ruta de su almacén entre las del producto.
+        for _p, _ub, almacen_id, *_resto in self._reglas():
+            self.assertTrue(self.plantilla.route_ids.filtered(
+                lambda r: r.supplied_wh_id.id == almacen_id))
+
+    def test_rutas_por_automatizacion_sin_el_parametro(self):
+        self._ruta_de_sucursal(self.almacen_b, 'Sucursal B prueba')
+        self.plantilla.write({'warehouse_group_id': self.grupo_b.id})
+        self._procesar(self._ultimo_proceso())
+        self.assertEqual(self.plantilla.route_ids, self.ruta_1)
+
+    # --- wizard «Actualizar Reglas» del grupo --------------------------------
+    def test_wizard_del_grupo_encola_solo_los_almacenes_elegidos(self):
+        # Los Clusters reales de la base quedaron con nivel más alto que los de la prueba:
+        # el wizard los incluiría con todos sus productos. Se les saca el nivel.
+        self.env['stock.warehouse.group'].search([
+            ('id', 'not in', (self.grupo_a | self.grupo_b).ids)]).nivel_jerarquia_id = False
+        self.variantes.with_context(skip_auto_rules=True).write(
+            {'warehouse_group_id': self.grupo_b.id})
+        wizard = self.env['stock.warehouse.group.rules.wizard'].create({
+            'warehouse_group_id': self.grupo_a.id,
+            'warehouse_ids': [(6, 0, self.almacen_a.ids)]})
+        with patch.object(type(self.env['stock.warehouse.orderpoint']), 'create') as crear:
+            wizard.actualizarReglas()
+        crear.assert_not_called()
+        proceso = self._ultimo_proceso()
+        # Grupo B es de nivel mayor que A: sus productos llevan reglas en los almacenes de A.
+        self.assertEqual(proceso.variant_ids, self.variantes)
+        self.assertEqual(proceso.warehouse_ids, self.almacen_a)
+        self._procesar(proceso)
+        almacenes = {fila[2] for fila in self._reglas()}
+        self.assertEqual(almacenes, {self.almacen_a.id}, "B no se toca: no se eligió")
+
+    # --- variantes nuevas -----------------------------------------------------
+    def test_variante_nueva_hereda_el_cluster_y_se_encola(self):
+        self.plantilla.with_context(skip_auto_rules=True).write(
+            {'warehouse_group_id': self.grupo_b.id})
+        self.variantes.with_context(skip_auto_rules=True).write(
+            {'warehouse_group_id': self.grupo_b.id})
+        # En la misma transacción plantilla y variante tendrían la misma fecha de alta.
+        self.env.flush_all()
+        self.env.cr.execute("UPDATE product_template SET create_date = create_date - "
+                            "interval '1 day' WHERE id = %s", [self.plantilla.id])
+        self.plantilla.invalidate_recordset(['create_date'])
+        atributo = self.plantilla.attribute_line_ids.attribute_id
+        valor = self.env['product.attribute.value'].create(
+            {'name': 'XL', 'attribute_id': atributo.id})
+        self.plantilla.attribute_line_ids.value_ids = [(4, valor.id)]
+        nueva = self.plantilla.product_variant_ids - self.variantes
+        self.assertEqual(len(nueva), 1)
+        self.assertEqual(nueva.warehouse_group_id, self.grupo_b)
+        proceso = self._ultimo_proceso()
+        self.assertEqual(proceso.variant_ids, nueva)
+        self.assertFalse(proceso.con_rutas)

@@ -59,6 +59,11 @@ class ClusterProceso(models.Model):
         string='Variantes sueltas', readonly=True,
         help="Variantes a procesar además de las de los productos, cuando se "
              "cambió el Cluster de variantes directamente.")
+    warehouse_ids = fields.Many2many(
+        'stock.warehouse', 'cluster_proceso_warehouse_rel', 'proceso_id', 'warehouse_id',
+        string='Sólo estos almacenes', readonly=True,
+        help="Si tiene almacenes, sólo se crean, modifican o borran reglas de esos almacenes "
+             "(«Actualizar Reglas» de un grupo con algunos almacenes elegidos). Vacío: todos.")
     con_rutas = fields.Boolean(
         string='Actualizar rutas', default=True, readonly=True,
         help="Si es falso, sólo se regeneran las reglas de abastecimiento (botón "
@@ -85,7 +90,7 @@ class ClusterProceso(models.Model):
     etapa = fields.Char(string='Etapa', readonly=True, copy=False)
     log = fields.Text(string='Registro', readonly=True, copy=False)
     variantes_por_tanda = fields.Integer(
-        string='Variantes por tanda', default=50, required=True,
+        string='Variantes por tanda', default=500, required=True,
         help="Tope de variantes por tanda. Cada tanda además se corta a los "
              "%d segundos." % TIEMPO_MAX_TANDA)
 
@@ -117,7 +122,7 @@ class ClusterProceso(models.Model):
         return super().create(vals_list)
 
     @api.model
-    def _encolar(self, templates=None, variants=None, con_rutas=True, origen=''):
+    def _encolar(self, templates=None, variants=None, con_rutas=True, origen='', warehouses=None):
         """Deja un proceso en cola y dispara el cron. No procesa nada acá."""
         templates = (templates or self.env['product.template']).exists()
         variants = (variants or self.env['product.product']).exists()
@@ -126,6 +131,7 @@ class ClusterProceso(models.Model):
         proceso = self.sudo().create({
             'template_ids': [Command.set(templates.ids)],
             'variant_ids': [Command.set(variants.ids)],
+            'warehouse_ids': [Command.set((warehouses or self.env['stock.warehouse']).ids)],
             'con_rutas': con_rutas and bool(templates),
             'user_id': self.env.user.id,
             'company_id': self.env.company.id,
@@ -259,15 +265,34 @@ class ClusterProceso(models.Model):
     # ------------------------------------------------------------------
     # Fase 1: rutas
     # ------------------------------------------------------------------
+    @api.model
+    def _rutas_desde_cluster(self):
+        return tools.str2bool(self.env['ir.config_parameter'].sudo().get_param(
+            'automatizacion_reglas_abastecimiento.rutas_desde_cluster', 'False'), False)
+
     def _tanda_rutas(self):
         t0 = time.time()
         plantillas = self.template_ids.filtered(lambda t: t.id > self.rutas_puntero).sorted('id')
         hechas, cambiadas, puntero = 0, 0, self.rutas_puntero
-        automatizaciones = self.env['base.automation']._cluster_automatizaciones()
+        # Con `rutas_desde_cluster` las rutas de sucursal salen de los almacenes del Cluster
+        # y no de las automatizaciones «Auto Seleccion de Rutas»: esas se cargan a mano con
+        # una ruta fija por acción y, cuando un Cluster cambia de almacenes, quedan
+        # desfasadas y dejan reglas sin ruta («No se encontró regla para abastecer»).
+        desde_cluster = self._rutas_desde_cluster()
+        if desde_cluster:
+            contexto = self.env['product.template']._cluster_rutas_contexto()
+        else:
+            automatizaciones = self.env['base.automation']._cluster_automatizaciones()
         for plantilla in plantillas:
             if time.time() - t0 >= TIEMPO_MAX_TANDA:
                 break
-            if plantilla.exists() and plantilla._cluster_aplicar_rutas(automatizaciones):
+            if not plantilla.exists():
+                cambio = False
+            elif desde_cluster:
+                cambio = plantilla._cluster_aplicar_rutas_desde_cluster(contexto)
+            else:
+                cambio = plantilla._cluster_aplicar_rutas(automatizaciones)
+            if cambio:
                 cambiadas += 1
             hechas += 1
             puntero = plantilla.id
@@ -296,7 +321,8 @@ class ClusterProceso(models.Model):
         if not tanda:
             self._terminar()
             return False
-        cuenta = self.env['product.product']._cluster_sincronizar_reglas(tanda, deadline=t0 + TIEMPO_MAX_TANDA)
+        cuenta = self.env['product.product']._cluster_sincronizar_reglas(
+            tanda, deadline=t0 + TIEMPO_MAX_TANDA, almacenes=self.warehouse_ids)
         procesadas = cuenta['procesadas']
         puntero = procesadas[-1].id if procesadas else self.reglas_puntero
         self.sudo().write({
