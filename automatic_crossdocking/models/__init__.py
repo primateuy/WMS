@@ -8,4 +8,4 @@ from . import stock_warehouse
 from . import product_template
 from . import product_product
 from . import picking_type
-
+from . import crossdock_armado

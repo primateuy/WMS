@@ -1,3 +1,7 @@
+from collections import defaultdict
+
+from psycopg2.extras import execute_values
+
 from odoo import fields, api, models, SUPERUSER_ID
 
 from odoo.exceptions import ValidationError
@@ -282,8 +286,22 @@ class PurchaseOrder(models.Model):
 
 
     def button_confirm(self, *args, **kwargs):
-        res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
-
+        # Confirmar la compra recalcula la «cantidad a pedir» de los puntos de reorden de
+        # todas las variantes de las plantillas compradas (cambia el estado de las líneas y,
+        # si el proveedor es nuevo, la lista de proveedores de la plantilla). En una OC de
+        # crossdock son decenas de miles de puntos de reorden: se protegen acá y los
+        # recalcula un cron por lotes (`crossdock.reorden.pendiente`).
+        puntos = self._crossdock_puntos_reorden_a_diferir()
+        if puntos:
+            campo = self.env['stock.warehouse.orderpoint']._fields['qty_to_order']
+            with self.env.protecting([campo], puntos):
+                res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
+            confirmadas = self.filtered(lambda o: o.state in ('purchase', 'done'))
+            if confirmadas:
+                self.env['crossdock.reorden.pendiente'].sudo()._encolar(
+                    confirmadas.order_line.product_id.product_tmpl_id, confirmadas)
+        else:
+            res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
 
         if self.exceso:
             self.message_post(body=f"⚠️ La distribución ha generado un exceso. Se ajustó las cantidades para evitar errores en el inventario.")
@@ -360,7 +378,8 @@ class PurchaseOrder(models.Model):
         
         if not location_distribution:
             return
-        
+
+        cadena = self._crossdock_cadena_inicial()
         cadenas_wis = []  # pares (intermedio, crosspick) para propagar códigos WIS tras el confirm
         for location, lines_data in location_distribution.items():
             if not lines_data:
@@ -417,7 +436,8 @@ class PurchaseOrder(models.Model):
                     })
                     interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
                     all_pickings |= interpick
-                    intermediate_moves = self._create_equitable_moves_for_picking(interpick, location, lines_data)
+                    intermediate_moves = self._create_equitable_moves_for_picking(
+                        interpick, location, lines_data, cadena=cadena)
                     all_moves |= intermediate_moves
                     # El crossdockingPicking pasa a salir desde la ubicación intermedia.
                     crossdock_origin_location = warehouse.intermediate_crossdock_location_id
@@ -437,7 +457,8 @@ class PurchaseOrder(models.Model):
 
                 all_pickings |= crosspick;
 
-                picking_moves = self._create_equitable_moves_for_picking(crosspick, location, lines_data);
+                picking_moves = self._create_equitable_moves_for_picking(
+                    crosspick, location, lines_data, cadena=cadena)
                 all_moves |= picking_moves;
 
                 # Cadena para propagar códigos WIS tras el confirm: el crosspick (interno)
@@ -479,8 +500,9 @@ class PurchaseOrder(models.Model):
                 picking = StockPicking.with_user(SUPERUSER_ID).create(picking_vals)
             
             all_pickings |= picking
-            
-            picking_moves = self._create_equitable_moves_for_picking(picking, location, lines_data)
+
+            picking_moves = self._create_equitable_moves_for_picking(
+                picking, location, lines_data, cadena=cadena)
             all_moves |= picking_moves
             
             picking.message_post_with_source(
@@ -490,14 +512,9 @@ class PurchaseOrder(models.Model):
             )
         
         if all_moves:
+            # La secuencia ya viene en los vals (ver `_crossdock_crear_moves`).
             all_moves = all_moves.filtered(lambda x: x.state not in ('done', 'cancel'))._action_confirm()
-            
-            seq = 0
-            for move in sorted(all_moves, key=lambda move: move.date):
-                seq += 5
-                move.sequence = seq
-            
-            
+
             forward_pickings = self.env['stock.picking']._get_impacted_pickings(all_moves)
             (all_pickings | forward_pickings).action_confirm()
 
@@ -529,11 +546,11 @@ class PurchaseOrder(models.Model):
 
                         
 
-    def _create_equitable_moves_for_picking(self, picking, location, lines_data):
+    def _create_equitable_moves_for_picking(self, picking, location, lines_data, cadena=None):
         """Crear movimientos para picking con distribución equitativa por ubicación"""
-        
-        moves = self.env['stock.move']
-        
+
+        vals_list = []
+
         for line_data in lines_data:
             line = line_data['line']
             quantity = line_data['quantity']
@@ -572,12 +589,10 @@ class PurchaseOrder(models.Model):
                 'procure_method': 'make_to_stock',
                 'warehouse_id': warehouse.id,
             }
+            vals_list.append(move_vals)
 
-            move = self.env['stock.move'].create(move_vals)
-            moves |= move
+        return self._crossdock_crear_moves(vals_list, cadena)
 
-        return moves
-    
     def _calculate_equitable_distribution(self, crossdock_lines, almacenes):
         ubicaciones_disponibles = []
         
@@ -769,122 +784,159 @@ class PurchaseOrder(models.Model):
         crossdock_orders = self.filtered(lambda po: po.crossdock_enabled)
         
         if regular_orders:
-            super(PurchaseOrder, regular_orders)._create_picking() 
+            super(PurchaseOrder, regular_orders)._create_picking()
 
+        en_segundo_plano = self.env['purchase.order']
         for order in crossdock_orders:
             if order.state not in ('purchase', 'done'):
                 continue
-            
+
             if not any(product.type in ['product', 'consu'] for product in order.order_line.product_id):
                 continue
-            
-            order = order.with_company(order.company_id)
-            
-            lineas_regulares = order.order_line.filtered(lambda l: not l.use_crossdock) 
-            lineas_crossdock = order.order_line.filtered(lambda l: l.use_crossdock) 
-            
-            if lineas_crossdock:
-                order._create_main_reception_picking(lineas_crossdock)
-            
-            # Crear picking regular para líneas sin crossdocking
-            if lineas_regulares:
-                order._create_regular_picking_for_lines(lineas_regulares)
-            
-            if lineas_crossdock:
-                if order._are_required_modules_installed():
-                    order._create_crossdocking_pickings_for_lines(lineas_crossdock)
-                else:
-                    order._create_equitable_distribution_pickings(lineas_crossdock)
-                
-                #order._create_balance_picking_to_stock(lineas_crossdock)
-                
-                # Establecer dependencias correctas entre pickings
-                order._setup_picking_dependencies()
-        
+
+            # Una OC de crossdock arma cientos de pickings y miles de movimientos: no entra
+            # en el tiempo de una petición. Se encola y lo arma un cron en su transacción.
+            if order._crossdock_armado_en_segundo_plano():
+                en_segundo_plano |= order
+                continue
+
+            order._crossdock_armar()
+
+        if en_segundo_plano:
+            en_segundo_plano.write({
+                'crossdock_armado_estado': 'pendiente',
+                'crossdock_armado_error': False,
+                'crossdock_armado_intentos': 0,
+            })
+            self._crossdock_disparar_cron_armado()
+
         return True
 
+    def _crossdock_armar(self):
+        """Arma la recepción, los pickings regulares y las cadenas de crossdock de la OC.
+
+        Corre con `crossdock_armado` (acota optimizaciones que sólo valen acá) y con
+        `wis_encolar_envios`: los envíos a WIS se encolan en lugar de hacerse dentro de
+        esta transacción, que si se corta deja pedidos en WIS que Odoo deshizo.
+        """
+        self.ensure_one()
+        order = self.with_company(self.company_id).with_context(
+            crossdock_armado=True, wis_encolar_envios=True)
+
+        lineas_regulares = order.order_line.filtered(lambda l: not l.use_crossdock)
+        lineas_crossdock = order.order_line.filtered(lambda l: l.use_crossdock)
+
+        if lineas_crossdock:
+            order._create_main_reception_picking(lineas_crossdock)
+
+        # Crear picking regular para líneas sin crossdocking
+        if lineas_regulares:
+            order._create_regular_picking_for_lines(lineas_regulares)
+
+        if lineas_crossdock:
+            if order._are_required_modules_installed():
+                order._create_crossdocking_pickings_for_lines(lineas_crossdock)
+            else:
+                order._create_equitable_distribution_pickings(lineas_crossdock)
+
+            #order._create_balance_picking_to_stock(lineas_crossdock)
+
+            # Establecer dependencias correctas entre pickings
+            order._setup_picking_dependencies()
+        return True
+
+    def _crossdock_cadena_inicial(self):
+        """Índice de la cadena de crossdock: (ubicación destino, producto) -> ids de moves.
+
+        Arranca con la recepción principal. Cada move que se crea después busca acá a su
+        predecesor (mismo producto, ubicación contigua) y se agrega para el siguiente
+        eslabón: Entrada -> Intermedio -> Crossdock de la sucursal -> sucursal.
+        """
+        cadena = defaultdict(list)
+        recepcion = self._get_main_reception_picking()
+        if recepcion:
+            for move in recepcion.move_ids:
+                cadena[(move.location_dest_id.id, move.product_id.id)].append(move.id)
+        return cadena
+
+    def _crossdock_crear_moves(self, vals_list, cadena=None):
+        """Crea en lote los moves de un picking, ya encadenados a su predecesor.
+
+        Con el move encadenado desde la creación el core lo deja en espera, no lo reserva y
+        no le aplica las reglas push del almacén: antes, cada move suelto generaba un
+        duplicado por push que después se fusionaba y borraba (≈ 8.700 en una OC de 250
+        líneas, y cada borrado disparaba recálculos). La secuencia va en los vals, ordenada
+        por fecha como antes, en lugar de escribirse move por move.
+        """
+        if not vals_list:
+            return self.env['stock.move']
+        vals_list = sorted(vals_list, key=lambda v: v.get('date') or fields.Datetime.now())
+        for idx, vals in enumerate(vals_list, start=1):
+            vals['sequence'] = idx * 5
+            if cadena is not None:
+                predecesores = cadena.get((vals['location_id'], vals['product_id']))
+                if predecesores:
+                    vals['move_orig_ids'] = [(6, 0, list(predecesores))]
+        moves = self.env['stock.move'].create(vals_list)
+        if cadena is not None:
+            for move in moves:
+                cadena[(move.location_dest_id.id, move.product_id.id)].append(move.id)
+        return moves
+
+    def _crossdock_armado_en_segundo_plano(self):
+        if self.env.context.get('crossdock_armado_sincronico'):
+            return False
+        param = self.env['ir.config_parameter'].sudo().get_param(
+            'automatic_crossdocking.armado_en_segundo_plano', '1')
+        return param not in ('0', 'False', 'false')
+
     def _setup_picking_dependencies(self):
+        """Enlaza los moves de la OC con su eslabón anterior en la cadena de crossdock.
+
+        Sólo une eslabones contiguos (mismo producto y el destino del anterior es el origen
+        del siguiente), en el sentido de la mercadería. Los moves que crea este módulo ya
+        nacen encadenados (`_crossdock_crear_moves`), así que acá normalmente no se agrega
+        nada: queda como red para pickings agregados después. Es idempotente.
+
+        Antes cruzaba cada producto contra los pickings de TODAS las sucursales y en sentido
+        inverso: en una OC de 250 líneas dejaba 336.608 enlaces (332.014 entre ubicaciones no
+        contiguas) y tardaba ≈ 500 s.
         """
-        Establece las dependencias correctas entre los pickings de crossdocking
-        para que sigan el flujo estándar de Odoo
-        """
-        entrada_location = self._get_or_create_entrance_location()
-        
-        reception_picking = self.picking_ids.filtered(
-            lambda p: p.location_dest_id.id == entrada_location.id and 
-            'Recepción Crossdock' in (p.origin or '') and
-            p.state not in ('done', 'cancel')
+        pickings = self.picking_ids.filtered(lambda p: p.state not in ('done', 'cancel'))
+        moves = pickings.move_ids.filtered(lambda m: m.state not in ('done', 'cancel'))
+        if not moves:
+            return True
+
+        por_destino = defaultdict(list)
+        for move in moves:
+            por_destino[(move.location_dest_id.id, move.product_id.id)].append(move.id)
+
+        pares = [
+            (origen, move.id)
+            for move in moves
+            for origen in por_destino.get((move.location_id.id, move.product_id.id), ())
+            if origen != move.id
+        ]
+        if not pares:
+            return True
+
+        Move = self.env['stock.move']
+        Move.flush_model(['move_orig_ids', 'move_dest_ids'])
+        nuevos = execute_values(
+            self.env.cr._obj,
+            "INSERT INTO stock_move_move_rel (move_orig_id, move_dest_id) VALUES %s "
+            "ON CONFLICT DO NOTHING RETURNING move_dest_id",
+            pares, page_size=5000, fetch=True,
         )
-        
-        dependent_pickings = self.picking_ids.filtered(
-            lambda p: p.location_id.id == entrada_location.id and 
-            p.id != reception_picking.id and
-            p.state not in ('done', 'cancel')
-        )
+        Move.invalidate_model(['move_orig_ids', 'move_dest_ids'])
 
-        almacenes = self.env['stock.warehouse'].search([]);
-
-        
-
-        dependent_pickings_crossdocking = [];
-
-        for almacen in almacenes:
-            dependent_pickings_crossdocking.append(almacen.crossdocking_location_id.id);
-        
-
-        crossdocking_pickings_pendientes = self.picking_ids.filtered(
-            lambda p: p.location_id.id in dependent_pickings_crossdocking and
-            p.state not in ('done', 'cancel')
-        )
-
-        if reception_picking and dependent_pickings:
-            reception_picking = reception_picking[0]
-
-            
-            for dependent_picking in dependent_pickings:
-                dependent_picking.write({'state': 'waiting'});
-                for reception_move in reception_picking.move_ids:
-                    for dependent_move in dependent_picking.move_ids:
-                        if reception_move.product_id.id == dependent_move.product_id.id:
-                            # El movimiento dependiente debe esperar al movimiento de recepción
-                            dependent_move.write({
-                                'move_orig_ids': [(4, reception_move.id)]
-                            })
-                            reception_move.write({
-                                'move_dest_ids': [(4, dependent_move.id)]
-                            })
-
-                            if dependent_move.move_line_ids:
-                                dependent_move.move_line_ids.unlink()
-                                dependent_move.write({
-                                    'quantity': 0,
-                                })
-                
-            dependent_pickings.action_confirm();
-
-            for crossdock_picking in crossdocking_pickings_pendientes:
-                crossdock_picking.write({'state': 'waiting'});
-                for dependent_move in crossdock_picking.move_ids:
-                    for dependent_picking in dependent_pickings:
-                        for dep_move in dependent_picking.move_ids:
-                            if dependent_move.product_id.id == dep_move.product_id.id:
-                                # El movimiento dependiente debe esperar al movimiento de recepción
-                                dep_move.write({
-                                    'move_orig_ids': [(4, dependent_move.id)]
-                                })
-                                dependent_move.write({
-                                    'move_dest_ids': [(4, dep_move.id)]
-                                })
-
-                                if dep_move.move_line_ids:
-                                    dep_move.move_line_ids.unlink()
-                                    dep_move.write({
-                                        'quantity': 0,
-                                    })
-
-            crossdocking_pickings_pendientes.action_confirm();
-            
-
+        # Un move que recién ahora queda encadenado no debe tener reserva propia: espera
+        # a su eslabón anterior, como hace el core con los que nacen encadenados.
+        a_esperar = Move.browse(sorted({fila[0] for fila in nuevos})).filtered(
+            lambda m: m.state not in ('done', 'cancel', 'waiting'))
+        if a_esperar:
+            a_esperar.move_line_ids.unlink()
+            a_esperar.write({'quantity': 0, 'state': 'waiting'})
         return True
 
     def get_crossdock_picking_states_summary(self):
@@ -1088,11 +1140,11 @@ class PurchaseOrder(models.Model):
             
             picking = StockPicking.with_user(SUPERUSER_ID).create(picking_vals)
         
-        moves = self.env['stock.move']
+        vals_list = []
         for line in crossdock_lines:
             if line.product_qty <= 0:
                 continue
-                
+
             move_vals = {
                 'name': f"Recepción: {line.product_id.display_name} → {entrada_location.display_name}",
                 'product_id': line.product_id.id,
@@ -1115,22 +1167,14 @@ class PurchaseOrder(models.Model):
                 'warehouse_id': self.picking_type_id.warehouse_id.id,
                 'propagate_cancel': False,
             }
-            
-            move = self.env['stock.move'].create(move_vals)
-            moves |= move
-        
+            vals_list.append(move_vals)
+
+        moves = self._crossdock_crear_moves(vals_list)
+
         if moves:
             moves = moves.filtered(lambda x: x.state not in ('done', 'cancel'))
-            
-            for move in moves:
-                move.write({'state': 'confirmed'})
-            
-            seq = 0
-            for move in sorted(moves, key=lambda move: move.date):
-                seq += 5
-                move.sequence = seq
-            
-            
+            moves.write({'state': 'confirmed'})
+
             picking.message_post_with_source(
                 'mail.message_origin_link',
                 render_values={'self': picking, 'origin': self},
@@ -1341,6 +1385,7 @@ class PurchaseOrder(models.Model):
         if not warehouse_distribution:
             return
 
+        cadena = self._crossdock_cadena_inicial()
         cadenas_wis = []  # pares (intermedio, crosspick) para propagar códigos WIS tras el confirm
         for ubi, itm in warehouse_distribution.items():
 
@@ -1391,7 +1436,8 @@ class PurchaseOrder(models.Model):
                     })
                     interpick = StockPicking.with_user(SUPERUSER_ID).create(intermediatePicking)
                     all_pickings |= interpick
-                    intermediate_moves = self._create_crossdock_moves_for_picking(interpick, ubi, itm)
+                    intermediate_moves = self._create_crossdock_moves_for_picking(
+                        interpick, ubi, itm, cadena=cadena)
                     all_moves |= intermediate_moves
                     crossdock_origin_location = alm.intermediate_crossdock_location_id
 
@@ -1408,7 +1454,8 @@ class PurchaseOrder(models.Model):
 
                 all_pickings |= crosspick;
 
-                picking_moves = self._create_crossdock_moves_for_picking(crosspick, ubi, itm);
+                picking_moves = self._create_crossdock_moves_for_picking(
+                    crosspick, ubi, itm, cadena=cadena)
                 all_moves |= picking_moves;
 
                 # Cadena para propagar códigos WIS tras el confirm (crosspick interno
@@ -1451,7 +1498,8 @@ class PurchaseOrder(models.Model):
             
             all_pickings |= picking
             
-            picking_moves = self._create_crossdock_moves_for_picking(picking, ubi, itm)
+            picking_moves = self._create_crossdock_moves_for_picking(
+                picking, ubi, itm, cadena=cadena)
             all_moves |= picking_moves
             
             picking.message_post_with_source(
@@ -1465,32 +1513,30 @@ class PurchaseOrder(models.Model):
             
         
         if all_moves:
+            # La secuencia ya viene en los vals y cada move nace encadenado a su eslabón
+            # anterior (`_crossdock_crear_moves`): el core los deja en espera sin reservar.
             all_moves = all_moves.filtered(lambda x: x.state not in ('done', 'cancel'))._action_confirm()
-            
-            seq = 0
-            for move in sorted(all_moves, key=lambda move: move.date):
-                seq += 5
-                move.sequence = seq
-            
+
             # NO asignar inmediatamente - deben esperar a la recepción
             # all_moves._action_assign()
-            
+
             forward_pickings = self.env['stock.picking']._get_impacted_pickings(all_moves)
             (all_pickings | forward_pickings).action_confirm()
-            
-            for picking in all_pickings:
-                if picking.state == 'confirmed':
-                    try:
-                        picking.write({'state': 'waiting'});
-                    except:
-                        pass
 
-                    for move in all_moves:
-                        if move.move_line_ids:
-                            move.move_line_ids.unlink()
-                        move.write({
-                            'quantity': 0,
-                        })
+            # Red de seguridad, una sola vez para toda la OC (antes se repetía por cada
+            # picking sobre TODOS los moves de la orden: 119 × 13.532 escrituras).
+            reservados = all_moves.filtered(lambda m: m.move_line_ids)
+            if reservados:
+                reservados.move_line_ids.unlink()
+                reservados.write({'quantity': 0})
+            confirmados = all_pickings.filtered(lambda p: p.state == 'confirmed')
+            if confirmados:
+                try:
+                    with self.env.cr.savepoint():
+                        confirmados.write({'state': 'waiting'})
+                except Exception as e:
+                    _logger.warning("Crossdock %s: no se pudo poner en espera %s: %s",
+                                    self.name, confirmados.mapped('name'), e)
 
             # Tras el confirm, los pickings que integran ya tienen su código WIS.
             # Propagar hacia adelante en cada cadena recepción→intermedio→crosspick.
@@ -1847,8 +1893,8 @@ class PurchaseOrder(models.Model):
 
         return distribuciones_con_contenido
 
-    def _create_crossdock_moves_for_picking(self, picking, location, lines_data):
-        moves = self.env['stock.move']
+    def _create_crossdock_moves_for_picking(self, picking, location, lines_data, cadena=None):
+        vals_list = []
 
         # Agrupar por producto
         product_quantities = {}
@@ -1868,8 +1914,10 @@ class PurchaseOrder(models.Model):
             product_quantities[product_id]['quantity'] += quantity
 
 
-        for idx, line_data in enumerate(lines_data):
-            _logger.info(f"  [{idx}] Producto: {line_data['line'].product_id.display_name}, Cantidad: {line_data['quantity']}")
+        if _logger.isEnabledFor(logging.DEBUG):
+            for idx, line_data in enumerate(lines_data):
+                _logger.debug("  [%s] Producto: %s, Cantidad: %s", idx,
+                              line_data['line'].product_id.display_name, line_data['quantity'])
 
         for product_id, data in product_quantities.items():
             line = data['line']
@@ -1897,11 +1945,9 @@ class PurchaseOrder(models.Model):
                 'procure_method': 'make_to_stock',
                 'warehouse_id': warehouse.id if warehouse else False,
             }
+            vals_list.append(move_vals)
 
-            move = self.env['stock.move'].create(move_vals)
-            moves |= move
-
-        return moves
+        return self._crossdock_crear_moves(vals_list, cadena)
 
     def _get_forum_partner_id(self):
         """Busca un contacto con nombre 'forum' (sin distinguir mayúsculas).

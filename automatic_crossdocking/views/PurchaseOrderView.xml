@@ -9,6 +9,26 @@
             <field name="inherit_id" ref="purchase.purchase_order_form"/>
             <field name="arch" type="xml">
         
+                <xpath expr="//header" position="inside">
+                    <button name="action_crossdock_reintentar_armado" type="object"
+                            string="Reintentar armado del crossdock"
+                            invisible="crossdock_armado_estado != 'error'"/>
+                </xpath>
+
+                <xpath expr="//sheet" position="before">
+                    <field name="crossdock_armado_estado" invisible="1"/>
+                    <div class="alert alert-info mb-0" role="status"
+                         invisible="crossdock_armado_estado != 'pendiente'">
+                        Las operaciones del crossdock se están armando en segundo plano.
+                        Recargá la orden en unos minutos para verlas.
+                    </div>
+                    <div class="alert alert-danger mb-0" role="alert"
+                         invisible="crossdock_armado_estado != 'error'">
+                        <strong>No se pudo armar el crossdock.</strong>
+                        <field name="crossdock_armado_error" class="d-block"/>
+                    </div>
+                </xpath>
+
                 <xpath expr="//div[hasclass('oe_button_box')]" position="inside">
                         <button invisible="state in ('draft', 'cancel')" name="llamarComponente" type="object" class="oe_stat_button" string="Editar distribucion"/>
                 </xpath>

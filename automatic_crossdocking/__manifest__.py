@@ -12,13 +12,14 @@
     'website': "https://avancesoftware.us/",
 
     'category': 'Uncategorized',
-    'version': '0.1',
+    'version': '0.2',
 
     'depends': ['base', 'web','web_grid', 'purchase', 'purchase_stock', 'purchase_order_type', 'stock'],
 
     'data': [
         'security/ir.model.access.csv',
         'security/security.xml',
+        'data/cron.xml',
         'views/PurchaseOrderView.xml',
         'views/PurchaseOrderLineView.xml',
         'views/PurchaseOrderType.xml',
