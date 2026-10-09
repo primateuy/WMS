@@ -77,14 +77,22 @@ class PurchaseOrder(models.Model):
             orden.crossdock_armado_intentos += 1
             self._crossdock_commit()
             inicio = time.time()
+            # Crear los moves también dispara el recálculo de los puntos de reorden: se
+            # protegen y, si el armado termina, se vuelven a encolar para que el cron los
+            # recalcule ya con los moves creados.
+            puntos = orden._crossdock_puntos_reorden_a_diferir(estados=('purchase', 'done'))
             try:
-                with self.env.cr.savepoint():
+                with self.env.cr.savepoint(), \
+                        self.env.protecting(orden._crossdock_campos_reorden(), puntos):
                     orden._crossdock_armar()
             except Exception as e:
                 _logger.exception("Crossdock %s: falló el armado", orden.name)
                 orden._crossdock_marcar_error(str(e))
             else:
                 orden.write({'crossdock_armado_estado': 'listo', 'crossdock_armado_error': False})
+                if puntos:
+                    self.env['crossdock.reorden.pendiente'].sudo()._encolar(
+                        orden.order_line.product_id.product_tmpl_id, orden)
                 orden.message_post(body=_(
                     "Crossdock armado: %(pickings)s operaciones en %(segundos)s s.",
                     pickings=len(orden.picking_ids), segundos=round(time.time() - inicio),
@@ -128,20 +136,46 @@ class PurchaseOrder(models.Model):
             'automatic_crossdocking.diferir_puntos_reorden', '1')
         return param not in ('0', 'False', 'false')
 
-    def _crossdock_puntos_reorden_a_diferir(self):
-        """Puntos de reorden que la confirmación de estas OC haría recalcular.
+    @api.model
+    def _crossdock_campos_reorden(self):
+        """Campos almacenados del punto de reorden que la compra hace recalcular.
+
+        `qty_to_order` (depende de las líneas de compra y de los proveedores de la
+        plantilla) y todo lo que depende de él en el mismo modelo, como
+        `forum_demand_effective`: si sólo se protegiera `qty_to_order`, el dependiente se
+        recalcularía igual y en el camino calcularía `qty_to_order` punto por punto.
+        """
+        Orderpoint = self.env['stock.warehouse.orderpoint']
+        nombres = {'qty_to_order'}
+        candidatos = [f for f in Orderpoint._fields.values() if f.store and f.compute]
+        agregado = True
+        while agregado:
+            agregado = False
+            for campo in candidatos:
+                if campo.name in nombres:
+                    continue
+                depende = {d.split('.')[0] for d in campo.get_depends(Orderpoint)[0]}
+                if depende & nombres:
+                    nombres.add(campo.name)
+                    agregado = True
+        return [Orderpoint._fields[n] for n in sorted(nombres)]
+
+    def _crossdock_puntos_reorden_a_diferir(self, estados=('draft', 'sent')):
+        """Puntos de reorden que la confirmación (o el armado) de estas OC haría recalcular.
 
         Son los de TODAS las variantes de las plantillas compradas, no sólo los de las
         variantes de la OC: agregar el proveedor a la ficha cambia la lista de proveedores
         de la plantilla, de la que depende `qty_to_order`.
         """
-        ordenes = self.filtered(lambda o: o.crossdock_enabled and o.state in ('draft', 'sent'))
+        ordenes = self.filtered(lambda o: o.crossdock_enabled and o.state in estados)
         if not ordenes or not ordenes._crossdock_diferir_puntos_reorden():
             return self.env['stock.warehouse.orderpoint']
         plantillas = ordenes.order_line.product_id.product_tmpl_id
         if not plantillas:
             return self.env['stock.warehouse.orderpoint']
-        return self.env['stock.warehouse.orderpoint'].sudo().search([
+        # Con los archivados: el core recalcula los campos almacenados de cualquier registro,
+        # activo o no (en prod hay ≈ 85 mil puntos de reorden archivados).
+        return self.env['stock.warehouse.orderpoint'].sudo().with_context(active_test=False).search([
             ('product_id.product_tmpl_id', 'in', plantillas.ids),
         ])
 
@@ -190,7 +224,7 @@ class CrossdockReordenPendiente(models.Model):
         Devuelve True si la plantilla terminó.
         """
         self.ensure_one()
-        Orderpoint = self.env['stock.warehouse.orderpoint'].sudo()
+        Orderpoint = self.env['stock.warehouse.orderpoint'].sudo().with_context(active_test=False)
         puntos = Orderpoint.search([
             ('product_id.product_tmpl_id', '=', self.product_tmpl_id.id),
             ('id', '>', self.ultimo_orderpoint_id),
@@ -198,8 +232,10 @@ class CrossdockReordenPendiente(models.Model):
         if not puntos:
             self.estado = 'hecho'
             return True
-        self.env.add_to_compute(Orderpoint._fields['qty_to_order'], puntos)
-        puntos.flush_recordset(['qty_to_order'])
+        campos = self.env['purchase.order']._crossdock_campos_reorden()
+        for campo in campos:
+            self.env.add_to_compute(campo, puntos)
+        puntos.flush_recordset([campo.name for campo in campos])
         self.ultimo_orderpoint_id = puntos[-1].id
         if len(puntos) < limite:
             self.estado = 'hecho'
@@ -234,6 +270,23 @@ class CrossdockReordenPendiente(models.Model):
 
 class StockMove(models.Model):
     _inherit = 'stock.move'
+
+    def _push_apply(self):
+        """En el armado del crossdock, no buscar regla push move por move si no hay ninguna.
+
+        Los moves encadenados no se empujan (el core los saltea por tener destino), pero los
+        del último eslabón —la recepción de cada sucursal— sí pasan por la búsqueda de regla,
+        una por move: ≈ 30 s en una OC de 500 líneas. Si ninguna regla push sale de esas
+        ubicaciones, el resultado es vacío de antemano.
+        """
+        if self and self.env.context.get('crossdock_armado'):
+            hay_reglas = self.env['stock.rule'].sudo().search_count([
+                ('location_src_id', 'in', self.location_dest_id.ids),
+                ('action', 'in', ('push', 'pull_push')),
+            ], limit=1)
+            if not hay_reglas:
+                return self.env['stock.move']
+        return super()._push_apply()
 
     def _trigger_scheduler(self):
         """En el armado del crossdock, no buscar regla por regla si no hay ninguna automática.

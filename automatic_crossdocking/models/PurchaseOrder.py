@@ -293,8 +293,7 @@ class PurchaseOrder(models.Model):
         # recalcula un cron por lotes (`crossdock.reorden.pendiente`).
         puntos = self._crossdock_puntos_reorden_a_diferir()
         if puntos:
-            campo = self.env['stock.warehouse.orderpoint']._fields['qty_to_order']
-            with self.env.protecting([campo], puntos):
+            with self.env.protecting(self._crossdock_campos_reorden(), puntos):
                 res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
             confirmadas = self.filtered(lambda o: o.state in ('purchase', 'done'))
             if confirmadas:
@@ -515,7 +514,7 @@ class PurchaseOrder(models.Model):
             # La secuencia ya viene en los vals (ver `_crossdock_crear_moves`).
             all_moves = all_moves.filtered(lambda x: x.state not in ('done', 'cancel'))._action_confirm()
 
-            forward_pickings = self.env['stock.picking']._get_impacted_pickings(all_moves)
+            forward_pickings = self._crossdock_pickings_siguientes(all_moves)
             (all_pickings | forward_pickings).action_confirm()
 
             # Tras el confirm, los pickings que integran ya tienen su código WIS.
@@ -882,6 +881,22 @@ class PurchaseOrder(models.Model):
             for move in moves:
                 cadena[(move.location_dest_id.id, move.product_id.id)].append(move.id)
         return moves
+
+    def _crossdock_pickings_siguientes(self, moves):
+        """Pickings de los moves siguientes en la cadena (directos e indirectos).
+
+        Hace lo mismo que `stock.picking._get_impacted_pickings`, pero recorre por ids: la
+        versión del core une recordsets move por move y, con decenas de miles de moves
+        encadenados, eso solo se lleva ≈ 40 s.
+        """
+        Move = self.env['stock.move']
+        explorados = set()
+        pendientes = set(moves.ids)
+        while pendientes:
+            explorados |= pendientes
+            siguientes = set(Move.browse(sorted(pendientes)).move_dest_ids.ids)
+            pendientes = siguientes - explorados
+        return Move.browse(sorted(explorados)).picking_id
 
     def _crossdock_armado_en_segundo_plano(self):
         if self.env.context.get('crossdock_armado_sincronico'):
@@ -1520,7 +1535,7 @@ class PurchaseOrder(models.Model):
             # NO asignar inmediatamente - deben esperar a la recepción
             # all_moves._action_assign()
 
-            forward_pickings = self.env['stock.picking']._get_impacted_pickings(all_moves)
+            forward_pickings = self._crossdock_pickings_siguientes(all_moves)
             (all_pickings | forward_pickings).action_confirm()
 
             # Red de seguridad, una sola vez para toda la OC (antes se repetía por cada

@@ -191,6 +191,14 @@ class TestCrossdockRendimiento(TransactionCase):
             'warehouse_id': self.almacen.id,
             'product_min_qty': 5, 'product_max_qty': 10, 'trigger': 'manual',
         })
+        # El core también recalcula los archivados: hay que protegerlos igual.
+        archivado = Orderpoint.create({
+            'product_id': self.productos[1].id,
+            'location_id': self.almacen.lot_stock_id.id,
+            'warehouse_id': self.almacen.id,
+            'product_min_qty': 5, 'product_max_qty': 10, 'trigger': 'manual',
+        })
+        archivado.active = False
         orden = self._orden(qty=100)
         self.env.flush_all()
 
@@ -207,6 +215,7 @@ class TestCrossdockRendimiento(TransactionCase):
             self.env.flush_all()
             self.assertNotIn(punto.id, recalculados,
                              "la confirmación no recalcula: lo deja para el cron")
+            self.assertNotIn(archivado.id, recalculados)
             pendiente = self.env['crossdock.reorden.pendiente'].search([
                 ('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id),
                 ('estado', '=', 'pendiente')])
@@ -214,6 +223,7 @@ class TestCrossdockRendimiento(TransactionCase):
 
             self.env['crossdock.reorden.pendiente']._cron_recalcular()
             self.assertIn(punto.id, recalculados)
+            self.assertIn(archivado.id, recalculados)
         self.assertEqual(pendiente.estado, 'hecho')
         punto.invalidate_recordset(['qty_to_order'])
         diferido = punto.qty_to_order
