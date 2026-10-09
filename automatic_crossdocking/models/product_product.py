@@ -24,8 +24,10 @@ class ProductProduct(models.Model):
             if vals['mutiplos_distribucion'] < 1:
                 raise ValueError("El campo 'Múltiplos de Distribución' debe ser un número entero positivo mayor o igual a 1.")
             
-            # Marcar que esta variante tiene un valor personalizado
-            vals['mutiplos_distribucion_override'] = True
+            # Marcar que esta variante tiene un valor personalizado, salvo que el valor venga
+            # de la plantilla (propagación).
+            if not self.env.context.get('multiplo_desde_plantilla'):
+                vals['mutiplos_distribucion_override'] = True
         
         # Si se desmarca el override, sincronizar con el template
         if 'mutiplos_distribucion_override' in vals and not vals['mutiplos_distribucion_override']:
