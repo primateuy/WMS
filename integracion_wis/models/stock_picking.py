@@ -17,6 +17,7 @@ class StockPicking(models.Model):
     wms_estado = fields.Selection(
         selection=[
             ("sin_enviar", "Sin enviar a WMS"),
+            ("en_cola", "En cola de envío a WMS"),
             ("enviado", "Enviado a WMS"),
             ("preparado", "Preparado por WMS"),
             ("despachado", "Despachado por WMS"),
@@ -291,7 +292,10 @@ class StockPicking(models.Model):
             state_actual, state_objetivo, estados_aceptados, state_actual in estados_aceptados,
         )
 
-        if state_objetivo and state_actual not in estados_aceptados:
+        # Desde la cola no se vuelve a exigir el estado de disparo: se cumplía al encolar y
+        # el picking pudo avanzar mientras esperaba (p. ej. de 'waiting' a 'assigned').
+        if (state_objetivo and state_actual not in estados_aceptados
+                and not self.env.context.get('wis_envio_desde_cola')):
             return False
 
         partner = self._get_wis_partner()
@@ -442,6 +446,30 @@ class StockPicking(models.Model):
             return "W-R-%s" % self.id
         return "W-P-%s" % self.id
 
+    def _wis_encolar_si_corresponde(self, tipo, hook_name):
+        """Con `wis_encolar_envios` en el contexto, encola el envío en lugar de hacerlo.
+
+        Lo usa el armado del crossdock: decenas de pedidos enviados en serie dentro de una
+        transacción larga suman minutos de espera, y si la transacción se corta después de
+        enviar, Odoo deshace todo pero WIS ya registró los pedidos. El código WIS se asigna
+        acá (es determinístico, lo genera Odoo), así que la cadena hereda su código igual que
+        antes y el cron de `wis.picking.cola` sólo hace el envío.
+
+        Devuelve True si encoló (el que llama no debe enviar).
+        """
+        self.ensure_one()
+        if not self.env.context.get('wis_encolar_envios'):
+            return False
+        codigo = self._wis_codigo_esperado(tipo)
+        self.with_context(skip_wms_integration=True).write({
+            'codigo_unico': codigo,
+            'wms_estado': 'en_cola',
+        })
+        self.env['wis.picking.cola'].sudo()._encolar(self, tipo)
+        _logger.info("[WIS] %s | picking=%s encolado para WMS (codigo_unico=%s)",
+                     hook_name, self.name, codigo)
+        return True
+
     def _wis_enviar_lpns_si_corresponde(self, datosAPI=None, force=False):
         """Crea los LPN de las cajas en WIS (POST /Lpn/Create) para devoluciones de caja cerrada.
 
@@ -507,6 +535,8 @@ class StockPicking(models.Model):
             if not estado_obj or record.state not in estados_aceptados:
                 continue
             tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+            if record._wis_encolar_si_corresponde(tipo, 'create'):
+                continue
             try:
                 response = record.enviarWS(tipo)
                 if response is not False:
@@ -589,6 +619,8 @@ class StockPicking(models.Model):
             if not estado_obj or record.state not in estados_aceptados:
                 continue
             tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+            if record._wis_encolar_si_corresponde(tipo, hook_name):
+                continue
             try:
                 response = record.enviarWS(tipo)
                 if response is not False:
@@ -713,6 +745,12 @@ class StockPicking(models.Model):
 
         TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
         datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
+        # Lo que todavía está en la cola nunca llegó a WIS: se saca de la cola y se cancela
+        # con el flujo estándar, sin notificar.
+        en_cola = self.filtered(lambda p: p.wms_estado == 'en_cola')
+        if en_cola:
+            self.env['wis.picking.cola'].sudo()._cancelar_de_pickings(en_cola)
+            en_cola.with_context(skip_wms_integration=True).write({'wms_estado': 'sin_enviar'})
         for picking in self:
             if (not picking.picking_type_id.integracion_wms
                     or not picking.codigo_unico
@@ -896,6 +934,8 @@ class StockPicking(models.Model):
             if record.picking_type_id.estado_disparo_wis not in ('done', False, ''):
                 continue
             tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+            if record._wis_encolar_si_corresponde(tipo, '_action_done'):
+                continue
             try:
                 response = record.enviarWS(tipo)
                 if response is not False:
@@ -1021,6 +1061,8 @@ class StockPicking(models.Model):
                     continue
 
                 tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
+                if record._wis_encolar_si_corresponde(tipo, 'write state'):
+                    continue
 
                 try:
                     response = record.enviarWS(tipo)
@@ -1231,6 +1273,8 @@ class StockMove(models.Model):
             if picking.state not in estados_aceptados:
                 continue
             tipo = picking.picking_type_id.tipo_pedido_wis or 'NORM'
+            if picking._wis_encolar_si_corresponde(tipo, '_action_confirm'):
+                continue
             _logger.info("[WIS] _action_confirm | picking=%s | state=%s | enviando a WMS", picking.name, picking.state)
             try:
                 response = picking.enviarWS(tipo)

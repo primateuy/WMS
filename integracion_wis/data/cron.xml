@@ -81,5 +81,20 @@
       <field name="active" eval="True"/>
     </record>
 
+
+    <!-- Envío en segundo plano de los pickings encolados (armado de crossdock). Se dispara
+         al encolar (_trigger); el intervalo es sólo la red de seguridad. -->
+    <record id="ir_cron_wis_picking_cola" model="ir.cron">
+      <field name="name">WIS: Cola de envíos de pickings</field>
+      <field name="model_id" ref="model_wis_picking_cola"/>
+      <field name="state">code</field>
+      <field name="code">model._cron_procesar()</field>
+      <field name="interval_number">5</field>
+      <field name="interval_type">minutes</field>
+      <field name="numbercall">-1</field>
+      <field name="doall" eval="False"/>
+      <field name="active" eval="True"/>
+    </record>
+
   </data>
 </odoo>

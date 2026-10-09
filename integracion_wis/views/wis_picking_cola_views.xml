@@ -1,0 +1,115 @@
+<odoo>
+  <data>
+
+    <record id="view_wis_picking_cola_tree" model="ir.ui.view">
+      <field name="name">wis.picking.cola.tree</field>
+      <field name="model">wis.picking.cola</field>
+      <field name="arch" type="xml">
+        <tree string="Cola de envíos de operaciones"
+              create="false"
+              decoration-success="estado == 'enviado'"
+              decoration-danger="estado == 'error'"
+              decoration-muted="estado == 'cancelado'">
+          <field name="create_date" string="Encolado"/>
+          <field name="picking_id"/>
+          <field name="codigo_unico"/>
+          <field name="origin" optional="show"/>
+          <field name="tipo"/>
+          <field name="intentos"/>
+          <field name="fecha_envio" optional="show"/>
+          <field name="ultimo_error" optional="hide"/>
+          <field name="estado" widget="badge"
+                 decoration-success="estado == 'enviado'"
+                 decoration-danger="estado == 'error'"
+                 decoration-info="estado == 'pendiente'"/>
+          <field name="company_id" groups="base.group_multi_company" optional="hide"/>
+        </tree>
+      </field>
+    </record>
+
+    <record id="view_wis_picking_cola_form" model="ir.ui.view">
+      <field name="name">wis.picking.cola.form</field>
+      <field name="model">wis.picking.cola</field>
+      <field name="arch" type="xml">
+        <form string="Envío de operación" create="false">
+          <header>
+            <button name="action_enviar_ahora" type="object"
+                    string="Enviar ahora" class="btn-primary"
+                    invisible="estado != 'pendiente'"/>
+            <button name="action_reintentar" type="object"
+                    string="Reintentar" class="btn-secondary"
+                    invisible="estado not in ('error', 'cancelado')"/>
+            <button name="action_cancelar" type="object"
+                    string="Cancelar" class="btn-secondary"
+                    invisible="estado not in ('pendiente', 'error')"/>
+            <field name="estado" widget="statusbar" statusbar_visible="pendiente,enviado"/>
+          </header>
+          <sheet>
+            <group>
+              <group>
+                <field name="picking_id" readonly="1"/>
+                <field name="codigo_unico"/>
+                <field name="origin"/>
+                <field name="tipo" readonly="1"/>
+              </group>
+              <group>
+                <field name="intentos"/>
+                <field name="fecha_envio"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+              </group>
+            </group>
+            <group string="Último error" invisible="not ultimo_error">
+              <field name="ultimo_error" nolabel="1" widget="text"/>
+            </group>
+          </sheet>
+        </form>
+      </field>
+    </record>
+
+    <record id="view_wis_picking_cola_search" model="ir.ui.view">
+      <field name="name">wis.picking.cola.search</field>
+      <field name="model">wis.picking.cola</field>
+      <field name="arch" type="xml">
+        <search string="Cola de envíos">
+          <field name="picking_id"/>
+          <field name="codigo_unico"/>
+          <field name="origin"/>
+          <filter name="filtro_pendiente" string="Pendientes"
+                  domain="[('estado', '=', 'pendiente')]"/>
+          <filter name="filtro_error" string="Con error"
+                  domain="[('estado', '=', 'error')]"/>
+          <filter name="filtro_enviado" string="Enviados"
+                  domain="[('estado', '=', 'enviado')]"/>
+          <group expand="0" string="Agrupar por">
+            <filter name="group_estado" string="Estado" context="{'group_by': 'estado'}"/>
+            <filter name="group_origen" string="Origen" context="{'group_by': 'origin'}"/>
+          </group>
+        </search>
+      </field>
+    </record>
+
+    <record id="action_wis_picking_cola" model="ir.actions.act_window">
+      <field name="name">Cola de envíos de operaciones</field>
+      <field name="res_model">wis.picking.cola</field>
+      <field name="view_mode">tree,form</field>
+      <field name="search_view_id" ref="view_wis_picking_cola_search"/>
+      <field name="context">{'search_default_filtro_pendiente': 1}</field>
+      <field name="help" type="html">
+        <p class="o_view_nocontent_smiling_face">
+          No hay operaciones esperando envío
+        </p>
+        <p>
+          Las operaciones que se arman en lote (por ejemplo el crossdock de una orden de
+          compra) se envían a WIS en segundo plano, de a una, desde esta cola.
+        </p>
+      </field>
+    </record>
+
+    <menuitem id="menu_wis_picking_cola"
+              name="Cola de operaciones"
+              parent="menu_integracion_wis_root"
+              action="action_wis_picking_cola"
+              sequence="36"/>
+
+  </data>
+</odoo>

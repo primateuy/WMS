@@ -3,3 +3,4 @@
 from . import test_integracion_productos
 from . import test_conciliacion_stock_fases
 from . import test_pedido_memo
+from . import test_cola_pickings

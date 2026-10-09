@@ -1027,7 +1027,10 @@ class IntegracionWIS(models.Model):
 
         if not tipo:
             raise ValidationError("Debe especificar el tipo de pedido que se va a insertar en WMS");
-        if vals.codigo_unico and vals.picking_type_id != 'creacion_actualiacion':
+        # Desde la cola el código se asigna al encolar (es el mismo que va en `nroPedido`):
+        # tenerlo no significa que ya se haya enviado.
+        if (vals.codigo_unico and vals.picking_type_id != 'creacion_actualiacion'
+                and not self.env.context.get('wis_envio_desde_cola')):
             raise ValidationError("El picking ya tiene un código único asignado, no se puede volver a enviar a WMS");
 
 

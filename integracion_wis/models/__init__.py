@@ -22,3 +22,4 @@ from . import webhook_log
 from . import sale_order
 from . import uom_wis
 from . import wis_sync_queue
+from . import wis_picking_cola
