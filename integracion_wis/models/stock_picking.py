@@ -1324,31 +1324,43 @@ class StockMove(models.Model):
         # skip_wms_integration corta la notificación a WIS: cubre los cambios de demanda
         # ORIGINADOS por WIS (ej. anulación parcial), que no deben re-notificarse a WIS.
         if 'product_uom_qty' in vals and not self.env.context.get('skip_wms_integration'):
-            for move in self:
-                picking = move.picking_id
-                if not picking or picking.wms_estado != 'enviado' or not picking.picking_type_id.integracion_wms:
-                    continue
-                datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
-                if not datosAPI:
-                    continue
-                try:
-                    datosAPI.actualizarReferenciaRecepcion(picking)
-                    self.env['wms.integracion.log'].create({
-                        'fecha': fields.Datetime.now(),
-                        'nivel': 'info',
-                        'modelo': 'stock.move',
-                        'texto': f"Cantidad de demanda actualizada en WMS para {picking.name}",
-                        'picking_id': picking.id,
-                        'resultado': 'exito',
-                        'detalle': f"Producto: {move.product_id.name}, Nueva cantidad: {vals.get('product_uom_qty')}",
-                    })
-                except Exception as e:
-                    self.env['wms.integracion.log'].create({
-                        'fecha': fields.Datetime.now(),
-                        'nivel': 'error',
-                        'modelo': 'stock.move',
-                        'texto': f"Error al actualizar cantidad en WMS para {picking.name}: {str(e)}",
-                        'picking_id': picking.id,
-                        'resultado': 'error',
-                    })
+            pickings = self.picking_id.filtered(
+                lambda p: p.wms_estado == 'enviado' and p.picking_type_id.integracion_wms)
+            if pickings:
+                # Una sola actualización por operación, al final de la transacción. Antes era
+                # una por movimiento modificado, y cada una mandaba la referencia completa:
+                # editar 200 líneas de una OC confirmada eran 200 envíos de 1.000 líneas.
+                pendientes = self.env.cr.precommit.data.setdefault('wis_actualizar_referencia', set())
+                if not pendientes:
+                    self.env.cr.precommit.add(self._wis_actualizar_referencias_pendientes)
+                pendientes.update(pickings.ids)
         return res
+
+    def _wis_actualizar_referencias_pendientes(self):
+        ids = self.env.cr.precommit.data.pop('wis_actualizar_referencia', set())
+        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
+        if not ids or not datosAPI:
+            return
+        for picking in self.env['stock.picking'].browse(sorted(ids)).exists():
+            try:
+                datosAPI.actualizarReferenciaRecepcion(picking)
+                self.env['wms.integracion.log'].create({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'info',
+                    'modelo': 'stock.move',
+                    'texto': f"Cantidad de demanda actualizada en WMS para {picking.name}",
+                    'picking_id': picking.id,
+                    'resultado': 'exito',
+                })
+            except Exception as e:
+                self.env['wms.integracion.log'].create({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'error',
+                    'modelo': 'stock.move',
+                    'texto': f"Error al actualizar cantidad en WMS para {picking.name}: {str(e)}",
+                    'picking_id': picking.id,
+                    'resultado': 'error',
+                })
+        # Los precommit corren DESPUÉS del flush de la transacción (sql_db.Cursor.flush):
+        # sin esto, los logs de arriba no llegan a la base.
+        self.env.flush_all()

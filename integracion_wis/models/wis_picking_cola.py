@@ -87,6 +87,15 @@ class WisPickingCola(models.Model):
             self.write({'estado': 'cancelado'})
             return False
 
+        # Productos que todavía se están integrando (cola de productos): se espera sin gastar
+        # intentos. Mandar ahora haría fallar el envío por «producto sin código WMS».
+        sin_codigo = picking.move_ids.product_id.filtered(lambda p: not p.codigo_unico)
+        if sin_codigo and self.env['wis.sync.queue'].search_count([
+                ('product_id', 'in', sin_codigo.ids),
+                ('estado', 'in', ('pendiente', 'procesando'))], limit=1):
+            self.ultimo_error = _("Esperando la integración de %s producto(s) con WIS.") % len(sin_codigo)
+            return False
+
         config = self.env['integracion_wis.integracion_wis']._get_config()
         max_intentos = (config.cola_max_intentos if config else 0) or 3
         codigo = picking.codigo_unico or picking._wis_codigo_esperado(self.tipo)

@@ -74,6 +74,27 @@ class WisIntegrarVariantesWizard(models.TransientModel):
                 "configuración de WIS antes de integrar."
             ))
 
+        # Con muchas variantes, integrarlas acá es una llamada a WIS por código de barras
+        # dentro de la confirmación: cientos de llamadas y el corte por tiempo. Por encima
+        # del umbral van a la cola urgente y la orden se confirma igual, con los envíos de
+        # sus operaciones también en cola: la cola de operaciones espera a que los productos
+        # tengan su código WIS antes de mandar la recepción.
+        umbral = int(self.env['ir.config_parameter'].sudo().get_param(
+            'integracion_wis.integrar_ahora_max_variantes', 50) or 50)
+        if len(self.variante_ids) > umbral:
+            self.variante_ids.filtered(lambda v: not v.integracion_wms).with_context(
+                _avoid_wms=True).write({'integracion_wms': True})
+            self.env['wis.sync.queue']._encolar(
+                self.variante_ids, origen='oc', origen_ref=self.order_id.name,
+                prioridad=PRIORIDAD_URGENTE)
+            self.order_id._wis_encolar_resto_variantes()
+            self.order_id.message_post(body=_(
+                "%s variante(s) sin integrar en WIS quedaron en la cola urgente. Las "
+                "operaciones de la orden se envían a WIS cuando estén integradas.")
+                % len(self.variante_ids))
+            return self.order_id.with_context(
+                wis_omitir_control=True, wis_encolar_envios=True).button_confirm()
+
         # 1. Las que la orden necesita: ahora, en un solo lote.
         self.variante_ids.filtered(lambda v: not v.integracion_wms).with_context(
             _avoid_wms=True).write({'integracion_wms': True})

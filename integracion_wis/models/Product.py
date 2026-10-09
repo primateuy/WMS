@@ -552,12 +552,18 @@ class Product(models.Model):
                 not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada()):
             return records
 
-        # Las variantes de un template marcado para WMS las maneja
-        # `_create_variant_ids` / `_encolar_variantes_wms`, por la cola.
-        a_enviar = records.filtered(
-            lambda r: r.integracion_wms and r.type == 'product'
-            and not r.product_tmpl_id.integracion_wms
+        # Una variante nueva de una plantilla integrada nace integrada. El campo es propio
+        # de la variante (por defecto False), así que la creada a mano —las plantillas con
+        # creación de variantes desactivada no pasan por `_create_variant_ids`— quedaba
+        # afuera de WIS para siempre. La cola no duplica: si `_create_variant_ids` también
+        # la encola, se queda con una sola entrada.
+        de_plantilla_integrada = records.filtered(
+            lambda r: not r.integracion_wms and r.type == 'product'
+            and r.product_tmpl_id.integracion_wms and not r.codigo_unico
         )
+        if de_plantilla_integrada:
+            de_plantilla_integrada.with_context(_avoid_wms=True).write({'integracion_wms': True})
+        a_enviar = records.filtered(lambda r: r.integracion_wms and r.type == 'product')
         if not a_enviar:
             return records
 
@@ -614,10 +620,16 @@ class Product(models.Model):
                     )
                     return res
 
-                # Con muchas variantes conviene un solo lote en vez de una
-                # llamada HTTP por registro.
+                # Varias variantes a la vez (guardar la plantilla, una edición masiva) van a la
+                # cola: mandarlas acá dejaba el guardado esperando a WIS —173 variantes eran
+                # 60 s de HTTP y el corte por límite de CPU—. Una sola sigue yendo en el momento.
                 if len(a_sincronizar) > 1:
-                    a_sincronizar._enviar_wms_en_lote(motivo='actualización masiva')
+                    self.env['wis.sync.queue']._encolar(
+                        a_sincronizar,
+                        origen='manual',
+                        origen_ref=f"Actualización de {len(a_sincronizar)} variante(s)",
+                        prioridad=PRIORIDAD_NORMAL,
+                    )
                 else:
                     for record in a_sincronizar:
                         try:

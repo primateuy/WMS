@@ -258,6 +258,10 @@ class WisSyncQueue(models.Model):
             grupo.procesar()
             self.env.cr.commit()
 
+        # Operaciones que esperaban a que estos productos se integraran: que salgan ya.
+        if 'wis.picking.cola' in self.env and self.env['wis.picking.cola'].search_count(
+                [('estado', '=', 'pendiente')], limit=1):
+            self.env['wis.picking.cola']._disparar_cron()
         return True
 
     # ------------------------------------------------------------------
