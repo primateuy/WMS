@@ -295,10 +295,11 @@ class PurchaseOrder(models.Model):
         if puntos:
             with self.env.protecting(self._crossdock_campos_reorden(), puntos):
                 res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
-            confirmadas = self.filtered(lambda o: o.state in ('purchase', 'done'))
-            if confirmadas:
-                self.env['crossdock.reorden.pendiente'].sudo()._encolar(
-                    confirmadas.order_line.product_id.product_tmpl_id, confirmadas)
+            # Las que quedaron para armar en segundo plano lo encolan al terminar el armado:
+            # recalcular antes sería hacerlo dos veces y competir con el armado por la base.
+            self.filtered(
+                lambda o: o.state in ('purchase', 'done') and o.crossdock_armado_estado != 'pendiente'
+            )._crossdock_encolar_reorden()
         else:
             res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
 

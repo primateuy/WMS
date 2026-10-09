@@ -78,8 +78,7 @@ class PurchaseOrder(models.Model):
             self._crossdock_commit()
             inicio = time.time()
             # Crear los moves también dispara el recálculo de los puntos de reorden: se
-            # protegen y, si el armado termina, se vuelven a encolar para que el cron los
-            # recalcule ya con los moves creados.
+            # protegen y se recalculan al final, con los moves ya creados.
             puntos = orden._crossdock_puntos_reorden_a_diferir(estados=('purchase', 'done'))
             try:
                 with self.env.cr.savepoint(), \
@@ -90,14 +89,15 @@ class PurchaseOrder(models.Model):
                 orden._crossdock_marcar_error(str(e))
             else:
                 orden.write({'crossdock_armado_estado': 'listo', 'crossdock_armado_error': False})
-                if puntos:
-                    self.env['crossdock.reorden.pendiente'].sudo()._encolar(
-                        orden.order_line.product_id.product_tmpl_id, orden)
                 orden.message_post(body=_(
                     "Crossdock armado: %(pickings)s operaciones en %(segundos)s s.",
                     pickings=len(orden.picking_ids), segundos=round(time.time() - inicio),
                 ))
                 _logger.info("Crossdock %s: armado en %.1f s", orden.name, time.time() - inicio)
+        # El recálculo de los puntos de reorden que la confirmación difirió se encola recién
+        # acá, termine como termine el armado: encolarlo al confirmar lo hacía correr en
+        # paralelo con el armado, compitiendo por la base, y descartar el resultado.
+        orden._crossdock_encolar_reorden()
         self._crossdock_commit()
 
         if self.search_count([('crossdock_armado_estado', '=', 'pendiente')], limit=1):
@@ -159,6 +159,13 @@ class PurchaseOrder(models.Model):
                     nombres.add(campo.name)
                     agregado = True
         return [Orderpoint._fields[n] for n in sorted(nombres)]
+
+    def _crossdock_encolar_reorden(self):
+        """Encola el recálculo diferido de los puntos de reorden de estas OC."""
+        ordenes = self.filtered('crossdock_enabled')
+        if ordenes and ordenes._crossdock_diferir_puntos_reorden():
+            self.env['crossdock.reorden.pendiente'].sudo()._encolar(
+                ordenes.order_line.product_id.product_tmpl_id, ordenes)
 
     def _crossdock_puntos_reorden_a_diferir(self, estados=('draft', 'sent')):
         """Puntos de reorden que la confirmación (o el armado) de estas OC haría recalcular.

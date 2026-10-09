@@ -131,6 +131,24 @@ class TestCrossdockRendimiento(TransactionCase):
         self.assertEqual(orden.crossdock_armado_estado, 'listo')
         self.assertEqual(orden.crossdock_armado_intentos, 1)
 
+    def test_armado_fallido_igual_encola_el_reorden(self):
+        """La confirmación ya cambió las líneas: el recálculo diferido se debe hacer igual."""
+        self.env['stock.warehouse.orderpoint'].create({
+            'product_id': self.productos[0].id,
+            'location_id': self.almacen.lot_stock_id.id,
+            'warehouse_id': self.almacen.id,
+            'product_min_qty': 1, 'product_max_qty': 2, 'trigger': 'manual',
+        })
+        orden = self._orden()
+        orden.button_confirm()
+        with patch.object(type(orden), '_crossdock_armar', autospec=True,
+                          side_effect=Exception("falta configuración")):
+            self.env['purchase.order']._cron_armar_crossdock()
+        self.assertEqual(orden.crossdock_armado_estado, 'error')
+        self.assertTrue(self.env['crossdock.reorden.pendiente'].search([
+            ('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id),
+            ('estado', '=', 'pendiente')]))
+
     def test_cron_registra_el_error_y_permite_reintentar(self):
         orden = self._orden()
         orden.button_confirm()
@@ -171,6 +189,8 @@ class TestCrossdockRendimiento(TransactionCase):
         orden.with_user(comprador).button_confirm()
         self.assertEqual(orden.state, 'purchase')
         self.assertEqual(orden.crossdock_armado_estado, 'pendiente')
+        with patch.object(type(orden), '_crossdock_armar', autospec=True):
+            self.env['purchase.order']._cron_armar_crossdock()
         self.assertTrue(self.env['crossdock.reorden.pendiente'].search([
             ('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id)]))
 
@@ -216,9 +236,16 @@ class TestCrossdockRendimiento(TransactionCase):
             self.assertNotIn(punto.id, recalculados,
                              "la confirmación no recalcula: lo deja para el cron")
             self.assertNotIn(archivado.id, recalculados)
-            pendiente = self.env['crossdock.reorden.pendiente'].search([
-                ('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id),
-                ('estado', '=', 'pendiente')])
+            Pendiente = self.env['crossdock.reorden.pendiente']
+            dominio = [('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id),
+                       ('estado', '=', 'pendiente')]
+            self.assertFalse(Pendiente.search(dominio),
+                             "con armado en segundo plano se encola al terminar el armado")
+
+            with patch.object(type(orden), '_crossdock_armar', autospec=True):
+                self.env['purchase.order']._cron_armar_crossdock()
+            self.assertNotIn(punto.id, recalculados)
+            pendiente = Pendiente.search(dominio)
             self.assertTrue(pendiente)
 
             self.env['crossdock.reorden.pendiente']._cron_recalcular()
