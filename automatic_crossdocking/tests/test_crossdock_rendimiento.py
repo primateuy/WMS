@@ -26,6 +26,8 @@ class TestCrossdockRendimiento(TransactionCase):
             Location.create({'name': n, 'usage': 'internal', 'location_id': padre.id})
             for n in ('Entrada', 'Intermedia 1', 'Crossdock 1', 'Crossdock 2', 'Tienda 1', 'Tienda 2')
         ]
+        # Los tests usan pocas reglas: se baja el umbral para que el recálculo se difiera.
+        cls.env['ir.config_parameter'].sudo().set_param('reorden_rendimiento.umbral', '0')
         cls.tipo = cls.env['stock.picking.type'].create({
             'name': 'Crossdock test', 'code': 'internal', 'sequence_code': 'XDT',
             'warehouse_id': cls.almacen.id, 'reservation_method': 'manual',
@@ -145,7 +147,7 @@ class TestCrossdockRendimiento(TransactionCase):
                           side_effect=Exception("falta configuración")):
             self.env['purchase.order']._cron_armar_crossdock()
         self.assertEqual(orden.crossdock_armado_estado, 'error')
-        self.assertTrue(self.env['crossdock.reorden.pendiente'].search([
+        self.assertTrue(self.env['reorden.recalculo.pendiente'].search([
             ('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id),
             ('estado', '=', 'pendiente')]))
 
@@ -191,7 +193,7 @@ class TestCrossdockRendimiento(TransactionCase):
         self.assertEqual(orden.crossdock_armado_estado, 'pendiente')
         with patch.object(type(orden), '_crossdock_armar', autospec=True):
             self.env['purchase.order']._cron_armar_crossdock()
-        self.assertTrue(self.env['crossdock.reorden.pendiente'].search([
+        self.assertTrue(self.env['reorden.recalculo.pendiente'].search([
             ('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id)]))
 
     def test_orden_sin_crossdock_no_cambia(self):
@@ -236,7 +238,7 @@ class TestCrossdockRendimiento(TransactionCase):
             self.assertNotIn(punto.id, recalculados,
                              "la confirmación no recalcula: lo deja para el cron")
             self.assertNotIn(archivado.id, recalculados)
-            Pendiente = self.env['crossdock.reorden.pendiente']
+            Pendiente = self.env['reorden.recalculo.pendiente']
             dominio = [('product_tmpl_id', '=', self.productos[0].product_tmpl_id.id),
                        ('estado', '=', 'pendiente')]
             self.assertFalse(Pendiente.search(dominio),
@@ -248,7 +250,7 @@ class TestCrossdockRendimiento(TransactionCase):
             pendiente = Pendiente.search(dominio)
             self.assertTrue(pendiente)
 
-            self.env['crossdock.reorden.pendiente']._cron_recalcular()
+            self.env['reorden.recalculo.pendiente']._cron_recalcular()
             self.assertIn(punto.id, recalculados)
             self.assertIn(archivado.id, recalculados)
         self.assertEqual(pendiente.estado, 'hecho')

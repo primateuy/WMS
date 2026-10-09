@@ -286,22 +286,8 @@ class PurchaseOrder(models.Model):
 
 
     def button_confirm(self, *args, **kwargs):
-        # Confirmar la compra recalcula la «cantidad a pedir» de los puntos de reorden de
-        # todas las variantes de las plantillas compradas (cambia el estado de las líneas y,
-        # si el proveedor es nuevo, la lista de proveedores de la plantilla). En una OC de
-        # crossdock son decenas de miles de puntos de reorden: se protegen acá y los
-        # recalcula un cron por lotes (`crossdock.reorden.pendiente`).
-        puntos = self._crossdock_puntos_reorden_a_diferir()
-        if puntos:
-            with self.env.protecting(self._crossdock_campos_reorden(), puntos):
-                res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
-            # Las que quedaron para armar en segundo plano lo encolan al terminar el armado:
-            # recalcular antes sería hacerlo dos veces y competir con el armado por la base.
-            self.filtered(
-                lambda o: o.state in ('purchase', 'done') and o.crossdock_armado_estado != 'pendiente'
-            )._crossdock_encolar_reorden()
-        else:
-            res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
+        # El recálculo de las reglas de reabastecimiento lo difiere `reorden_rendimiento`.
+        res = super(PurchaseOrder, self).button_confirm(*args, **kwargs)
 
         if self.exceso:
             self.message_post(body=f"⚠️ La distribución ha generado un exceso. Se ajustó las cantidades para evitar errores en el inventario.")
@@ -821,7 +807,7 @@ class PurchaseOrder(models.Model):
         """
         self.ensure_one()
         order = self.with_company(self.company_id).with_context(
-            crossdock_armado=True, wis_encolar_envios=True)
+            crossdock_armado=True, stock_proceso_masivo=True, wis_encolar_envios=True)
 
         lineas_regulares = order.order_line.filtered(lambda l: not l.use_crossdock)
         lineas_crossdock = order.order_line.filtered(lambda l: l.use_crossdock)

@@ -1,3 +1,1 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_crossdock_reorden_pendiente_user,crossdock.reorden.pendiente.user,model_crossdock_reorden_pendiente,purchase.group_purchase_user,1,0,0,0
-access_crossdock_reorden_pendiente_manager,crossdock.reorden.pendiente.manager,model_crossdock_reorden_pendiente,base.group_system,1,1,1,1
