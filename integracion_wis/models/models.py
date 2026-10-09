@@ -2,6 +2,7 @@ from odoo import models, fields, api, tools, _
 from odoo.exceptions import ValidationError
 import json
 import logging
+import threading
 import time
 _logger = logging.getLogger(__name__)
 
@@ -233,16 +234,42 @@ class IntegracionWIS(models.Model):
 
         if req.status_code == 200:
             reqJson = req.json()
-
-            self.token = reqJson.get('access_token')
             expires_in = reqJson.get('expires_in') or 3600
-            self.expiracionToken = datetime.datetime.now() + datetime.timedelta(seconds=expires_in)
+            self._wis_guardar_token(
+                reqJson.get('access_token'),
+                datetime.datetime.now() + datetime.timedelta(seconds=expires_in))
 
         else:
             raise ValidationError(f"Hubo un problema en la request: {req.text}")
 
         
 
+
+    def _wis_guardar_token(self, token, expiracion):
+        """Guarda el token renovado sin bloquear la fila de configuración.
+
+        La renovación ocurre en medio de transacciones largas (un armado de crossdock, una
+        sincronización de productos). Escribir la fila ahí la deja bloqueada hasta el final de
+        esa transacción, y cualquier otro proceso que necesite el token espera; si la larga
+        se cae, el token nuevo se pierde. Se graba en un cursor propio, que confirma enseguida,
+        y en esta transacción sólo se actualiza el caché.
+        """
+        self.ensure_one()
+        if getattr(threading.current_thread(), 'testing', False):
+            self.write({'token': token, 'expiracionToken': expiracion})
+            return
+        try:
+            with self.env.registry.cursor() as cr:
+                cr.execute("SET LOCAL lock_timeout = '3s'")
+                cr.execute(
+                    'UPDATE integracion_wis_integracion_wis '
+                    'SET token = %s, "expiracionToken" = %s WHERE id = %s',
+                    [token, expiracion, self.id])
+        except Exception as e:
+            # Sin grabar igual sirve para esta transacción; la próxima renovará otra vez.
+            _logger.warning("[WIS] No se pudo grabar el token renovado: %s", e)
+        self.env.cache.update(self, self._fields['token'], [token])
+        self.env.cache.update(self, self._fields['expiracionToken'], [expiracion])
 
     def consultarAPI(self, link, params, body, method='GET'):
 

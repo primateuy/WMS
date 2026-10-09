@@ -953,12 +953,18 @@ class StockPicking(models.Model):
         # Al enviar a WIS (wms_estado -> 'enviado'), fijar wis_cantidad_original en los moves
         # UNA SOLA VEZ. Es la base para validar/auditar anulaciones parciales contra la demanda
         # original. Todos los puntos de envío escriben wms_estado='enviado', así que esto los cubre.
-        if vals.get('wms_estado') == 'enviado':
-            for record in self:
-                for m in record.move_ids.filtered(
-                        lambda mv: not mv.wis_cantidad_original and mv.product_uom_qty):
-                    m.with_context(skip_wms_integration=True).write(
-                        {'wis_cantidad_original': m.product_uom_qty})
+        if vals.get('wms_estado') == 'enviado' and self.ids:
+            # Una sola sentencia en lugar de un write por move (un pedido de crossdock son
+            # cientos de moves). Campo plano, sin dependientes: no hace falta el ORM.
+            self.env['stock.move'].flush_model(['product_uom_qty', 'wis_cantidad_original'])
+            self.env.cr.execute("""
+                UPDATE stock_move
+                   SET wis_cantidad_original = product_uom_qty
+                 WHERE picking_id IN %s
+                   AND COALESCE(wis_cantidad_original, 0) = 0
+                   AND COALESCE(product_uom_qty, 0) <> 0
+            """, [tuple(self.ids)])
+            self.env['stock.move'].invalidate_model(['wis_cantidad_original'])
 
         if (not self.env.context.get('skip_wms_integration') and
                 self.env['integracion_wis.integracion_wis']._comunicacion_habilitada() and
@@ -1022,13 +1028,20 @@ class StockPicking(models.Model):
                         wms_vals = {'wms_estado': 'enviado'}
                         if isinstance(response, dict):
                             wms_vals['idPedidoWMS'] = response.get('numeroInterfaz', '')
-                            wms_vals['codigo_unico'] = response.get('codigoUnico', '')
-                            
+                            wms_vals['codigo_unico'] = (
+                                response.get('codigoUnico') or record._wis_codigo_esperado(tipo))
+                        else:
+                            wms_vals['codigo_unico'] = record._wis_codigo_esperado(tipo)
                         record.with_context(skip_wms_integration=True).write(wms_vals)
                         record._wis_registrar_envio(wms_vals.get('codigo_unico', ''), tipo)
                 except Exception as e:
-                    record._wis_registrar_envio('', tipo, ok=False, error=str(e))
-                    raise
+                    # Igual que los demás puntos de envío: el código se persiste y el error
+                    # queda en el log. Antes se relanzaba y una falla de WIS anulaba entera la
+                    # operación que cambió el estado (p. ej. la confirmación de la compra).
+                    _logger.exception("[WIS] write state | error en picking=%s: %s", record.name, e)
+                    cod_local = record._wis_codigo_esperado(tipo)
+                    record.with_context(skip_wms_integration=True).write({'codigo_unico': cod_local})
+                    record._wis_registrar_envio(cod_local, tipo, ok=False, error=str(e))
         return res
 
 
