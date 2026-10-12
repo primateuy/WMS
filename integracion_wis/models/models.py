@@ -2,6 +2,7 @@ from odoo import models, fields, api, tools, _
 from odoo.exceptions import ValidationError
 import json
 import logging
+import re
 import threading
 import time
 _logger = logging.getLogger(__name__)
@@ -27,6 +28,36 @@ class WisErrorGeneral(ValidationError):
 
     Hereda de ValidationError para que quien ya atrapa ese error siga igual.
     """
+
+
+class WisTimeout(WisErrorGeneral):
+    """WIS recibió el pedido y no contestó a tiempo.
+
+    No es «no llegó»: lo más probable es que WIS lo siga procesando. Reenviarlo
+    enseguida le carga el mismo trabajo dos veces, que es como un envío pesado
+    termina saturando a WIS. Quien lo atrapa espera antes de volver a mandarlo.
+    """
+
+
+# Identificador que WIS adjunta a sus errores no controlados («consulte con
+# sistemas indicando el LogId»): es lo que hay que pasarles para que lo busquen.
+_RE_LOG_ID_WIS = re.compile(r'"LogI[Dd]"\s*:\s*"([^"]+)"')
+
+
+def log_id_wis(texto):
+    """El LogID de un error de WIS, o False si no trae."""
+    encontrado = _RE_LOG_ID_WIS.search(texto or '')
+    return encontrado.group(1) if encontrado else False
+
+
+# Escalones de la pausa general ante WIS sin responder: 1.ª falla seguida, 2.ª, 3.ª o más.
+PAUSA_WIS_MINUTOS = (5, 15, 60)
+# Lo que tarda como máximo una corrida de cron antes de que Odoo la mate (240 s de
+# reloj en los servidores), con margen. Las colas no empiezan un envío que no entre.
+LIMITE_CORRIDA_CRON = 200
+TIMEOUT_API_POR_DEFECTO = 60
+TIMEOUT_OPERACIONES_POR_DEFECTO = 120
+TIMEOUT_MAXIMO = 150
 
 
 class ErrorConsultaStockWIS(ValidationError):
@@ -164,6 +195,49 @@ class IntegracionWIS(models.Model):
              'generales (credenciales, conexión) no cuentan como intento.',
     )
 
+    reintentar_errores_datos = fields.Boolean(
+        string='Reintentar solos los rechazos de WIS',
+        default=False,
+        help='Si está activo, un producto u operación que WIS rechaza por sus datos se '
+             'reintenta solo, cada 15 minutos, hasta los reintentos máximos. Apagado '
+             '(recomendado por WIS) queda con error y sale sólo con «Reintentar»: '
+             'reenviar el mismo dato no lo corrige y le suma carga a WIS. Los problemas '
+             'de conexión y los timeouts se reintentan siempre, con espera.',
+    )
+
+    timeout_api = fields.Integer(
+        string='Tiempo de espera de WIS (s)',
+        default=TIMEOUT_API_POR_DEFECTO,
+        help='Cuánto espera Odoo la respuesta de WIS en cada llamada (productos, '
+             'códigos de barras, consultas). Pasado ese tiempo el envío queda «sin '
+             'confirmar» y no se reenvía enseguida.',
+    )
+
+    timeout_api_operaciones = fields.Integer(
+        string='Tiempo de espera de recepciones y pedidos (s)',
+        default=TIMEOUT_OPERACIONES_POR_DEFECTO,
+        help='Igual que el anterior, para recepciones, pedidos y devoluciones: una '
+             'recepción de cientos de líneas tarda en WIS bastante más que un producto. '
+             f'Máximo {TIMEOUT_MAXIMO} s: Odoo corta cualquier proceso que pase los 240 s.',
+    )
+
+    espera_timeout_minutos = fields.Integer(
+        string='Espera tras un timeout (min)',
+        default=30,
+        help='Después de un timeout la operación no se reenvía hasta pasado este '
+             'tiempo, para que WIS termine de procesar lo que ya recibió.',
+    )
+
+    pausa_hasta = fields.Datetime(
+        string='Envíos a WIS en pausa hasta', readonly=True, copy=False,
+        help='WIS no respondió (timeout, caído, sobrecargado): las colas no le mandan '
+             'nada hasta esta hora. Cada falla seguida alarga la pausa (5, 15, 60 min); '
+             'el primer envío que sale bien la levanta.',
+    )
+
+    pausa_fallos = fields.Integer(
+        string='Fallas seguidas de WIS', readonly=True, copy=False, default=0)
+
     bloquear_oc_sin_integrar = fields.Boolean(
         string='Bloquear confirmación de OC con variantes sin integrar',
         default=False,
@@ -205,6 +279,83 @@ class IntegracionWIS(models.Model):
     _sql_constraints = [
         ('company_unique', 'unique(company_id)', '¡Solo puede existir una configuración por compañía!'),
     ]
+
+    @api.constrains('timeout_api', 'timeout_api_operaciones')
+    def _check_timeouts(self):
+        for config in self:
+            for valor in (config.timeout_api, config.timeout_api_operaciones):
+                if valor and not 5 <= valor <= TIMEOUT_MAXIMO:
+                    raise ValidationError(_(
+                        "El tiempo de espera de WIS tiene que estar entre 5 y %s segundos.")
+                        % TIMEOUT_MAXIMO)
+
+    def _timeout(self, operaciones=False):
+        """Segundos de espera por llamada a WIS."""
+        if not self:
+            return TIMEOUT_OPERACIONES_POR_DEFECTO if operaciones else TIMEOUT_API_POR_DEFECTO
+        self.ensure_one()
+        if operaciones:
+            return self.timeout_api_operaciones or TIMEOUT_OPERACIONES_POR_DEFECTO
+        return self.timeout_api or TIMEOUT_API_POR_DEFECTO
+
+    # ------------------------------------------------------------------
+    # Pausa general: WIS no responde
+    # ------------------------------------------------------------------
+    def _wis_en_pausa(self):
+        """True si las colas no deben mandarle nada a WIS todavía."""
+        return bool(self and self.pausa_hasta and self.pausa_hasta > fields.Datetime.now())
+
+    def _wis_pausar(self, motivo=''):
+        """WIS no respondió: las colas paran un rato, más largo cuanto más se repite.
+
+        Sin esto cada cola reintentaba en la corrida siguiente —segundos después—
+        y, con WIS lento, cada reintento le sumaba trabajo: así llegaban a WIS
+        reintentos sin que nadie estuviera operando en Odoo.
+        """
+        if not self:
+            return
+        self.ensure_one()
+        fallos = (self.pausa_fallos or 0) + 1
+        minutos = PAUSA_WIS_MINUTOS[min(fallos, len(PAUSA_WIS_MINUTOS)) - 1]
+        hasta = fields.Datetime.now() + datetime.timedelta(minutes=minutos)
+        _logger.warning("[WIS] Envíos a WIS en pausa %s min (falla seguida n.º %s): %s",
+                        minutos, fallos, motivo)
+        self._wis_grabar_pausa(hasta, fallos)
+
+    def _wis_levantar_pausa(self):
+        """WIS respondió: se vuelve a enviar normal. No escribe si no había pausa."""
+        if self and (self.pausa_fallos or self.pausa_hasta):
+            self._wis_grabar_pausa(False, 0)
+
+    def _wis_grabar_pausa(self, hasta, fallos):
+        """Graba la pausa en un cursor propio, como el token: la fila de configuración
+        la leen todos los procesos y no puede quedar tomada por la transacción de la cola."""
+        if getattr(threading.current_thread(), 'testing', False):
+            self.write({'pausa_hasta': hasta, 'pausa_fallos': fallos})
+            return
+        try:
+            with self.env.registry.cursor() as cr:
+                cr.execute("SET LOCAL lock_timeout = '3s'")
+                cr.execute(
+                    'UPDATE integracion_wis_integracion_wis '
+                    'SET pausa_hasta = %s, pausa_fallos = %s WHERE id = %s',
+                    [hasta or None, fallos, self.id])
+        except Exception as e:
+            _logger.warning("[WIS] No se pudo grabar la pausa de envíos: %s", e)
+        self.env.cache.update(self, self._fields['pausa_hasta'], [hasta or False])
+        self.env.cache.update(self, self._fields['pausa_fallos'], [fallos])
+
+    @api.model
+    def _presupuesto_corrida(self, llamadas_por_envio=1, operaciones=False):
+        """Segundos que una corrida de cola puede seguir empezando envíos.
+
+        Un envío puede tardar el timeout entero (o varios, si son varias llamadas):
+        el que arranca al final del presupuesto tiene que terminar antes de que
+        Odoo mate la corrida. Matarla a mitad de un envío es peor que un timeout:
+        no queda registrado nada.
+        """
+        timeout = self._get_config()._timeout(operaciones)
+        return max(LIMITE_CORRIDA_CRON - llamadas_por_envio * timeout, 20)
 
     @api.model
     def _get_config(self):
@@ -250,7 +401,8 @@ class IntegracionWIS(models.Model):
         }
 
         try:
-            req = requests.post(self.url_access_token, headers=headers, data=body, timeout=30)
+            req = requests.post(self.url_access_token, headers=headers, data=body,
+                                timeout=self._timeout())
         except requests.exceptions.RequestException as e:
             raise WisErrorGeneral(f"No se pudo conectar con WIS para renovar el token: {e}")
 
@@ -294,7 +446,16 @@ class IntegracionWIS(models.Model):
         self.env.cache.update(self, self._fields['token'], [token])
         self.env.cache.update(self, self._fields['expiracionToken'], [expiracion])
 
-    def consultarAPI(self, link, params, body, method='GET'):
+    def consultarAPI(self, link, params, body, method='GET', operaciones=False):
+        """Llama a WIS. Lanza:
+
+        - `WisTimeout` si WIS no contestó a tiempo (probablemente lo siga procesando);
+        - `WisErrorGeneral` si WIS no atendió (credenciales, conexión, 502/503/504...);
+        - `ValidationError` si WIS rechazó lo enviado (400, 500 con LogID): un error
+          de datos, que no se arregla reenviando.
+
+        `operaciones=True` usa el tiempo de espera de recepciones y pedidos.
+        """
 
         if not self.apiLink or not self.client_id or not self.client_secret or not self.url_access_token or not self.empresa_id:
             raise ValidationError("Faltan datos para acceder a la API")
@@ -313,7 +474,8 @@ class IntegracionWIS(models.Model):
         api_url = self._get_clean_api_url()
 
         try:
-            req = requests.request(url=api_url + link, method=method, json=body, headers=headers, params=params, timeout=30)
+            req = requests.request(url=api_url + link, method=method, json=body, headers=headers,
+                                   params=params, timeout=self._timeout(operaciones))
             _logger.info(f"REQ: {req.text}")
             _logger.info(f"JSON ES BODY => {body}")
             if req.status_code != 200:
@@ -330,6 +492,9 @@ class IntegracionWIS(models.Model):
 
         except WisErrorGeneral:
             raise
+        except requests.exceptions.ReadTimeout as e:
+            _logger.error(f"WIS no respondió a tiempo: {str(e)}")
+            raise WisTimeout(f"WIS no respondió a tiempo (timeout): {str(e)}")
         except requests.exceptions.RequestException as e:
             # Timeout o conexión: WIS pudo haber procesado el lote igual. Reintentar
             # de a uno sólo duplicaría el envío y multiplicaría la espera.
@@ -763,7 +928,7 @@ class IntegracionWIS(models.Model):
                 url=f"{api_url}/CodigoBarras/GetCodigoBarras",
                 headers={"Authorization": f"Bearer {self.token}"},
                 params=params,
-                timeout=30,
+                timeout=min(30, self._timeout()),
             )
         except Exception as e:
             _logger.warning("[WIS] No se pudo consultar el código de barras %s: %s — se asume alta",
@@ -1200,7 +1365,7 @@ class IntegracionWIS(models.Model):
             link="/Pedido/Create",
             body=payload,
             params=None,
-            method="POST"
+            method="POST", operaciones=True
         )
 
         response['codigoUnico'] = nro_pedido
@@ -1274,7 +1439,7 @@ class IntegracionWIS(models.Model):
                 link="/ReferenciaRecepcion/Create",
                 body=payload,
                 params=None,
-                method="POST"
+                method="POST", operaciones=True
             )
 
             response['codigoUnico'] = codigo
@@ -1400,7 +1565,7 @@ class IntegracionWIS(models.Model):
             link="/Lpn/Create",
             body=payload,
             params=None,
-            method="POST"
+            method="POST", operaciones=True
         )
         _logger.info("[WIS] insertarLpns: %s LPN(s) creados para %s", len(lpns), picking.name)
         return response
@@ -1508,7 +1673,7 @@ class IntegracionWIS(models.Model):
             link="/ReferenciaRecepcion/Create",
             body=payload,
             params=None,
-            method="POST"
+            method="POST", operaciones=True
         )
 
         response['codigoUnico'] = codigo
@@ -1663,7 +1828,7 @@ class IntegracionWIS(models.Model):
                 self.renovarToken()
             req = requests.request(
                 url=self._get_clean_api_url() + traza['endpoint'], method='POST',
-                json=body, timeout=30,
+                json=body, timeout=self._timeout(),
                 headers={"Content-Type": "application/json", "accept-language": "es",
                          "Authorization": f"Bearer {self.token}"})
         except Exception as e:

@@ -9,6 +9,7 @@
               create="false"
               decoration-success="estado == 'enviado'"
               decoration-danger="estado == 'error'"
+              decoration-warning="estado == 'pendiente' and tipo_error in ('sin_confirmar', 'transitorio')"
               decoration-muted="estado == 'cancelado'">
           <field name="create_date" string="Encolado"/>
           <field name="picking_id"/>
@@ -16,13 +17,17 @@
           <field name="origin" optional="show"/>
           <field name="tipo"/>
           <field name="intentos"/>
+          <field name="tipo_error" optional="show"/>
+          <field name="proximo_intento" optional="show"/>
           <field name="fecha_envio" optional="show"/>
+          <field name="log_id" optional="show"/>
           <field name="ultimo_error" optional="hide"/>
           <field name="estado" widget="badge"
                  decoration-success="estado == 'enviado'"
                  decoration-danger="estado == 'error'"
-                 decoration-info="estado == 'pendiente'"/>
+                 decoration-info="estado in ('pendiente', 'procesando')"/>
           <field name="company_id" groups="base.group_multi_company" optional="hide"/>
+          <field name="prioridad" column_invisible="1"/>
         </tree>
       </field>
     </record>
@@ -35,14 +40,15 @@
           <header>
             <button name="action_enviar_ahora" type="object"
                     string="Enviar ahora" class="btn-primary"
-                    invisible="estado != 'pendiente'"/>
+                    invisible="estado not in ('pendiente', 'error')"
+                    help="La pone primera en la fila: la envía el proceso en segundo plano en unos segundos."/>
             <button name="action_reintentar" type="object"
                     string="Reintentar" class="btn-secondary"
-                    invisible="estado not in ('error', 'cancelado')"/>
+                    invisible="estado not in ('error', 'cancelado') and not (estado == 'pendiente' and proximo_intento)"/>
             <button name="action_cancelar" type="object"
                     string="Cancelar" class="btn-secondary"
                     invisible="estado not in ('pendiente', 'error')"/>
-            <field name="estado" widget="statusbar" statusbar_visible="pendiente,enviado"/>
+            <field name="estado" widget="statusbar" statusbar_visible="pendiente,procesando,enviado"/>
           </header>
           <sheet>
             <group>
@@ -54,6 +60,9 @@
               </group>
               <group>
                 <field name="intentos"/>
+                <field name="tipo_error"/>
+                <field name="proximo_intento"/>
+                <field name="log_id"/>
                 <field name="fecha_envio"/>
                 <field name="company_id" groups="base.group_multi_company"/>
               </group>
@@ -78,10 +87,15 @@
                   domain="[('estado', '=', 'pendiente')]"/>
           <filter name="filtro_error" string="Con error"
                   domain="[('estado', '=', 'error')]"/>
+          <filter name="filtro_sin_confirmar" string="Sin confirmar (timeout)"
+                  domain="[('tipo_error', '=', 'sin_confirmar'), ('estado', '=', 'pendiente')]"/>
+          <filter name="filtro_rechazadas" string="Rechazadas por WIS"
+                  domain="[('tipo_error', '=', 'datos')]"/>
           <filter name="filtro_enviado" string="Enviados"
                   domain="[('estado', '=', 'enviado')]"/>
           <group expand="0" string="Agrupar por">
             <filter name="group_estado" string="Estado" context="{'group_by': 'estado'}"/>
+            <filter name="group_tipo_error" string="Motivo" context="{'group_by': 'tipo_error'}"/>
             <filter name="group_origen" string="Origen" context="{'group_by': 'origin'}"/>
           </group>
         </search>
@@ -101,6 +115,11 @@
         <p>
           Las operaciones que se arman en lote (por ejemplo el crossdock de una orden de
           compra) se envían a WIS en segundo plano, de a una, desde esta cola.
+        </p>
+        <p>
+          Lo que WIS rechaza queda con error y se reenvía con «Reintentar». Si WIS no
+          contesta a tiempo, la operación queda «sin confirmar» y espera antes de
+          reenviarse, para no mandarle dos veces lo que probablemente ya está procesando.
         </p>
       </field>
     </record>

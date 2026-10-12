@@ -67,6 +67,14 @@
             <field name="exigir_integracion_oc"/>
             <field name="bloquear_oc_sin_integrar"/>
           </group>
+          <group string="Envíos a WIS: esperas y reintentos">
+            <field name="timeout_api"/>
+            <field name="timeout_api_operaciones"/>
+            <field name="espera_timeout_minutos"/>
+            <field name="reintentar_errores_datos"/>
+            <field name="pausa_hasta" invisible="not pausa_hasta"/>
+            <field name="pausa_fallos" invisible="not pausa_fallos"/>
+          </group>
           <group string="Ajustes WIS">
             <field name="picking_type_ajuste_wis_id"
                    options="{'no_create': True}"

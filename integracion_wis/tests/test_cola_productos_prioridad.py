@@ -36,7 +36,12 @@ class TestColaProductosPrioridad(TransactionCase):
             })
         cls.config.write({'comunicacion_activa': True, 'cola_max_intentos': 5,
                           'chunk_size_productos': 200, 'cola_productos_por_corrida': 500,
-                          'verificar_barcode_existente': False})
+                          'verificar_barcode_existente': False,
+                          # Estos tests fijan el reintento automático de los rechazos;
+                          # el comportamiento por defecto (sin reintento) está en
+                          # test_reintentos_wis.
+                          'reintentar_errores_datos': True,
+                          'pausa_hasta': False, 'pausa_fallos': 0})
         cls.Cola = cls.env['wis.sync.queue']
         cls.Producto = cls.env['product.product']
 

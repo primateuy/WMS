@@ -2,6 +2,7 @@ from odoo import models, fields, api
 import requests
 from odoo.exceptions import ValidationError, UserError
 from markupsafe import Markup
+from .models import WisErrorGeneral
 import base64;
 import gzip;
 
@@ -390,7 +391,10 @@ class StockPicking(models.Model):
             
             
             return response;
-        
+
+        except WisErrorGeneral:
+            # Timeout o WIS sin atender: la cola necesita saberlo para no reenviar en el acto.
+            raise
         except Exception as e:
             _logger.error("Error en integración WMS para picking %s: %s", self.id, str(e))
             raise ValidationError(f"Error en integración WMS: {str(e)}")

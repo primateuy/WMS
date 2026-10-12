@@ -23,7 +23,9 @@ class TestColaPickingsWIS(TransactionCase):
                 'apiLink': 'https://example.invalid/api',
                 'company_id': cls.env.company.id,
             })
-        cls.config.write({'comunicacion_activa': True, 'cola_max_intentos': 3})
+        cls.config.write({'comunicacion_activa': True, 'cola_max_intentos': 3,
+                          'reintentar_errores_datos': False,
+                          'pausa_hasta': False, 'pausa_fallos': 0})
 
         cls.almacen = cls.env['stock.warehouse'].search(
             [('company_id', '=', cls.env.company.id)], limit=1)
@@ -107,19 +109,23 @@ class TestColaPickingsWIS(TransactionCase):
         self.assertEqual(picking.move_ids.wis_cantidad_original, 7,
                          "la cantidad original se fija al pasar a 'enviado'")
 
-    def test_falla_reintenta_en_la_proxima_corrida(self):
+    def test_rechazo_reintenta_solo_si_esta_habilitado(self):
+        """Con «Reintentar solos los rechazos» se reintenta, con espera, hasta el tope."""
+        self.config.reintentar_errores_datos = True
         picking = self._encolado()
         entrada = self.env['wis.picking.cola'].search([('picking_id', '=', picking.id)])
-        with self._parchear_envio(side_effect=Exception("WIS caído")) as enviar:
+        with self._parchear_envio(side_effect=Exception("WIS rechazó")) as enviar:
             self.env['wis.picking.cola']._cron_procesar()
-        self.assertEqual(enviar.call_count, 1, "una falla no se reintenta en la misma corrida")
+            self.env['wis.picking.cola']._cron_procesar()
+        self.assertEqual(enviar.call_count, 1, "antes de la espera no se vuelve a mandar")
         self.assertEqual(entrada.estado, 'pendiente')
         self.assertEqual(entrada.intentos, 1)
         self.assertEqual(picking.wms_estado, 'en_cola')
 
-        with self._parchear_envio(side_effect=Exception("WIS caído")):
-            self.env['wis.picking.cola']._cron_procesar()
-            self.env['wis.picking.cola']._cron_procesar()
+        with self._parchear_envio(side_effect=Exception("WIS rechazó")):
+            for _i in range(2):
+                entrada.proximo_intento = False  # pasó la espera
+                self.env['wis.picking.cola']._cron_procesar()
         self.assertEqual(entrada.estado, 'error')
         self.assertEqual(entrada.intentos, 3)
         self.assertEqual(picking.wms_estado, 'sin_enviar',

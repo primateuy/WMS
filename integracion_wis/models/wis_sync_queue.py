@@ -14,9 +14,13 @@ el cron (`_disparar_cron`), así que el trabajo arranca en segundos y no en el
 próximo ciclo de 5 minutos.
 
 Una variante sólo queda «Integrado» si WIS la aceptó, con su código de barras.
-Si WIS la rechaza queda Pendiente con error (en rojo) y se reintenta antes que lo
-que no se mandó todavía. Si WIS no atiende —credenciales, conexión— no es culpa
-de ninguna variante: no se marca nada y se prueba en la próxima corrida.
+Si WIS la rechaza queda Pendiente con error (en rojo). Por defecto no se reenvía
+sola —reenviar el mismo dato no lo corrige y WIS pidió evitarlo (12-oct-2026)—:
+sale con «Reintentar», y entonces antes que lo que no se mandó todavía. Con
+«Reintentar solos los rechazos de WIS» se reintenta cada 15 min hasta el tope.
+Si WIS no atiende —credenciales, conexión, timeout— no es culpa de ninguna
+variante: no se marca nada y los envíos a WIS quedan en pausa (5, 15, 60 min),
+compartida con la cola de operaciones.
 
 No se usa `queue_job` de la OCA porque no está disponible en este addons-path:
 esta cola cubre el caso concreto (integración de productos) sin sumar
@@ -47,8 +51,9 @@ ESPERA_REINTENTO = timedelta(minutes=15)
 # Una entrada «procesando» más vieja que esto quedó de una corrida que se cortó
 # (worker reiniciado, límite de tiempo) y vuelve a pendiente.
 PROCESANDO_COLGADA = timedelta(minutes=15)
-# Presupuesto por corrida del cron, holgado respecto de los 120 s de CPU / 240 s de reloj.
-SEGUNDOS_POR_CORRIDA = 90
+# Llamadas a WIS por lote (productos + códigos de barras): el presupuesto de la corrida
+# deja lugar para que el último lote termine aunque las dos lleguen al timeout.
+LLAMADAS_POR_LOTE = 2
 MAX_INTENTOS_POR_DEFECTO = 5
 
 
@@ -92,9 +97,9 @@ class WisSyncQueue(models.Model):
         ('sin_enviar', 'Sin enviar'),
         ('error', 'Con error'),
     ], string='Subestado', default='sin_enviar', required=True, index=True,
-        help='Sin enviar: todavía no se mandó. Con error: WIS la rechazó; la cola '
-             'la reintenta antes que las sin enviar, cada 15 minutos, hasta agotar '
-             'los intentos. Después sale sólo con «Reintentar».')
+        help='Sin enviar: todavía no se mandó. Con error: WIS la rechazó; sale con '
+             '«Reintentar» (o sola cada 15 minutos, si está habilitado en la '
+             'configuración), antes que las sin enviar.')
 
     prioridad = fields.Integer(
         string='Prioridad',
@@ -269,8 +274,15 @@ class WisSyncQueue(models.Model):
 
     @api.model
     def _max_intentos(self):
+        """Envíos que puede tener una variante rechazada antes de dejar de salir sola.
+
+        Sin reintentos automáticos es 1: el primer rechazo la deja quieta hasta que
+        alguien aprieta «Reintentar», que pone los intentos en cero.
+        """
         config = self.env['integracion_wis.integracion_wis']._get_config()
-        return (config.cola_max_intentos if config else 0) or MAX_INTENTOS_POR_DEFECTO
+        if not (config and config.reintentar_errores_datos):
+            return 1
+        return config.cola_max_intentos or MAX_INTENTOS_POR_DEFECTO
 
     @api.model
     def _siguiente_lote(self, limite):
@@ -332,10 +344,11 @@ class WisSyncQueue(models.Model):
         try:
             resultado = variantes._enviar_wms_en_lote(motivo='cola en segundo plano')
         except WisErrorGeneral as e:
-            _logger.warning("[WIS] Cola: WIS no atendió el lote (%s); se reintenta en la "
-                            "próxima corrida.", e)
+            _logger.warning("[WIS] Cola: WIS no atendió el lote (%s); se reintenta "
+                            "cuando termine la pausa.", e)
             entradas.write({'estado': 'pendiente', 'ultimo_error': str(e),
                             'fecha_procesado': fields.Datetime.now()})
+            config._wis_pausar(str(e))
             entradas._avisar_resultado()
             return 'general'
         except Exception as e:
@@ -365,17 +378,22 @@ class WisSyncQueue(models.Model):
                     'proximo_intento': False,
                 })
 
+        # WIS contestó: si estaba en pausa, se levanta.
+        config._wis_levantar_pausa()
         entradas._avisar_resultado()
         return True
 
     def _registrar_fallo(self, error, config=None):
         """WIS rechazó la variante: queda Pendiente con error y suma un intento.
 
-        Nunca se da por integrada. La cola la reintenta antes que lo que no se
-        mandó todavía, cada `ESPERA_REINTENTO`, hasta agotar los intentos; después
+        Nunca se da por integrada. Si los reintentos automáticos están habilitados,
+        la cola la reintenta antes que lo que no se mandó todavía, cada
+        `ESPERA_REINTENTO`, hasta agotar los intentos. Si no (por defecto), o agotados,
         sigue Pendiente con error y sale sólo con «Reintentar» o con el botón.
         """
         ahora = fields.Datetime.now()
+        config = config or self.env['integracion_wis.integracion_wis']._get_config()
+        reintenta = bool(config and config.reintentar_errores_datos)
         for entrada in self:
             entrada.write({
                 'estado': 'pendiente',
@@ -383,7 +401,7 @@ class WisSyncQueue(models.Model):
                 'intentos': entrada.intentos + 1,
                 'ultimo_error': error,
                 'fecha_procesado': ahora,
-                'proximo_intento': ahora + ESPERA_REINTENTO,
+                'proximo_intento': ahora + ESPERA_REINTENTO if reintenta else False,
             })
 
     def _avisar_resultado(self):
@@ -403,8 +421,8 @@ class WisSyncQueue(models.Model):
                            "(quedan Pendientes con error en la Cola de productos). %s") % (
                     len(ok), len(con_error), con_error[0].ultimo_error or '')
             else:
-                cuerpo = _("Integración con WIS: no se pudo conectar con WIS (%s). "
-                           "Se reintenta solo en unos minutos.") % (propias[0].ultimo_error or '')
+                cuerpo = _("Integración con WIS: WIS no respondió (%s). Los envíos "
+                           "quedan en pausa unos minutos y se reintenta solo.") % (propias[0].ultimo_error or '')
             plantilla.message_post(body=cuerpo)
 
     @api.model
@@ -427,9 +445,15 @@ class WisSyncQueue(models.Model):
         self._depurar_pendientes()
         if not _en_test():
             self.env.cr.commit()
+        if config._wis_en_pausa():
+            # WIS no respondió hace poco: el próximo ciclo del cron vuelve a mirar.
+            _logger.info("[WIS] Cola de productos en espera: envíos a WIS en pausa hasta %s.",
+                         config.pausa_hasta)
+            return True
 
+        presupuesto = config._presupuesto_corrida(llamadas_por_envio=LLAMADAS_POR_LOTE)
         procesadas, cortada = 0, False
-        while procesadas < limite and time.time() - inicio < SEGUNDOS_POR_CORRIDA:
+        while procesadas < limite and time.time() - inicio < presupuesto:
             lote = self._siguiente_lote(min(tanda, limite - procesadas))
             if not lote:
                 break
