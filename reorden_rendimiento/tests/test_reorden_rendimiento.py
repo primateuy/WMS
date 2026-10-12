@@ -149,11 +149,31 @@ class TestReordenRendimiento(TransactionCase):
         Pendiente.search([]).unlink()
         Pendiente._encolar(productos=self.variantes[:2])
         Pendiente._encolar(plantillas=self.plantilla)
+        Pendiente._encolar(productos=self.variantes[2:])
+        Pendiente._depurar_pendientes()
         pendientes = Pendiente.search([('estado', '=', 'pendiente')])
         self.assertEqual(pendientes.product_tmpl_id, self.plantilla)
         self.assertFalse(pendientes.product_id, "las variantes ya las cubre la plantilla")
-        Pendiente._encolar(productos=self.variantes[2:])
-        self.assertEqual(Pendiente.search([('estado', '=', 'pendiente')]), pendientes)
+
+    def test_encolar_no_toca_filas_que_procesa_el_cron(self):
+        """🔴 Encolar sólo inserta. Escribir una fila pendiente chocaba con el cron que la
+        estaba procesando (SerializationFailure) y Odoo repetía la confirmación entera."""
+        Pendiente = self.env['reorden.recalculo.pendiente']
+        Pendiente.search([]).unlink()
+        primera = Pendiente._encolar(productos=self.variantes[0])
+        primera.ultimo_orderpoint_id = 12345          # el cron va por la mitad
+        self.env.flush_all()
+        self.env.cr.execute("SELECT xmin::text FROM reorden_recalculo_pendiente WHERE id = %s", [primera.id])
+        version = self.env.cr.fetchone()[0]
+        segunda = Pendiente._encolar(productos=self.variantes[0])
+        self.env.flush_all()
+        self.env.cr.execute("SELECT xmin::text FROM reorden_recalculo_pendiente WHERE id = %s", [primera.id])
+        self.assertEqual(self.env.cr.fetchone()[0], version, "la fila del cron no se reescribió")
+        self.assertNotEqual(segunda, primera)
+        Pendiente._depurar_pendientes()
+        self.assertEqual(Pendiente.search([('estado', '=', 'pendiente')]), segunda,
+                         "queda la más nueva, que arranca de cero")
+        self.assertEqual(segunda.ultimo_orderpoint_id, 0)
 
     def test_un_lote_junta_varias_entradas(self):
         Pendiente = self.env['reorden.recalculo.pendiente']

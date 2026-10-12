@@ -134,43 +134,59 @@ class ReordenRecalculoPendiente(models.Model):
     # ------------------------------------------------------------------
     @api.model
     def _encolar(self, productos=None, plantillas=None, origen=''):
-        """Encola el recálculo. Lo ya pendiente se reinicia: lo que cambió ahora puede
-        afectar reglas que la corrida anterior ya había recalculado."""
+        """Encola el recálculo. Sólo INSERTA: nunca modifica filas existentes.
+
+        Antes reiniciaba las entradas ya pendientes (y daba por hechas las variantes de una
+        plantilla recién encolada) con un `write`. Esas mismas filas las está escribiendo el
+        cron mientras las procesa: PostgreSQL rechazaba una de las dos transacciones («could
+        not serialize access due to concurrent update») y Odoo repetía la operación del
+        usuario entera —una OC de 1000 líneas se confirmó cinco veces en 43 s—. Dos
+        inserciones no chocan; los duplicados los limpia el cron (`_depurar_pendientes`),
+        que es el único que escribe en filas pendientes.
+        """
         Self = self.sudo()
         plantillas = plantillas or self.env['product.template']
-        # Las variantes de plantillas ya encoladas enteras no hace falta encolarlas aparte.
+        # Las variantes de plantillas encoladas en esta misma llamada no hacen falta aparte.
         productos = (productos or self.env['product.product']).filtered(
             lambda p: p.product_tmpl_id not in plantillas)
         if not productos and not plantillas:
             return Self.browse()
-        # Y al revés: lo que ya está pendiente por plantilla cubre a sus variantes, y una
-        # plantilla que entra ahora deja de lado las variantes que estaban esperando (la
-        # confirmación de una OC encola por plantilla lo que las líneas encolaron por variante:
-        # sin esto, esas reglas se recalculaban dos veces).
-        if productos:
-            con_plantilla = Self.search([('estado', '=', 'pendiente'),
-                                         ('product_tmpl_id', 'in', productos.product_tmpl_id.ids)])
-            productos = productos.filtered(
-                lambda p: p.product_tmpl_id not in con_plantilla.product_tmpl_id)
-        if plantillas:
-            Self.search([('estado', '=', 'pendiente'),
-                         ('product_id.product_tmpl_id', 'in', plantillas.ids)]).write(
-                {'estado': 'hecho'})
-        if not productos and not plantillas:
-            return Self.browse()
-        existentes = Self.search([
-            ('estado', '=', 'pendiente'), '|',
-            ('product_tmpl_id', 'in', plantillas.ids), ('product_id', 'in', productos.ids)])
-        existentes.write({'ultimo_orderpoint_id': 0})
-        nuevas_t = plantillas - existentes.product_tmpl_id
-        nuevas_p = productos - existentes.product_id
         nuevas = Self.create(
-            [{'product_tmpl_id': t.id, 'origen': origen} for t in nuevas_t]
-            + [{'product_id': p.id, 'origen': origen} for p in nuevas_p])
+            [{'product_tmpl_id': t.id, 'origen': origen} for t in plantillas]
+            + [{'product_id': p.id, 'origen': origen} for p in productos])
         cron = self.env.ref('reorden_rendimiento.ir_cron_reorden_recalculo', raise_if_not_found=False)
         if cron:
             cron.sudo()._trigger()
-        return existentes | nuevas
+        return nuevas
+
+    @api.model
+    def _depurar_pendientes(self):
+        """Deja una sola entrada pendiente por plantilla o variante. Lo llama el cron.
+
+        - Varias entradas de la misma plantilla o variante: queda la más nueva. Si llegó
+          después de que la anterior empezara, arranca desde el principio: lo que cambió
+          puede afectar reglas que la anterior ya había recalculado.
+        - Una variante con su plantilla pendiente: la cubre la plantilla, se da por hecha
+          (sin esto, esas reglas se recalculaban dos veces).
+        """
+        pendientes = self.search([('estado', '=', 'pendiente')], order='id desc')
+        if len(pendientes) < 2:
+            return
+        vistos_t, vistos_p, sobran = set(), set(), []
+        for entrada in pendientes:
+            if entrada.product_tmpl_id:
+                if entrada.product_tmpl_id.id in vistos_t:
+                    sobran.append(entrada.id)
+                vistos_t.add(entrada.product_tmpl_id.id)
+            elif entrada.product_id:
+                if entrada.product_id.id in vistos_p:
+                    sobran.append(entrada.id)
+                vistos_p.add(entrada.product_id.id)
+        for entrada in pendientes.filtered(lambda e: e.product_id and not e.product_tmpl_id):
+            if entrada.product_id.product_tmpl_id.id in vistos_t:
+                sobran.append(entrada.id)
+        if sobran:
+            self.browse(sobran).write({'estado': 'hecho'})
 
     def _recalcular_lote(self, limite=LOTE):
         """Recalcula juntas hasta `limite` reglas de estas entradas, en orden.
@@ -211,6 +227,7 @@ class ReordenRecalculoPendiente(models.Model):
     @api.model
     def _cron_recalcular(self):
         inicio = time.time()
+        self._depurar_pendientes()
         while time.time() - inicio < SEGUNDOS_POR_CORRIDA:
             pendientes = self.search([('estado', '=', 'pendiente')], limit=LOTE)
             if not pendientes:
