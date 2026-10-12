@@ -230,16 +230,19 @@ class TestColaWIS(TransactionCase):
         ])
         self.assertEqual(len(pendientes), 3)
 
-    def test_encolar_sube_la_prioridad(self):
-        """Si la variante ya estaba en cola con prioridad baja y aparece en una
-        OC, pasa al frente en vez de duplicarse."""
-        self.Cola._encolar(self.variantes, origen='template', prioridad=20)
-        self.Cola._encolar(self.variantes, origen='oc', origen_ref='P00001', prioridad=1)
+    def test_encolar_mas_urgente_agrega_y_el_cron_descarta_la_vieja(self):
+        """Si la variante ya estaba en cola más abajo y aparece en una OC, se agrega
+        una entrada más arriba —sin tocar la vieja, que el cron puede estar
+        escribiendo— y el cron cancela la que sobra."""
+        viejas = self.Cola._encolar(self.variantes, origen='template', prioridad=20)
+        nuevas = self.Cola._encolar(self.variantes, origen='oc', origen_ref='P00001', prioridad=1)
 
-        entradas = self.Cola.search([('product_id', 'in', self.variantes.ids)])
-        self.assertEqual(len(entradas), 3)
-        self.assertEqual(set(entradas.mapped('prioridad')), {1})
-        self.assertEqual(set(entradas.mapped('origen')), {'oc'})
+        self.assertEqual(len(nuevas), 3)
+        self.assertEqual(set(viejas.mapped('prioridad')), {20}, "No se modifican las existentes.")
+
+        self.Cola._depurar_pendientes()
+        self.assertEqual(set(viejas.mapped('estado')), {'cancelado'})
+        self.assertEqual(set(nuevas.mapped('estado')), {'pendiente'})
 
     def test_solo_almacenables(self):
         servicio = self.env['product.product'].create({
@@ -520,39 +523,35 @@ class TestMarcadoEnLaFichaEncola(TransactionCase):
         ])
         self.assertEqual(len(entradas), 2)
 
-    def test_boton_integrar_ahora_si_manda(self):
+    def test_boton_encola_primero_sin_llamar_a_wis(self):
+        """El botón ya no espera a WIS: encola con la prioridad más alta."""
         template = self._template_con_variantes(2)
         template.write({'integracion_wms': True})
 
-        llamadas = []
-
-        def fingir(self, motivo=''):
-            llamadas.append(len(self))
-            return {'enviados': len(self), 'errores': 0, 'errores_detalle': []}
+        def explotar(*args, **kwargs):
+            raise AssertionError("El botón llamó a WIS: tiene que encolar.")
 
         with patch.object(type(self.env['product.product']),
-                          '_enviar_wms_en_lote', fingir):
-            template.enviar_variantes_wms()
+                          '_enviar_wms_en_lote', explotar):
+            accion = template.enviar_variantes_wms()
 
-        self.assertEqual(llamadas, [2])
-        pendientes = self.Cola.search([
+        self.assertEqual(accion['params']['type'], 'success')
+        del_boton = self.Cola.search([
             ('product_id', 'in', template.product_variant_ids.ids),
-            ('estado', '=', 'pendiente'),
+            ('estado', '=', 'pendiente'), ('origen', '=', 'boton'),
         ])
-        self.assertFalse(pendientes, "Integrar ahora tiene que cerrar lo encolado.")
+        self.assertEqual(len(del_boton), 2)
+        self.assertEqual(set(del_boton.mapped('prioridad')), {0})
 
-    def test_boton_integrar_ahora_propaga_el_error(self):
-        """Antes se logueaba y la pantalla decía que había salido bien."""
+    def test_boton_dos_veces_no_duplica(self):
         template = self._template_con_variantes(2)
         template.write({'integracion_wms': True})
-
-        def fallar(*args, **kwargs):
-            raise ValueError("WIS no responde")
-
-        with patch.object(type(self.env['product.product']),
-                          '_enviar_wms_en_lote', fallar):
-            with self.assertRaises(ValueError):
-                template.enviar_variantes_wms()
+        template.enviar_variantes_wms()
+        accion = template.enviar_variantes_wms()
+        self.assertEqual(accion['params']['type'], 'info')
+        self.assertEqual(self.Cola.search_count([
+            ('product_id', 'in', template.product_variant_ids.ids),
+            ('origen', '=', 'boton')]), 2)
 
     def test_el_error_de_la_cola_dice_lo_que_dijo_wis(self):
         """La variante rechazada no tiene `codigo_unico` —se persiste recién
@@ -574,6 +573,7 @@ class TestMarcadoEnLaFichaEncola(TransactionCase):
         fallada = entradas.filtered(lambda e: e.product_id == variantes[0])
         self.assertIn('producto rechazado', fallada.ultimo_error or '')
         self.assertEqual(fallada.intentos, 1)
+        self.assertEqual((fallada.estado, fallada.subestado), ('pendiente', 'error'))
 
 
 @tagged('post_install', '-at_install', 'wis_productos')

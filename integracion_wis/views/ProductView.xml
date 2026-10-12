@@ -17,7 +17,7 @@
                              invisible="not integracion_wms or wis_variantes_en_cola == 0">
                             Las variantes se integran <b>en segundo plano</b>: podés seguir
                             trabajando. El avance se ve en Integración WIS → Cola de productos.
-                            Si necesitás que salgan ahora, usá «Integrar ahora con WIS».
+                            Si las necesitás antes, usá «Integrar con prioridad»: pasan primeras en la cola.
                         </div>
                         <group>
                             <button name="consultaStock" 
@@ -28,8 +28,8 @@
                             <button name="enviar_variantes_wms"
                                     type="object"
                                     class="btn-secondary"
-                                    string="Integrar ahora con WIS"
-                                    confirm="Se van a enviar todas las variantes a WIS en este momento. Con muchas variantes la pantalla puede quedar esperando la respuesta. ¿Continuar?"
+                                    string="Integrar con prioridad"
+                                    help="Pone las variantes primeras en la cola de integración con WIS, detrás de las que se pidieron antes con este botón. Se envían en segundo plano: el resultado queda en el historial del producto."
                                     invisible="not integracion_wms"/>
                         </group>
                     </page>

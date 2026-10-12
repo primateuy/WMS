@@ -5,12 +5,18 @@ La integración de un producto con muchas variantes puede demorar varios
 minutos. Este modelo permite encolar variantes y procesarlas por lote desde un
 cron, para que el usuario no quede bloqueado esperando a WIS.
 
-**Ningún camino automático llama a WIS dentro de su transacción**: el alta de un
-producto, tildar la casilla en la ficha, agregar un atributo y la acción masiva
-encolan todos acá. El único envío inmediato es el botón «Integrar ahora con
-WIS», que es una decisión explícita del usuario. Al encolar se dispara el cron
-(`_disparar_cron`), así que el trabajo arranca en segundos y no en el próximo
-ciclo de 5 minutos.
+**Nada llama a WIS dentro de la transacción del usuario**: el alta de un
+producto, tildar la casilla en la ficha, agregar un atributo, la acción masiva y
+el botón «Integrar con prioridad» de la ficha encolan todos acá. El botón entra
+primero en la fila (`PRIORIDAD_BOTON`): antes mandaba a WIS en el momento y la
+pantalla quedaba esperando minutos, con las filas tomadas. Al encolar se dispara
+el cron (`_disparar_cron`), así que el trabajo arranca en segundos y no en el
+próximo ciclo de 5 minutos.
+
+Una variante sólo queda «Integrado» si WIS la aceptó, con su código de barras.
+Si WIS la rechaza queda Pendiente con error (en rojo) y se reintenta antes que lo
+que no se mandó todavía. Si WIS no atiende —credenciales, conexión— no es culpa
+de ninguna variante: no se marca nada y se prueba en la próxima corrida.
 
 No se usa `queue_job` de la OCA porque no está disponible en este addons-path:
 esta cola cubre el caso concreto (integración de productos) sin sumar
@@ -18,16 +24,47 @@ infraestructura de servidor. Si más adelante entra `queue_job`, se reemplaza el
 cron por un job sin tocar los call-sites, que solo conocen `_encolar()`.
 """
 import logging
+import threading
+import time
+from datetime import timedelta
 
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError
 
+from .models import WisErrorGeneral
+
 _logger = logging.getLogger(__name__)
 
 # Prioridades: menor número = se procesa antes.
+PRIORIDAD_BOTON = 0     # «Integrar con prioridad» en la ficha: el usuario lo pidió ya
 PRIORIDAD_URGENTE = 1   # variantes que traban una Orden de Compra
 PRIORIDAD_NORMAL = 10   # integración masiva pedida por el usuario
 PRIORIDAD_BAJA = 20     # el resto de las variantes de un template
+
+# Espera entre reintentos automáticos de una variante que WIS rechazó: sin ella,
+# un producto con datos malos encabezaría todas las corridas.
+ESPERA_REINTENTO = timedelta(minutes=15)
+# Una entrada «procesando» más vieja que esto quedó de una corrida que se cortó
+# (worker reiniciado, límite de tiempo) y vuelve a pendiente.
+PROCESANDO_COLGADA = timedelta(minutes=15)
+# Presupuesto por corrida del cron, holgado respecto de los 120 s de CPU / 240 s de reloj.
+SEGUNDOS_POR_CORRIDA = 90
+MAX_INTENTOS_POR_DEFECTO = 5
+
+
+def _errores_por_codigo(resultado):
+    """{código de producto: motivo} de un resultado de `insertarProductosMasivo`.
+
+    Si sólo trae el detalle en texto, cada línea es «<código>: <motivo>».
+    """
+    resultado = resultado or {}
+    return resultado.get('errores_por_codigo') or {
+        detalle.split(': ', 1)[0]: detalle
+        for detalle in resultado.get('errores_detalle') or []}
+
+
+def _en_test():
+    return getattr(threading.current_thread(), 'testing', False)
 
 
 class WisSyncQueue(models.Model):
@@ -47,19 +84,28 @@ class WisSyncQueue(models.Model):
         ('pendiente', 'Pendiente'),
         ('procesando', 'Procesando'),
         ('hecho', 'Integrado'),
-        ('error', 'Error'),
         ('cancelado', 'Cancelado'),
-    ], string='Estado', default='pendiente', required=True, index=True)
+    ], string='Estado', default='pendiente', required=True, index=True,
+        help='Integrado sólo cuando WIS aceptó la variante y su código de barras.')
+
+    subestado = fields.Selection([
+        ('sin_enviar', 'Sin enviar'),
+        ('error', 'Con error'),
+    ], string='Subestado', default='sin_enviar', required=True, index=True,
+        help='Sin enviar: todavía no se mandó. Con error: WIS la rechazó; la cola '
+             'la reintenta antes que las sin enviar, cada 15 minutos, hasta agotar '
+             'los intentos. Después sale sólo con «Reintentar».')
 
     prioridad = fields.Integer(
         string='Prioridad',
         default=PRIORIDAD_NORMAL,
         index=True,
-        help='Menor número, se procesa antes. 1 = urgente (traba una Orden de '
-             'Compra), 10 = normal, 20 = baja (resto de variantes).',
+        help='Menor número, se procesa antes. 0 = pedido con el botón de la ficha, '
+             '1 = urgente (traba una Orden de Compra), 10 = normal, 20 = baja.',
     )
 
     origen = fields.Selection([
+        ('boton', 'Botón de la ficha'),
         ('oc', 'Orden de Compra'),
         ('masiva', 'Integración masiva'),
         ('template', 'Alta de variantes'),
@@ -74,6 +120,9 @@ class WisSyncQueue(models.Model):
     intentos = fields.Integer(string='Intentos', default=0, readonly=True)
     ultimo_error = fields.Text(string='Último error', readonly=True)
     fecha_procesado = fields.Datetime(string='Fecha de procesamiento', readonly=True)
+    proximo_intento = fields.Datetime(
+        string='Próximo reintento', readonly=True,
+        help='Antes de esta hora la cola no vuelve a intentar sola esta variante.')
 
     codigo_unico = fields.Char(
         related='product_id.codigo_unico',
@@ -101,31 +150,34 @@ class WisSyncQueue(models.Model):
     def _encolar(self, variantes, origen='manual', origen_ref='', prioridad=PRIORIDAD_NORMAL):
         """Encola variantes para integrar con WIS. Devuelve las entradas creadas.
 
-        Solo se encolan variantes almacenables. Si una variante ya tiene una
-        entrada pendiente se actualiza su prioridad —si la nueva es más
-        urgente— en lugar de duplicarla.
+        🔴 **Sólo inserta: nunca modifica filas que ya están en la cola.** Antes
+        subía la prioridad de las pendientes con un `write`, y esas mismas filas
+        las podía estar escribiendo el cron: una de las dos transacciones caía
+        por «could not serialize» y Odoo repetía la operación del usuario entera.
+        Ahora, si una variante ya está en cola más abajo, se agrega otra entrada
+        más arriba y el cron descarta la vieja (`_depurar_pendientes`).
+
+        No se agrega nada si la variante ya tiene una entrada que va a salir
+        igual o antes (sin enviar con igual o mejor prioridad, o en proceso). Una
+        con error sólo se adelanta con el botón, que es un pedido explícito.
         """
         variantes = variantes.filtered(lambda v: v.type == 'product')
         if not variantes:
             return self.browse()
 
-        pendientes = self.search([
+        existentes = self.search([
             ('product_id', 'in', variantes.ids),
             ('estado', 'in', ('pendiente', 'procesando')),
         ])
-        ya_encoladas = pendientes.mapped('product_id')
+        cubiertas = existentes.filtered(
+            lambda e: e.estado == 'procesando' and prioridad != PRIORIDAD_BOTON
+            or e.estado == 'pendiente' and e.subestado == 'sin_enviar' and e.prioridad <= prioridad
+            or e.estado == 'pendiente' and e.subestado == 'error' and prioridad != PRIORIDAD_BOTON
+        ).mapped('product_id')
 
-        # Subir la prioridad de lo que ya estaba encolado más abajo.
-        a_priorizar = pendientes.filtered(
-            lambda e: e.estado == 'pendiente' and e.prioridad > prioridad
-        )
-        if a_priorizar:
-            a_priorizar.write({'prioridad': prioridad, 'origen': origen,
-                               'origen_ref': origen_ref})
-
-        nuevas = variantes - ya_encoladas
+        nuevas = variantes - cubiertas
         if not nuevas:
-            return a_priorizar
+            return self.browse()
 
         entradas = self.create([{
             'product_id': variante.id,
@@ -138,7 +190,7 @@ class WisSyncQueue(models.Model):
         _logger.info("[WIS] Encoladas %d variantes (origen=%s ref=%s prioridad=%d)",
                      len(entradas), origen, origen_ref or '-', prioridad)
         self._disparar_cron()
-        return entradas | a_priorizar
+        return entradas
 
     @api.model
     def _disparar_cron(self):
@@ -162,16 +214,106 @@ class WisSyncQueue(models.Model):
         except Exception as e:
             _logger.warning("[WIS] No se pudo disparar el cron de la cola: %s", e)
 
+    @api.model
+    def _depurar_pendientes(self):
+        """Deja una sola entrada pendiente por variante. Lo llama el cron, que es el
+        único que modifica filas pendientes. De paso devuelve a pendiente lo que
+        quedó «procesando» de una corrida cortada.
+
+        Queda la que sale primero según el orden de la cola; las demás se cancelan
+        con el motivo a la vista. Se cancelan y no se dan por integradas: darlas por
+        hechas sin haberlas mandado era justamente cómo aparecían «integradas»
+        variantes que WIS nunca recibió.
+        """
+        colgadas = self.search([
+            ('estado', '=', 'procesando'),
+            ('write_date', '<', fields.Datetime.now() - PROCESANDO_COLGADA),
+        ])
+        if colgadas:
+            _logger.warning("[WIS] Cola: %d entradas quedaron en proceso de una corrida "
+                            "cortada; vuelven a pendiente.", len(colgadas))
+            colgadas.write({'estado': 'pendiente'})
+
+        pendientes = self.search([('estado', '=', 'pendiente')])
+        if len(pendientes) < 2:
+            return
+        ahora = fields.Datetime.now()
+        maximo = self._max_intentos()
+        mejor = {}
+        for entrada in pendientes:
+            clave = entrada._clave_orden(ahora, maximo)
+            actual = mejor.get(entrada.product_id.id)
+            if actual is None or clave < actual[0]:
+                mejor[entrada.product_id.id] = (clave, entrada)
+        conservar = {e.id for _clave, e in mejor.values()}
+        for entrada in pendientes.filtered(lambda e: e.id not in conservar):
+            entrada.write({
+                'estado': 'cancelado',
+                'ultimo_error': _("Reemplazada por la entrada %s, que sale antes.")
+                % mejor[entrada.product_id.id][1].id,
+            })
+
+    def _clave_orden(self, ahora, maximo):
+        """Posición en la cola: botón, después con error, después sin enviar."""
+        self.ensure_one()
+        if self.subestado == 'sin_enviar' and self.prioridad <= PRIORIDAD_BOTON:
+            tramo = 0
+        elif self.subestado == 'error':
+            # Una con error que todavía no toca reintentar va detrás de todo.
+            listo = self.intentos < maximo and (
+                not self.proximo_intento or self.proximo_intento <= ahora)
+            tramo = 1 if listo else 3
+        else:
+            tramo = 2
+        return (tramo, self.prioridad, self.create_date or ahora, self.id)
+
+    @api.model
+    def _max_intentos(self):
+        config = self.env['integracion_wis.integracion_wis']._get_config()
+        return (config.cola_max_intentos if config else 0) or MAX_INTENTOS_POR_DEFECTO
+
+    @api.model
+    def _siguiente_lote(self, limite):
+        """El próximo lote a mandar, de un solo tramo y en orden:
+
+        1. lo pedido con el botón de la ficha, en el orden en que se apretó;
+        2. lo que WIS rechazó y ya toca reintentar, de lo más viejo a lo más nuevo;
+        3. lo que todavía no se mandó, por prioridad (OC, normal, baja).
+
+        Un lote nunca mezcla tramos: lo del botón sale solo, sin esperar a que
+        se reintenten de a uno las que fallan.
+        """
+        ahora = fields.Datetime.now()
+        boton = self.search([
+            ('estado', '=', 'pendiente'), ('subestado', '=', 'sin_enviar'),
+            ('prioridad', '<=', PRIORIDAD_BOTON),
+        ], order='create_date asc, id asc', limit=limite)
+        if boton:
+            return boton
+        con_error = self.search([
+            ('estado', '=', 'pendiente'), ('subestado', '=', 'error'),
+            ('intentos', '<', self._max_intentos()),
+            '|', ('proximo_intento', '=', False), ('proximo_intento', '<=', ahora),
+        ], order='create_date asc, id asc', limit=limite)
+        if con_error:
+            return con_error
+        return self.search([
+            ('estado', '=', 'pendiente'), ('subestado', '=', 'sin_enviar'),
+            ('prioridad', '>', PRIORIDAD_BOTON),
+        ], order='prioridad asc, create_date asc, id asc', limit=limite)
+
     # ------------------------------------------------------------------
     # Procesamiento
     # ------------------------------------------------------------------
     def procesar(self):
         """Procesa estas entradas contra WIS, en un solo lote.
 
-        No lanza: los errores quedan registrados en la propia entrada para que
-        el cron pueda seguir con el resto.
+        No lanza. Devuelve 'general' si WIS no atendió el pedido por algo ajeno
+        a los productos (credenciales, conexión): las entradas vuelven a quedar
+        como estaban, sin sumar intento, y la cola lo prueba en la próxima corrida.
+        Los rechazos de una variante quedan Pendientes con error, en rojo.
         """
-        entradas = self.filtered(lambda e: e.estado in ('pendiente', 'error'))
+        entradas = self.filtered(lambda e: e.estado == 'pendiente')
         if not entradas:
             return True
 
@@ -181,28 +323,37 @@ class WisSyncQueue(models.Model):
             return True
 
         entradas.write({'estado': 'procesando'})
+        if not _en_test():
+            # Que «procesando» se vea: así el botón no vuelve a mandar lo que ya va
+            # en camino, y nadie espera a esta transacción mientras dura el envío.
+            self.env.cr.commit()
         variantes = entradas.mapped('product_id')
 
         try:
             resultado = variantes._enviar_wms_en_lote(motivo='cola en segundo plano')
+        except WisErrorGeneral as e:
+            _logger.warning("[WIS] Cola: WIS no atendió el lote (%s); se reintenta en la "
+                            "próxima corrida.", e)
+            entradas.write({'estado': 'pendiente', 'ultimo_error': str(e),
+                            'fecha_procesado': fields.Datetime.now()})
+            entradas._avisar_resultado()
+            return 'general'
         except Exception as e:
             _logger.exception("[WIS] Cola: fallo el lote completo")
             entradas._registrar_fallo(str(e), config)
+            entradas._avisar_resultado()
             return False
 
-        errores_detalle = resultado.get('errores_detalle', [])
+        errores = _errores_por_codigo(resultado)
         ahora = fields.Datetime.now()
 
         for entrada in entradas:
             variante = entrada.product_id
             # 🔴 El `codigo_unico` se persiste RECIÉN cuando WIS acepta la
-            # variante, así que la rechazada no lo tiene y buscar su error por
-            # ese campo no encontraba nada: la entrada quedaba con «La variante
-            # no obtuvo código WIS» y tapaba el motivo que WIS había dado, que
-            # sí estaba en el detalle. El código es determinístico: se
-            # recalcula igual que al armar el envío.
+            # variante, así que la rechazada no lo tiene: el código es
+            # determinístico y se recalcula igual que al armar el envío.
             codigo = variante.codigo_unico or config._wis_codigo_producto(variante)
-            detalle = next((e for e in errores_detalle if codigo and codigo in e), None)
+            detalle = errores.get(codigo)
             if detalle or not variante.codigo_unico:
                 entrada._registrar_fallo(
                     detalle or 'La variante no obtuvo código WIS.', config)
@@ -211,55 +362,93 @@ class WisSyncQueue(models.Model):
                     'estado': 'hecho',
                     'fecha_procesado': ahora,
                     'ultimo_error': False,
+                    'proximo_intento': False,
                 })
 
+        entradas._avisar_resultado()
         return True
 
     def _registrar_fallo(self, error, config=None):
-        """Marca las entradas como error y cuenta el intento.
+        """WIS rechazó la variante: queda Pendiente con error y suma un intento.
 
-        Mientras no se agoten los reintentos la entrada vuelve a 'pendiente'
-        para que el cron la tome de nuevo.
+        Nunca se da por integrada. La cola la reintenta antes que lo que no se
+        mandó todavía, cada `ESPERA_REINTENTO`, hasta agotar los intentos; después
+        sigue Pendiente con error y sale sólo con «Reintentar» o con el botón.
         """
-        config = config or self.env['integracion_wis.integracion_wis']._get_config()
-        max_intentos = (config.cola_max_intentos if config else 0) or 3
         ahora = fields.Datetime.now()
-
         for entrada in self:
-            intentos = entrada.intentos + 1
             entrada.write({
-                'intentos': intentos,
+                'estado': 'pendiente',
+                'subestado': 'error',
+                'intentos': entrada.intentos + 1,
                 'ultimo_error': error,
                 'fecha_procesado': ahora,
-                'estado': 'error' if intentos >= max_intentos else 'pendiente',
+                'proximo_intento': ahora + ESPERA_REINTENTO,
             })
+
+    def _avisar_resultado(self):
+        """Deja en el chatter del producto cómo terminó lo pedido con el botón.
+
+        El botón ya no espera a WIS, así que es ahí donde el usuario se entera.
+        """
+        boton = self.filtered(lambda e: e.origen == 'boton')
+        for plantilla in boton.mapped('product_id.product_tmpl_id'):
+            propias = boton.filtered(lambda e: e.product_id.product_tmpl_id == plantilla)
+            ok = propias.filtered(lambda e: e.estado == 'hecho')
+            con_error = propias.filtered(lambda e: e.subestado == 'error' and e.estado == 'pendiente')
+            if ok and not (propias - ok):
+                cuerpo = _("Integración con WIS: %s variante(s) integradas.") % len(ok)
+            elif con_error:
+                cuerpo = _("Integración con WIS: %s integradas, %s rechazadas por WIS "
+                           "(quedan Pendientes con error en la Cola de productos). %s") % (
+                    len(ok), len(con_error), con_error[0].ultimo_error or '')
+            else:
+                cuerpo = _("Integración con WIS: no se pudo conectar con WIS (%s). "
+                           "Se reintenta solo en unos minutos.") % (propias[0].ultimo_error or '')
+            plantilla.message_post(body=cuerpo)
 
     @api.model
     def _cron_procesar_cola(self):
-        """Cron: procesa las variantes pendientes por orden de prioridad."""
+        """Cron: procesa la cola por tandas, en el orden de `_siguiente_lote`.
+
+        Después de cada tanda vuelve a mirar la cola: lo pedido con el botón a
+        mitad de una corrida sale en la tanda siguiente, no al final. Corta por
+        tiempo y se vuelve a disparar si queda trabajo.
+        """
         config = self.env['integracion_wis.integracion_wis']._get_config()
         if not config or not config.comunicacion_activa:
             _logger.info("[WIS] Cron cola de productos omitido: comunicación deshabilitada.")
             return True
 
+        inicio = time.time()
+        tanda = config.chunk_size_productos or 200
         limite = config.cola_productos_por_corrida or 500
-        pendientes = self.search([('estado', '=', 'pendiente')], limit=limite)
 
-        if not pendientes:
-            return True
-
-        _logger.info("[WIS] Cron cola de productos: procesando %d entradas (límite %d)",
-                     len(pendientes), limite)
-
-        # Se procesa por prioridad para que lo urgente (una OC esperando) salga
-        # primero incluso si el lote total es grande.
-        for prioridad in sorted(set(pendientes.mapped('prioridad'))):
-            grupo = pendientes.filtered(lambda e: e.prioridad == prioridad)
-            grupo.procesar()
+        self._depurar_pendientes()
+        if not _en_test():
             self.env.cr.commit()
 
+        procesadas, cortada = 0, False
+        while procesadas < limite and time.time() - inicio < SEGUNDOS_POR_CORRIDA:
+            lote = self._siguiente_lote(min(tanda, limite - procesadas))
+            if not lote:
+                break
+            _logger.info("[WIS] Cron cola de productos: lote de %d (prioridad %d, %s)",
+                         len(lote), lote[0].prioridad, lote[0].subestado)
+            resultado = lote.procesar()
+            if not _en_test():
+                self.env.cr.commit()
+            procesadas += len(lote)
+            if resultado == 'general':
+                # WIS no atiende: seguir sólo sumaría llamadas que fallan igual.
+                cortada = True
+                break
+
+        if not cortada and self._siguiente_lote(1):
+            self._disparar_cron()
+
         # Operaciones que esperaban a que estos productos se integraran: que salgan ya.
-        if 'wis.picking.cola' in self.env and self.env['wis.picking.cola'].search_count(
+        if procesadas and 'wis.picking.cola' in self.env and self.env['wis.picking.cola'].search_count(
                 [('estado', '=', 'pendiente')], limit=1):
             self.env['wis.picking.cola']._disparar_cron()
         return True
@@ -268,12 +457,20 @@ class WisSyncQueue(models.Model):
     # Acciones de la vista
     # ------------------------------------------------------------------
     def action_reintentar(self):
-        """Vuelve a poner en cola entradas en error, reseteando los intentos."""
-        self.filtered(lambda e: e.estado in ('error', 'cancelado')).write({
+        """Vuelve a poner en cola lo que falló o se canceló, con los intentos en cero.
+
+        Las que tenían error siguen marcadas así —en rojo— hasta que WIS las acepte,
+        y salen antes que lo que todavía no se mandó.
+        """
+        entradas = self.filtered(lambda e: e.estado == 'cancelado'
+                                 or e.estado == 'pendiente' and e.subestado == 'error')
+        entradas.write({
             'estado': 'pendiente',
             'intentos': 0,
-            'ultimo_error': False,
+            'proximo_intento': False,
         })
+        if entradas:
+            self._disparar_cron()
         return True
 
     def action_procesar_ahora(self):
@@ -284,7 +481,7 @@ class WisSyncQueue(models.Model):
         return True
 
     def action_cancelar(self):
-        self.filtered(lambda e: e.estado in ('pendiente', 'error')).write({
+        self.filtered(lambda e: e.estado == 'pendiente').write({
             'estado': 'cancelado',
         })
         return True

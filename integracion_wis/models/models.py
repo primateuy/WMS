@@ -12,6 +12,23 @@ MSG_WIS_SIN_STOCK = "No se encontró stock para los filtros enviados."
 MSG_WIS_PRODUCTO_NO_EXISTE = "ProductoNoExiste"
 
 
+# HTTP que no dicen nada del producto: credenciales, límite de pedidos o WIS caído.
+# Un 400 o un 500 sí pueden ser por el producto y se aíslan de a uno.
+HTTP_ERROR_GENERAL = {401, 403, 408, 429, 502, 503, 504}
+
+
+class WisErrorGeneral(ValidationError):
+    """WIS no atendió el pedido por algo que no es de los productos enviados.
+
+    Credenciales rechazadas, timeout, conexión caída, WIS fuera de servicio.
+    No tiene sentido reintentar producto por producto —todos fallan igual y es
+    una llamada más por cada uno—, ni marcar los productos como fallados: se
+    corta el envío y la cola lo vuelve a intentar en la próxima corrida.
+
+    Hereda de ValidationError para que quien ya atrapa ese error siga igual.
+    """
+
+
 class ErrorConsultaStockWIS(ValidationError):
     """Error de verdad al consultar stock. Lleva la traza del request."""
 
@@ -140,9 +157,11 @@ class IntegracionWIS(models.Model):
 
     cola_max_intentos = fields.Integer(
         string='Reintentos máximos en la cola',
-        default=3,
-        help='Cuántas veces se reintenta una variante que falla antes de '
-             'dejarla en estado Error a la espera de intervención manual.',
+        default=5,
+        help='Cuántas veces la cola reintenta sola una variante que WIS rechazó. '
+             'Agotados los intentos queda Pendiente con error, en rojo, y sale '
+             'sólo con «Reintentar» o con el botón del producto. Los errores '
+             'generales (credenciales, conexión) no cuentan como intento.',
     )
 
     bloquear_oc_sin_integrar = fields.Boolean(
@@ -230,7 +249,10 @@ class IntegracionWIS(models.Model):
             'grant_type': 'client_credentials'
         }
 
-        req = requests.post(self.url_access_token, headers=headers, data=body, timeout=30)
+        try:
+            req = requests.post(self.url_access_token, headers=headers, data=body, timeout=30)
+        except requests.exceptions.RequestException as e:
+            raise WisErrorGeneral(f"No se pudo conectar con WIS para renovar el token: {e}")
 
         if req.status_code == 200:
             reqJson = req.json()
@@ -240,7 +262,8 @@ class IntegracionWIS(models.Model):
                 datetime.datetime.now() + datetime.timedelta(seconds=expires_in))
 
         else:
-            raise ValidationError(f"Hubo un problema en la request: {req.text}")
+            # Sin token no sale nada: es un error general, no de los productos.
+            raise WisErrorGeneral(f"Hubo un problema en la request: {req.text}")
 
         
 
@@ -295,6 +318,8 @@ class IntegracionWIS(models.Model):
             _logger.info(f"JSON ES BODY => {body}")
             if req.status_code != 200:
                 _logger.error(f"Error en la API: {req.status_code} - {req.text}")
+                if req.status_code in HTTP_ERROR_GENERAL:
+                    raise WisErrorGeneral(f"Error en la API: {req.status_code} - {req.text}")
                 raise ValidationError(f"Error en la API: {req.status_code} - {req.text}")
 
             try:
@@ -303,6 +328,13 @@ class IntegracionWIS(models.Model):
                 _logger.error(f"Error al decodificar JSON: {str(e)}")
                 raise ValidationError(f"Error al decodificar la respuesta de la API: {req.text}")
 
+        except WisErrorGeneral:
+            raise
+        except requests.exceptions.RequestException as e:
+            # Timeout o conexión: WIS pudo haber procesado el lote igual. Reintentar
+            # de a uno sólo duplicaría el envío y multiplicaría la espera.
+            _logger.error(f"Error de conexión con la API: {str(e)}")
+            raise WisErrorGeneral(f"Error en la solicitud a la API: {str(e)}")
         except Exception as e:
             _logger.error(f"Error en la solicitud a la API: {str(e)}")
             raise ValidationError(f"Error en la solicitud a la API: {str(e)}")
@@ -452,6 +484,8 @@ class IntegracionWIS(models.Model):
             self.consultarAPI(link="/Producto/CreateOrUpdate", body=payload,
                               params=None, method="POST")
             return [item.get('codigo') for item in chunk], []
+        except WisErrorGeneral:
+            raise
         except Exception as batch_err:
             _logger.warning(
                 "[WIS] %s | batch falló (%s), reintentando uno por uno...",
@@ -470,6 +504,8 @@ class IntegracionWIS(models.Model):
                 self.consultarAPI(link="/Producto/CreateOrUpdate", body=single_payload,
                                   params=None, method="POST")
                 codigos_ok.append(item.get('codigo'))
+            except WisErrorGeneral:
+                raise
             except Exception as item_err:
                 err_str = str(item_err)
                 # WIS no permite modificar manejoIdentificador en productos con
@@ -507,8 +543,13 @@ class IntegracionWIS(models.Model):
         Si un chunk falla (ej. un producto con manejoIdentificador bloqueado),
         reintenta cada producto individualmente para no perder los demás.
 
-        Returns dict con 'enviados', 'errores', 'errores_detalle' y
-        'barcodes_enviados'.
+        Returns dict con 'enviados', 'errores', 'errores_detalle',
+        'barcodes_enviados' y 'errores_por_codigo' ({código de producto: motivo}),
+        que es lo que la cola usa para saber qué variante falló: el código de
+        barras rechazado también cuenta, porque sin él la variante no se puede
+        leer en el depósito.
+
+        Un `WisErrorGeneral` (credenciales, conexión) no se atrapa: corta el envío.
         """
         variantes_list = list(variantes)
         total = len(variantes_list)
@@ -516,6 +557,7 @@ class IntegracionWIS(models.Model):
         enviados = 0
         barcodes_enviados = 0
         todos_errores_detalle = []
+        errores_por_codigo = {}
         total_chunks = -(-total // chunk_size)  # ceil division
 
         _logger.info("[WIS] insertarProductosMasivo | total=%d | chunk_size=%d | chunks=%d",
@@ -541,6 +583,9 @@ class IntegracionWIS(models.Model):
             codigos_ok, err_detalle = self._enviar_chunk_productos(productos_payload, lote_label)
             todos_errores_detalle.extend(err_detalle)
             enviados += len(codigos_ok)
+            # `_enviar_chunk_productos` arma cada detalle como «<código>: <motivo>».
+            for motivo in err_detalle:
+                errores_por_codigo[motivo.split(': ', 1)[0]] = motivo
 
             # Persistir el codigo_unico de las variantes que WIS aceptó y
             # todavía no lo tenían.
@@ -555,11 +600,20 @@ class IntegracionWIS(models.Model):
 
             if enviar_barcodes and variantes_ok:
                 try:
-                    barcodes_enviados += self.insertarBarcodesMasivo(variantes_ok)
+                    ok_barcodes, err_barcodes = self.insertarBarcodesMasivo(
+                        variantes_ok, con_errores=True)
+                    barcodes_enviados += ok_barcodes
+                except WisErrorGeneral:
+                    raise
                 except Exception as e:
                     _logger.error("[WIS] %s | error enviando códigos de barras: %s",
                                   lote_label, str(e))
-                    todos_errores_detalle.append(f"códigos de barras {lote_label}: {str(e)}")
+                    err_barcodes = {v.codigo_unico: f"código de barras: {e}"
+                                    for v in variantes_ok if v.barcode}
+                for codigo, motivo in err_barcodes.items():
+                    detalle = f"{codigo}: {motivo}"
+                    errores_por_codigo[codigo] = detalle
+                    todos_errores_detalle.append(detalle)
 
             _logger.info("[WIS] insertarProductosMasivo | %s | ok=%d err=%d | acumulado=%d",
                          lote_label, len(codigos_ok), len(err_detalle), enviados)
@@ -569,6 +623,7 @@ class IntegracionWIS(models.Model):
                      enviados, errores, barcodes_enviados)
         return {'enviados': enviados, 'errores': errores,
                 'errores_detalle': todos_errores_detalle,
+                'errores_por_codigo': errores_por_codigo,
                 'barcodes_enviados': barcodes_enviados}
 
     @api.model
@@ -774,17 +829,20 @@ class IntegracionWIS(models.Model):
 
         return response
 
-    def insertarBarcodesMasivo(self, variantes):
+    def insertarBarcodesMasivo(self, variantes, con_errores=False):
         """Envía en UNA sola llamada los códigos de barras de varias variantes.
 
         `/CodigoBarras/CreateUpdateOrDelete` acepta una lista; el circuito
         original mandaba un código por request. Si el lote falla, reintenta
         uno por uno —verificando existencia— para que un código con problema
-        no tire abajo al resto. Devuelve la cantidad enviada correctamente.
+        no tire abajo al resto. Devuelve la cantidad enviada correctamente y,
+        con `con_errores=True`, también {código de producto: motivo} de los que
+        fallaron. Un error general (credenciales, conexión) corta el envío.
         """
         con_barcode = [v for v in variantes if v.barcode and v.codigo_unico]
+        errores = {}
         if not con_barcode:
-            return 0
+            return (0, errores) if con_errores else 0
 
         verificar = self.verificar_barcode_existente
         codigos = [self._build_barcode_payload(v, verificar_existencia=verificar)
@@ -804,7 +862,9 @@ class IntegracionWIS(models.Model):
                 params=None,
                 method="POST"
             )
-            return len(codigos)
+            return (len(codigos), errores) if con_errores else len(codigos)
+        except WisErrorGeneral:
+            raise
         except Exception as e:
             _logger.warning("[WIS] Lote de %d códigos de barras falló (%s), reintentando uno por uno...",
                             len(codigos), str(e))
@@ -817,10 +877,14 @@ class IntegracionWIS(models.Model):
                 # corrige.
                 self.insertarBarcode(variante)
                 enviados += 1
+            except WisErrorGeneral:
+                raise
             except Exception as item_err:
                 _logger.error("[WIS] Código de barras ERROR | producto=%s | codigo=%s | %s",
                               variante.codigo_unico, variante.barcode, str(item_err))
-        return enviados
+                errores[variante.codigo_unico] = (
+                    f"código de barras {variante.barcode}: {item_err}")
+        return (enviados, errores) if con_errores else enviados
 
 
     def transferirStock(self, vals):

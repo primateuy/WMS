@@ -4,7 +4,7 @@ import logging
 import json
 import requests
 
-from .wis_sync_queue import PRIORIDAD_BAJA, PRIORIDAD_NORMAL
+from .wis_sync_queue import PRIORIDAD_BAJA, PRIORIDAD_BOTON, PRIORIDAD_NORMAL, _errores_por_codigo
 
 _logger = logging.getLogger(__name__)
 
@@ -38,14 +38,16 @@ class ProductTemplate(models.Model):
             return
         grupos = self.env['wis.sync.queue']._read_group(
             [('product_id.product_tmpl_id', 'in', self.ids),
-             ('estado', 'in', ('pendiente', 'procesando', 'error'))],
+             ('estado', 'in', ('pendiente', 'procesando'))],
             groupby=['product_id'],
             aggregates=['__count'],
         )
+        # Variantes, no entradas: una variante puede tener dos entradas un rato,
+        # hasta que el cron descarta la que sobra.
         por_template = {}
-        for variante, cantidad in grupos:
+        for variante, _cantidad in grupos:
             por_template.setdefault(variante.product_tmpl_id.id, 0)
-            por_template[variante.product_tmpl_id.id] += cantidad
+            por_template[variante.product_tmpl_id.id] += 1
         for template in self:
             template.wis_variantes_en_cola = por_template.get(template.id, 0)
         
@@ -98,17 +100,15 @@ class ProductTemplate(models.Model):
             
 
     def enviar_variantes_wms(self):
-        """Envía YA todas las variantes del template a WMS, en lote.
+        """«Integrar con prioridad»: pone las variantes del template primeras en la cola.
 
-        Es el camino inmediato y **explícito**: lo pide el usuario con el botón
-        «Integrar ahora con WIS». Ningún camino automático llama acá — guardar
-        la ficha encola (ver `_encolar_variantes_wms`), porque un template con
-        cientos de variantes deja la transacción del guardado esperando a WIS
-        con sus filas bloqueadas.
-
-        🔴 **No atrapa la excepción a propósito.** Si el usuario pidió «ahora»,
-        tiene que enterarse de que falló; antes se logueaba y la pantalla decía
-        que todo salió bien.
+        Antes mandaba a WIS en el momento, dentro del pedido del usuario: con un
+        producto grande la pantalla quedaba esperando minutos —una consulta por
+        código de barras, y si el lote fallaba, otra vez de a uno—, con las filas
+        de la cola tomadas y el corte por tiempo a los 240 s. Ahora encola con
+        `PRIORIDAD_BOTON`: sale antes que todo lo que ya estaba en cola, y detrás
+        de lo que se pidió antes con este mismo botón. El resultado queda en el
+        chatter del producto (`wis.sync.queue._avisar_resultado`).
         """
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             raise ValidationError("La comunicación con WIS está deshabilitada. Actívela en la configuración de WIS antes de sincronizar.")
@@ -120,25 +120,33 @@ class ProductTemplate(models.Model):
         variantes.filtered(lambda v: not v.integracion_wms).with_context(
             _avoid_wms=True).write({'integracion_wms': True})
 
-        resultado = variantes._enviar_wms_en_lote(motivo='botón Integrar ahora')
+        Cola = self.env['wis.sync.queue']
+        entradas = Cola._encolar(
+            variantes, origen='boton',
+            origen_ref=', '.join(self.mapped('name'))[:200],
+            prioridad=PRIORIDAD_BOTON)
 
-        # Lo que quedó encolado de estas mismas variantes ya no hace falta.
-        self.env['wis.sync.queue'].search([
-            ('product_id', 'in', variantes.ids),
-            ('estado', '=', 'pendiente'),
-        ]).write({'estado': 'hecho', 'fecha_procesado': fields.Datetime.now()})
-
-        errores = (resultado or {}).get('errores', 0)
+        if entradas:
+            delante = Cola.search_count([
+                ('estado', '=', 'pendiente'), ('subestado', '=', 'sin_enviar'),
+                ('prioridad', '<=', PRIORIDAD_BOTON),
+                ('id', '<', min(entradas.ids)),
+            ])
+            mensaje = (f"{len(entradas)} variante(s) en cola con prioridad. "
+                       + (f"Antes salen {delante} variante(s) pedidas con este botón. "
+                          if delante else "Salen primero. ")
+                       + "El resultado queda en el historial del producto.")
+        else:
+            mensaje = ("Las variantes ya están en cola o en proceso de envío. "
+                       "El avance se ve en Integración WIS → Cola de productos.")
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
                 'title': 'Integración con WIS',
-                'message': (f"{(resultado or {}).get('enviados', 0)} variante(s) enviadas"
-                            + (f", {errores} con error (ver Logs WIS)." if errores
-                               else " correctamente.")),
-                'type': 'warning' if errores else 'success',
-                'sticky': bool(errores),
+                'message': mensaje,
+                'type': 'success' if entradas else 'info',
+                'sticky': False,
             },
         }
 
@@ -450,8 +458,8 @@ class Product(models.Model):
         plantilla, así que todo botón de esa página tiene que existir en los
         dos modelos o la vista no valida —y Odoo rechaza la vista entera con un
         error que apunta al registro, no al botón—. Desde una variante,
-        «Integrar ahora» manda todas las variantes de su producto, que es lo
-        que dice el botón.
+        «Integrar con prioridad» encola todas las variantes de su producto,
+        que es lo que dice el botón.
         """
         return self.mapped('product_tmpl_id').enviar_variantes_wms()
 
@@ -658,18 +666,20 @@ class Product(models.Model):
         _logger.info("[WIS] Envío en lote de %d variantes (%s)", len(variantes), motivo or 's/motivo')
         resultado = datosAPI.insertarProductosMasivo(variantes)
 
-        # Un log por variante, con el resultado del lote.
-        errores_texto = "\n".join(resultado.get('errores_detalle', []))
+        # Un log por variante, con SU resultado. El error se busca por el código que
+        # se mandó: la variante nueva que WIS rechaza no tiene `codigo_unico`
+        # guardado, y buscando por ése su log decía «success».
+        errores = _errores_por_codigo(resultado)
         for variante in variantes:
-            fallo = variante.codigo_unico and any(
-                variante.codigo_unico in e for e in resultado.get('errores_detalle', [])
-            )
+            codigo = variante.codigo_unico or datosAPI._wis_codigo_producto(variante)
+            error = errores.get(codigo)
+            fallo = bool(error) or not variante.codigo_unico
             variante._agregar_log_wms(
                 operacion='enviar_producto',
                 resultado='error' if fallo else 'success',
                 detalle=(f"Envío en lote ({motivo}). "
                          f"Enviados: {resultado['enviados']} | Errores: {resultado['errores']}"
-                         + (f"\n{errores_texto}" if fallo else '')),
+                         + (f"\n{error or 'La variante no obtuvo código WIS.'}" if fallo else '')),
                 response_data=None,
             )
 
