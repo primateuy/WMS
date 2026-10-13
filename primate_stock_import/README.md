@@ -22,19 +22,18 @@ inventario; los Responsables de inventario lo tienen por defecto).
 ## Formato del archivo
 
 Primera hoja, encabezados en la fila 1 (sin distinguir mayúsculas). Una fila por
-línea de movimiento; las filas con la misma `operation_ref` forman una operación.
+línea de movimiento; las filas con el mismo `origin` forman una operación.
 La primera fila de cada grupo define el cabezal y el resto debe repetirlo.
 
 | Columna | Oblig. | Descripción |
 |---|---|---|
-| `operation_ref` | ✔ | Identificador libre de la operación (agrupa filas). |
+| `origin` | ✔ | Documento de origen (OC, pedido, etc.). Agrupa filas y se guarda en el campo *Documento origen*. |
 | `picking_type` | ✔ | Nombre exacto, `Almacén: Nombre` o código de secuencia (`IN`, `OUT`, `INT`). |
 | `warehouse` | | Almacén, para desambiguar tipos con el mismo nombre. |
 | `partner` | | Contacto por RUT o nombre exacto. |
 | `location_origin` | | Ubicación por nombre completo (`WH/Stock`), nombre corto o código de barras. Default: la del tipo de operación → la del contacto → proveedores/clientes genéricas (misma cascada que `stock.picking`). |
 | `location_dest` | | Ídem para destino. |
 | `scheduled_date` | | `AAAA-MM-DD`, `AAAA-MM-DD HH:MM` o `DD/MM/AAAA`, en la zona horaria del usuario. |
-| `origin` | | Documento origen. Default: `operation_ref`. |
 | `product` | ✔ | Referencia interna o código de barras de la variante. |
 | `lot` | | Lote/serie. Ver *Limitaciones*. |
 | `quantity` | ✔ | Cantidad > 0. Acepta coma o punto decimal. |
@@ -68,6 +67,12 @@ En la lista de operaciones, *Acción › Comprobar disponibilidad (importadas)*
 ejecuta `action_assign()` (que confirma los borradores) picking por picking dentro
 de un savepoint: los que fallan quedan anotados en su chatter y no bloquean al
 resto. Las operaciones hechas o canceladas se omiten.
+
+*Acción › Marcar por realizar* equivale al botón *Marcar por realizar* del
+formulario (`action_confirm()`) sobre los borradores seleccionados, con el mismo
+manejo de errores. Según el método de reserva del tipo de operación, quedan
+*Listas* si hay stock o *Esperando* si no. Las que no están en borrador se omiten
+y un borrador sin movimientos se informa como error.
 
 ## Limitaciones (v1)
 

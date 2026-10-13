@@ -71,7 +71,7 @@ class PickingBuilder:
             'partner_id': group['partner_id'],
             'location_id': group['location_id'],
             'location_dest_id': group['location_dest_id'],
-            'origin': group['origin'] or group['operation_ref'],
+            'origin': group['origin'],
             'import_session_id': session.id,
             'move_ids_without_package': move_commands,
         }

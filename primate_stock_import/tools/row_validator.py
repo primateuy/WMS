@@ -42,12 +42,11 @@ class RowValidator:
             'warnings': {row(str): [mensaje, ...]},
             'groups': [
                 {
-                    'operation_ref': str, 'row': int,
+                    'origin': str, 'row': int,
                     'picking_type_id': int, 'company_id': int,
                     'partner_id': int | False,
                     'location_id': int, 'location_dest_id': int,
                     'scheduled_date': 'YYYY-MM-DD HH:MM:SS' | False,
-                    'origin': str | False,
                     'lines': [
                         {'row': int, 'product_id': int, 'product_uom_id': int,
                          'quantity': float, 'lot_name': str | False},
@@ -70,7 +69,7 @@ class RowValidator:
     # API pública
     # ------------------------------------------------------------------
     def validate(self, rows):
-        """Valida todas las filas y arma los grupos por ``operation_ref``.
+        """Valida todas las filas y arma los grupos por ``origin``.
 
         Args:
             rows (list[dict]): salida de ``ExcelParser.parse``.
@@ -82,8 +81,8 @@ class RowValidator:
         self.warnings = {}
         groups = self._group_rows(rows)
         validated_groups = []
-        for operation_ref, group_rows in groups.items():
-            header = self._validate_header(operation_ref, group_rows)
+        for origin, group_rows in groups.items():
+            header = self._validate_header(origin, group_rows)
             lines = [self._validate_line(row) for row in group_rows]
             lines = [line for line in lines if line]
             if header and lines:
@@ -103,17 +102,17 @@ class RowValidator:
     # Agrupación y cabezal
     # ------------------------------------------------------------------
     def _group_rows(self, rows):
-        """Agrupa filas por ``operation_ref`` conservando el orden del archivo."""
+        """Agrupa filas por ``origin`` (documento de origen) conservando el orden del archivo."""
         groups = {}
         for row in rows:
-            operation_ref = row.get('operation_ref')
-            if not operation_ref:
-                self._add_error(row, _("'operation_ref' es obligatorio."))
+            origin = row.get('origin')
+            if not origin:
+                self._add_error(row, _("'origin' es obligatorio."))
                 continue
-            groups.setdefault(operation_ref, []).append(row)
+            groups.setdefault(origin, []).append(row)
         return groups
 
-    def _validate_header(self, operation_ref, group_rows):
+    def _validate_header(self, origin, group_rows):
         """Resuelve el cabezal de la operación a partir de la primera fila.
 
         Verifica además que las columnas de cabezal sean idénticas en todas
@@ -129,7 +128,7 @@ class RowValidator:
                     self._add_error(row, _(
                         "'%(column)s' inconsistente dentro de la operación %(ref)s: "
                         "se esperaba '%(expected)s' (fila %(first_row)s).",
-                        column=column, ref=operation_ref,
+                        column=column, ref=origin,
                         expected=first.get(column) or '', first_row=first['row'],
                     ))
 
@@ -148,7 +147,7 @@ class RowValidator:
             self._add_error(first, _("La ubicación de origen y de destino son la misma."))
             return None
         return {
-            'operation_ref': operation_ref,
+            'origin': origin,
             'row': first['row'],
             'picking_type_id': picking_type.id,
             'company_id': company.id,
@@ -156,7 +155,6 @@ class RowValidator:
             'location_id': location.id,
             'location_dest_id': location_dest.id,
             'scheduled_date': scheduled_date or False,
-            'origin': first.get('origin') or False,
         }
 
     def _default_locations(self, picking_type, partner):

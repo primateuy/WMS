@@ -18,8 +18,8 @@ internos) desde un archivo Excel y generarlas en estado **borrador**.
 Flujo:
 
 1. El usuario descarga la plantilla desde el asistente.
-2. Completa una fila por línea de movimiento; las filas con la misma
-   ``operation_ref`` se agrupan en una misma operación.
+2. Completa una fila por línea de movimiento; las filas con el mismo
+   ``origin`` (documento de origen) se agrupan en una misma operación.
 3. Sube el archivo y **valida**: el asistente resuelve tipos de operación,
    ubicaciones, productos, UdM y fechas, y muestra un resumen de errores
    (bloqueantes) y advertencias por fila. No se crea nada en este paso.

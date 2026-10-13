@@ -15,7 +15,7 @@
                     <div class="alert alert-info" role="status">
                         <ol class="mb-0">
                             <li>Descargá la plantilla y completá una fila por línea de movimiento.</li>
-                            <li>Las filas con la misma <code>operation_ref</code> forman una sola operación.</li>
+                            <li>Las filas con el mismo <code>origin</code> (documento de origen) forman una sola operación.</li>
                             <li>Subí el archivo y validá. En este paso no se crea nada.</li>
                         </ol>
                     </div>

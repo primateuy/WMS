@@ -74,7 +74,7 @@ class PrimateStockImportCommon(TransactionCase):
     def _int_row(self, ref, product, quantity, **extra):
         """Fila de traslado interno Stock -> Estantería para el producto dado."""
         row = {
-            'operation_ref': ref,
+            'origin': ref,
             'picking_type': self.picking_type_int.name,
             'warehouse': self.warehouse.name,
             'location_origin': self.stock_location.complete_name,
