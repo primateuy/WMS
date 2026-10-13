@@ -118,6 +118,46 @@ class WisPickingCola(models.Model):
         ]).write({'estado': 'cancelado'})
 
     @api.model
+    def _confirmar_por_notificacion(self, pickings, evento):
+        """WIS notificó algo sobre estos pickings: los tiene, aunque Odoo no lo haya podido
+        confirmar (timeout) o se haya rendido después de varios intentos.
+
+        Se da por enviada la entrada de la cola, para que no se reenvíe (WIS rechaza o duplica
+        lo que ya recibió), y el picking pasa a 'enviado' para que la notificación se procese.
+        Caso real: support, 12-10-2026, seis recepciones de importación quedaron en
+        «sin enviar» tras los timeouts y WIS las tenía todas. Sólo cubre pickings que pasaron
+        por la cola: un 'sin_enviar' que nunca se mandó no se toca.
+        """
+        entradas = self.search([
+            ('picking_id', 'in', pickings.ids), ('estado', 'in', ('pendiente', 'error')),
+        ])
+        if not entradas:
+            return self.browse()
+        entradas.write({
+            'estado': 'enviado',
+            'tipo_error': False,
+            'proximo_intento': False,
+            'fecha_envio': fields.Datetime.now(),
+            'ultimo_error': _("WIS lo notificó (%s): lo tiene aunque el envío no se había "
+                              "podido confirmar.") % evento,
+        })
+        sin_confirmar = entradas.picking_id.filtered(
+            lambda p: p.wms_estado in ('en_cola', 'sin_enviar'))
+        sin_confirmar.with_context(skip_wms_integration=True).write({'wms_estado': 'enviado'})
+        for entrada in entradas:
+            self.env['wms.integracion.log'].sudo().create({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'info',
+                'modelo': 'stock.picking',
+                'texto': _("%(picking)s: WIS lo notificó (%(evento)s); se da por enviado y no "
+                           "se reenvía.", picking=entrada.picking_id.name, evento=evento),
+                'picking_id': entrada.picking_id.id,
+                'resultado': 'exito',
+                'codigo_unico': entrada.picking_id.codigo_unico,
+            })
+        return entradas
+
+    @api.model
     def _disparar_cron(self):
         cron = self.env.ref('integracion_wis.ir_cron_wis_picking_cola', raise_if_not_found=False)
         if not cron:

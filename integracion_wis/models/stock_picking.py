@@ -1,4 +1,4 @@
-from odoo import models, fields, api
+from odoo import models, fields, api, _
 import requests
 from odoo.exceptions import ValidationError, UserError
 from markupsafe import Markup
@@ -856,6 +856,10 @@ class StockPicking(models.Model):
                     f"puede emitirse porque hay líneas en cantidad 0. Verificar las cantidades "
                     f"preparadas (deberían venir en el contenedor de WIS) antes de validar."
                 )
+            # El core controla los paquetes DESPUÉS de esta emisión: si el picking no va a
+            # poder pasar a 'done' por un paquete, se tiene que saber antes de emitir un CFE
+            # que ya no se puede deshacer.
+            picking._wis_controlar_paquetes()
             try:
                 picking.create_delivery_guide()  # respeta cfe_emitido + wis_skip_eremito
             except Exception as e:
@@ -875,6 +879,58 @@ class StockPicking(models.Model):
                     f"quedó emitido y es obligatorio antes de pasar a 'Hecho'. "
                     f"Resolver la emisión del CFE y reintentar."
                 )
+
+    def _wis_controlar_paquetes(self):
+        """Anticipa el control de paquetes del core (`stock.move._action_done`).
+
+        El core rechaza un paquete que termina con stock en dos ubicaciones («You cannot move
+        the same package content more than once…»), pero lo hace después de mover los quants y
+        después de que este módulo emitió el e-Remito. Se repite acá, antes de emitir: cada
+        paquete destino va a una sola ubicación y no le queda stock en otra que este picking
+        no se lleve.
+        """
+        for picking in self:
+            lineas = picking.move_line_ids.filtered(
+                lambda ml: ml.result_package_id and ml.quantity > 0)
+            for paquete in lineas.result_package_id:
+                propias = lineas.filtered(lambda ml: ml.result_package_id == paquete)
+                destinos = propias.location_dest_id
+                motivo = None
+                if len(destinos) > 1:
+                    motivo = _("va a %s ubicaciones distintas") % len(destinos)
+                else:
+                    for quant in paquete.quant_ids.filtered(
+                            lambda q: q.quantity > 0 and q.location_id != destinos):
+                        sale = sum(propias.filtered(
+                            lambda ml: ml.package_id == paquete
+                            and ml.location_id == quant.location_id
+                            and ml.product_id == quant.product_id
+                        ).mapped('quantity_product_uom'))
+                        if quant.quantity - sale > 0:
+                            motivo = _("tiene stock en %s") % quant.location_id.complete_name
+                            break
+                if motivo:
+                    raise UserError(_(
+                        "No se puede completar %(picking)s: el paquete %(paquete)s %(motivo)s. "
+                        "No se emitió el e-Remito.",
+                        picking=picking.name, paquete=paquete.name, motivo=motivo))
+
+    def _get_remito_adenda(self):
+        """Agrega los paquetes a la adenda del e-Remito de las operaciones de WIS.
+
+        El operario identifica el bulto desde el remito (pedido de Forum, 12-10-2026). Se
+        resuelve acá y no en `forum_intercompany_cfe`, que hace lo mismo pero no se instala.
+        """
+        adenda = super()._get_remito_adenda() or ''
+        if not (self.codigo_unico or self.picking_type_id.integracion_wms):
+            return adenda
+        paquetes = self.move_line_ids.filtered(
+            lambda ml: ml.quantity > 0).result_package_id.sorted('name')
+        nombres = ', '.join(dict.fromkeys(p.name for p in paquetes if p.name))
+        if not nombres:
+            return adenda
+        bloque = _("Paquetes: %s") % nombres
+        return f"{adenda}\n{bloque}" if adenda else bloque
 
     def _wis_registrar_falla_eremito(self, picking, detalle):
         """Deja constancia EN EL CHATTER del picking + wms.integracion.log de que NO se pudo

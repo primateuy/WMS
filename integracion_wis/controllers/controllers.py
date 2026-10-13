@@ -5,7 +5,8 @@ import hashlib
 import base64
 import logging
 import time
-from odoo import http, fields, SUPERUSER_ID
+from odoo import http, fields, SUPERUSER_ID, _
+from odoo.exceptions import UserError
 from odoo.http import request
 from markupsafe import Markup
 _logger = logging.getLogger(__name__)
@@ -273,6 +274,7 @@ Body: {body_str[:500]}"""
                 )
                 continue
 
+            self._wis_reconocer_envio(numero_referencia)
             pickings_todos = request.env['stock.picking'].sudo().search(
                 [('codigo_unico', '=', numero_referencia)]
             )
@@ -568,6 +570,94 @@ Body: {body_str[:500]}"""
                 f"Errores: {' | '.join(errores)}"
             )
 
+    def _wis_reconocer_envio(self, codigo):
+        """Una notificación de WIS sobre `codigo` prueba que WIS lo tiene: si Odoo todavía lo
+        tenía en la cola (timeout sin confirmar, o se rindió y lo dejó «sin enviar»), se da por
+        enviado antes de procesar. Sin esto la notificación no encontraba el picking y la cola
+        lo volvía a mandar. Ver `wis.picking.cola._confirmar_por_notificacion`."""
+        if not codigo:
+            return
+        pickings = request.env['stock.picking'].sudo().search([
+            ('codigo_unico', '=', codigo), ('wms_estado', 'in', ('en_cola', 'sin_enviar')),
+        ])
+        if pickings:
+            request.env['wis.picking.cola'].sudo()._confirmar_por_notificacion(
+                pickings, getattr(self, '_wis_evento_actual', '') or 'notificación de WIS')
+
+    @staticmethod
+    def _wis_contenedores_del_pedido(contenedores, pedido):
+        """Los contenedores del webhook que son de `pedido`, cada uno sólo con sus detalles.
+
+        WIS manda UNA lista de contenedores para todos los pedidos del envío, y cada detalle
+        dice de qué pedido es. Sin este filtro cada pedido sumaba lo de todos y se quedaba con
+        el primer contenedor (support, 12-10-2026: 5 pedidos en el paquete de uno solo).
+        Un detalle sin `pedido` es el formato de un solo pedido por webhook: se conserva.
+        Un contenedor sin detalles no se puede atribuir y se conserva, como antes.
+        No modifica el payload.
+        """
+        propios = []
+        for contenedor in contenedores or []:
+            detalles = contenedor.get('detalles') or []
+            if not detalles:
+                propios.append(contenedor)
+                continue
+            del_pedido = [d for d in detalles if not d.get('pedido') or d.get('pedido') == pedido]
+            if del_pedido:
+                propios.append(dict(contenedor, detalles=del_pedido))
+        return propios
+
+    def _wis_paquete_para_contenedor(self, contenedor, nombre_alternativo, destino):
+        """El `stock.quant.package` del contenedor, para dejar mercadería en `destino`.
+
+        El nombre es el CodigoBarras (o el NumeroContenedor). Se reusa un paquete con ese
+        nombre sólo si no tiene stock fuera de `destino`: WIS reusa los códigos de sus
+        contenedores físicos, y meter mercadería nueva en un paquete que sigue con stock en
+        otra ubicación es justo lo que el core rechaza («same package … into two location»).
+        Si no hay uno libre se crea otro con el mismo nombre.
+        """
+        codigo_barras = contenedor.get('codigoBarras', '') or ''
+        nro_contenedor = contenedor.get('numeroContenedor', '')
+        id_externo = contenedor.get('idExternoContenedor', '')
+        nombre = codigo_barras or (str(nro_contenedor) if nro_contenedor else nombre_alternativo)
+        Package = request.env['stock.quant.package'].sudo()
+        for paquete in Package.search([('name', '=', nombre)], order='id desc'):
+            ajeno = paquete.quant_ids.filtered(
+                lambda q: q.quantity > 0 and not q.location_id._child_of(destino))
+            if ajeno:
+                continue
+            if id_externo and not paquete.wis_id_externo:
+                paquete.write({'wis_id_externo': str(id_externo)})
+            return paquete
+        return Package.create({
+            'name': nombre,
+            'wis_id_externo': str(id_externo) if id_externo else False,
+        })
+
+    def _wis_unificar_saldos(self, picking):
+        """Deja UN solo saldo pendiente por pedido.
+
+        Una preparación parcial con productos en 0 generaba dos backorders con el mismo
+        código: el de las líneas en 0 (`_wis_separar_ceros_a_backorder`) y el del remanente
+        de las que se prepararon a medias (el wizard de backorder). La próxima preparación de
+        WIS sólo encontraba el primero y el remanente quedaba colgado. Se pasan los movimientos
+        al saldo más viejo y se borra el que queda vacío.
+        """
+        saldos = request.env['stock.picking'].sudo().search([
+            ('backorder_id', '=', picking.id),
+            ('state', 'not in', ('done', 'cancel')),
+        ], order='id')
+        if len(saldos) < 2:
+            return saldos
+        principal, sobrantes = saldos[0], saldos[1:]
+        sin_wis = {'skip_wms_integration': True}
+        sobrantes.move_ids.with_context(**sin_wis).write({'picking_id': principal.id})
+        sobrantes.move_line_ids.with_context(**sin_wis).write({'picking_id': principal.id})
+        _logger.info(
+            "[WIS] preparada | saldo de %s unificado en %s (se borran %s vacíos).",
+            picking.name, principal.name, ', '.join(sobrantes.mapped('name')))
+        sobrantes.with_context(**sin_wis).unlink()
+        return principal
+
     def _wis_reservar_desde_paquete_predecesor(self, pick):
         """Para una operación interna (crosspick): mueve los PAQUETES que sus predecesores (las N
         cajas preparadas) depositaron en el origen de este picking, identificados por `group_id` +
@@ -603,9 +693,13 @@ Body: {body_str[:500]}"""
         # desde donde realmente quedó (`ml.location_dest_id`). El move del crosspick se reasigna
         # para salir de esa ubicación. Sin esto el crosspick quedaba `confirmed` (no se validaba)
         # porque `action_assign` no encontraba el stock empaquetado en la otra Salida.
-        if not por_producto:
+        # En crossdock todas las tiendas de una OC comparten el `group_id`: sin adyacencia, el
+        # único vínculo con SU cadena es el código propagado. Sin él, este fallback se llevaba
+        # paquetes de otra tienda.
+        if not por_producto and pick.codigo_unico:
             predecesores = Picking.search([
                 ('group_id', '=', pick.group_id.id),
+                ('codigo_unico', '=', pick.codigo_unico),
                 ('state', '=', 'done'),
                 ('id', '!=', pick.id),
             ], order='id')
@@ -690,46 +784,64 @@ Body: {body_str[:500]}"""
         ], order='id')
         for pick in internas:
             try:
-                # SIEMPRE mover los paquetes de las cajas predecesoras (consolidando las N cajas)
-                # para que los PAQUETES VIAJEN al destino. Si no hay paquetes de predecesor (no es
-                # un crosspick post-preparada), recién ahí reserva normal (FIFO) por disponibilidad.
-                reservado_paquete = self._wis_reservar_desde_paquete_predecesor(pick)
-                if not reservado_paquete and pick.state not in ('assigned',):
-                    pick.action_assign()
-                for move_line in pick.move_line_ids:
-                    if move_line.qty_done == 0:
-                        move_line.sudo().qty_done = (
-                            move_line.quantity_product_uom
-                            or move_line.qty_done
-                            or move_line.move_id.product_uom_qty
-                        )
-                # Validar si quedó 'assigned' (reserva normal) O si se forzaron cantidades desde el
-                # paquete del predecesor (transferencia inmediata, sin depender de la reserva FIFO).
-                hay_cantidades = any(ml.qty_done > 0 for ml in pick.move_line_ids)
-                if pick.state == 'assigned' or hay_cantidades:
-                    res = pick.with_context(
-                        skip_wms_integration=True,
-                        skip_backorder=True,
-                    ).button_validate()
-                    if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
-                        request.env['stock.backorder.confirmation'].with_context(
-                            **res.get('context', {})
-                        ).sudo().create({}).process_cancel_backorder()
-                    _logger.info(
-                        "[WIS] %s | operación interna %s (codigo_unico=%s) validada a 'done'.",
-                        origen, pick.name, codigo_unico,
-                    )
-                else:
-                    _logger.warning(
-                        "[WIS] %s | operación interna %s no quedó 'assigned' (state=%s) y no se "
-                        "pudo forzar desde el paquete del predecesor; no se validó.",
-                        origen, pick.name, pick.state,
-                    )
+                # Savepoint: si la validación falla después de mover stock (p. ej. el core
+                # rechaza un paquete), no queda nada a medias. Antes el except se tragaba el
+                # error con los quants ya movidos y la operación seguía en «Listo».
+                with request.env.cr.savepoint():
+                    self._wis_validar_operacion_interna(pick, codigo_unico, origen)
             except Exception as e:
                 _logger.warning(
                     "[WIS] %s | no se pudo validar la operación interna %s: %s",
                     origen, pick.name, e,
                 )
+                self._ilog({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'error',
+                    'modelo': 'stock.picking',
+                    'texto': (f"{origen}: la operación interna {pick.name} no se pudo validar; "
+                              f"la tienda no la va a ver pendiente hasta resolverlo."),
+                    'picking_id': pick.id,
+                    'resultado': 'error',
+                    'detalle': str(e),
+                })
+
+    def _wis_validar_operacion_interna(self, pick, codigo_unico, origen):
+        """Valida una operación interna de la cascada (ver `_wis_validar_operaciones_internas`)."""
+        # SIEMPRE mover los paquetes de las cajas predecesoras (consolidando las N cajas)
+        # para que los PAQUETES VIAJEN al destino. Si no hay paquetes de predecesor (no es
+        # un crosspick post-preparada), recién ahí reserva normal (FIFO) por disponibilidad.
+        reservado_paquete = self._wis_reservar_desde_paquete_predecesor(pick)
+        if not reservado_paquete and pick.state not in ('assigned',):
+            pick.action_assign()
+        for move_line in pick.move_line_ids:
+            if move_line.qty_done == 0:
+                move_line.sudo().qty_done = (
+                    move_line.quantity_product_uom
+                    or move_line.qty_done
+                    or move_line.move_id.product_uom_qty
+                )
+        # Validar si quedó 'assigned' (reserva normal) O si se forzaron cantidades desde el
+        # paquete del predecesor (transferencia inmediata, sin depender de la reserva FIFO).
+        hay_cantidades = any(ml.qty_done > 0 for ml in pick.move_line_ids)
+        if pick.state == 'assigned' or hay_cantidades:
+            res = pick.with_context(
+                skip_wms_integration=True,
+                skip_backorder=True,
+            ).button_validate()
+            if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                request.env['stock.backorder.confirmation'].with_context(
+                    **res.get('context', {})
+                ).sudo().create({}).process_cancel_backorder()
+            _logger.info(
+                "[WIS] %s | operación interna %s (codigo_unico=%s) validada a 'done'.",
+                origen, pick.name, codigo_unico,
+            )
+        else:
+            _logger.warning(
+                "[WIS] %s | operación interna %s no quedó 'assigned' (state=%s) y no se "
+                "pudo forzar desde el paquete del predecesor; no se validó.",
+                origen, pick.name, pick.state,
+            )
 
     def _handle_confirmacion_pedido(self, data):
         """Spec sección 2: WIS despachó físicamente un pedido.
@@ -764,16 +876,7 @@ Body: {body_str[:500]}"""
                     "No se pudo parsear fechaCierre '%s', usando now()", fecha_cierre_raw
                 )
 
-        contenedores = data.get('contenedores', [])
-        # .get(k, default) NO usa el default cuando el valor es None. WIS manda null en
-        # cantidadBultos/pesoReal cuando no hay dato, así que coercemos con `or` para evitar
-        # TypeError "unsupported operand type(s) for +: 'int' and 'NoneType'".
-        total_bultos = sum((c.get('cantidadBultos') or 0)   for c in contenedores)
-        peso_total   = sum((c.get('pesoReal')       or 0.0) for c in contenedores)
-        precintos    = ', '.join(filter(None,
-            [c.get('precinto1', '') for c in contenedores] +
-            [c.get('precinto2', '') for c in contenedores]
-        ))
+        contenedores_envio = data.get('contenedores', [])
 
         errores = []
 
@@ -785,6 +888,20 @@ Body: {body_str[:500]}"""
             if not nombre_pedido:
                 errores.append("Un pedido del array no tiene campo 'pedido'.")
                 continue
+            self._wis_reconocer_envio(nombre_pedido)
+
+            # Bultos, peso, precintos y paquetes son los de los contenedores de ESTE pedido:
+            # antes se sumaban los de todo el envío y se le cargaban a cada pedido.
+            contenedores = self._wis_contenedores_del_pedido(contenedores_envio, nombre_pedido)
+            # .get(k, default) NO usa el default cuando el valor es None. WIS manda null en
+            # cantidadBultos/pesoReal cuando no hay dato, así que coercemos con `or` para evitar
+            # TypeError "unsupported operand type(s) for +: 'int' and 'NoneType'".
+            total_bultos = sum((c.get('cantidadBultos') or 0)   for c in contenedores)
+            peso_total   = sum((c.get('pesoReal')       or 0.0) for c in contenedores)
+            precintos    = ', '.join(filter(None,
+                [c.get('precinto1', '') for c in contenedores] +
+                [c.get('precinto2', '') for c in contenedores]
+            ))
 
             # Spec 2.4 paso 1: buscar por codigo_unico, luego name, luego idPedidoWMS.
             # Acepta pickings en state='done' SOLO si su wms_estado es 'preparado'
@@ -907,64 +1024,71 @@ Body: {body_str[:500]}"""
             try:
                 # Spec 2.3: emisión de eRemito ANTES de validar, por cada caja. Las preparadas ya
                 # lo emitieron en su preparada -> se saltea por cfe_emitido. Una falla NO bloquea.
+                # Queda FUERA del savepoint de abajo: un CFE emitido en UCFE no se deshace con un
+                # rollback, y Odoo tiene que seguir sabiendo que se emitió.
                 for _pk in pickings_despachados:
                     self._intentar_emitir_eremito(_pk, origen='confirmacionPedido')
 
-                # Spec 2.4 paso 2: registrar datos de transporte en TODAS las cajas despachadas.
-                pickings_despachados.with_context(skip_wms_integration=True).write({
-                    'wms_estado':            'despachado',
-                    'wms_origen':            'despacho',
-                    'wms_fecha_despacho':    fecha_despacho,
-                    'wms_transportadora':    str(transportadora) if transportadora else matricula,
-                    'wms_descripcion_camion': descripcion_camion,
-                    'wms_nro_remito':        codigo_origen,
-                    'wms_cantidad_bultos':   total_bultos,
-                    'wms_peso_total':        peso_total,
-                    'wms_observaciones_preparacion': (
-                        f"Despacho — Camión: {matricula} | "
-                        f"Precintos: {precintos or '—'} | Memo: {memo or '—'}"
-                    ),
-                })
+                # Savepoint: TODO lo del despacho de este pedido o nada. WIS no reenvía la
+                # notificación; si algo falla, el pedido queda como estaba (sin 'despachado' ni
+                # stock movido) y el motivo en el log. Antes quedaban quants movidos con el
+                # picking en «Listo».
+                with request.env.cr.savepoint():
+                    # Spec 2.4 paso 2: registrar datos de transporte en TODAS las cajas despachadas.
+                    pickings_despachados.with_context(skip_wms_integration=True).write({
+                        'wms_estado':            'despachado',
+                        'wms_origen':            'despacho',
+                        'wms_fecha_despacho':    fecha_despacho,
+                        'wms_transportadora':    str(transportadora) if transportadora else matricula,
+                        'wms_descripcion_camion': descripcion_camion,
+                        'wms_nro_remito':        codigo_origen,
+                        'wms_cantidad_bultos':   total_bultos,
+                        'wms_peso_total':        peso_total,
+                        'wms_observaciones_preparacion': (
+                            f"Despacho — Camión: {matricula} | "
+                            f"Precintos: {precintos or '—'} | Memo: {memo or '—'}"
+                        ),
+                    })
 
-                # Punto 4: autocompletar document_type antes de validar (si aplica CFE).
-                for _pk in pickings_despachados:
-                    _pk.sudo()._wis_complete_document_type()
+                    # Punto 4: autocompletar document_type antes de validar (si aplica CFE).
+                    for _pk in pickings_despachados:
+                        _pk.sudo()._wis_complete_document_type()
 
-                # GUARD: si el picking YA fue validado por mercaderiaPreparada (state='done'), NO
-                # se re-arman paquetes ni se re-setean cantidades ni se re-valida: la preparada ya
-                # definió las cantidades reales y armó el paquete. confirmacionPedido solo confirma
-                # el despacho (metadatos + e-Remito + operaciones internas). Re-procesar acá pisaría
-                # lo que hizo la preparada (sobre todo en parciales/crossdock). Si NO viene de una
-                # preparada (state='assigned'), se hace el flujo normal (armar paquete + validar).
-                # paquetes_creados = []
-                # if picking.state != 'done':
-                # Spec 2.4 paso 3 + 2.5: crear paquetes con mapa de cantidades por producto.
-                paquetes_creados = self._crear_paquetes_desde_contenedores(
-                    picking, contenedores
-                )
-
-                # Asignar cantidad por defecto a las move_lines sin qty_done
-                for move_line in picking.move_line_ids:
-                    if move_line.qty_done == 0:
-                        move_line.sudo().qty_done = (
-                            move_line.quantity_product_uom or move_line.qty_done or move_line.move_id.product_uom_qty
+                    # GUARD: si el picking YA fue validado por mercaderiaPreparada (state='done'),
+                    # NO se re-arman paquetes ni se re-setean cantidades ni se re-valida: la
+                    # preparada ya definió las cantidades reales y armó el paquete. Re-armarlo le
+                    # cambiaba el paquete a líneas ya hechas (support, 12-10-2026: 181-A-155
+                    # quedó con el contenedor de otro pedido).
+                    if picking.state == 'done':
+                        paquetes_creados = picking.move_line_ids.result_package_id
+                    else:
+                        # Spec 2.4 paso 3 + 2.5: crear paquetes con mapa de cantidades por producto.
+                        paquetes_creados = self._crear_paquetes_desde_contenedores(
+                            picking, contenedores
                         )
 
-                # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder)
-                if picking.state == 'assigned':
-                    res = picking.with_context(
-                        skip_wms_integration=True,
-                        skip_backorder=True,
-                    ).button_validate()
+                    # Asignar cantidad por defecto a las move_lines sin qty_done
+                    for move_line in picking.move_line_ids:
+                        if move_line.qty_done == 0:
+                            move_line.sudo().qty_done = (
+                                move_line.quantity_product_uom or move_line.qty_done or move_line.move_id.product_uom_qty
+                            )
 
-                    if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
-                        backorder_wiz = (
-                            request.env['stock.backorder.confirmation']
-                            .with_context(**res.get('context', {}))
-                            .sudo()
-                            .create({})
-                        )
-                        backorder_wiz.process_cancel_backorder()
+                    # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder)
+                    if picking.state == 'assigned':
+                        res = picking.with_context(
+                            skip_wms_integration=True,
+                            skip_backorder=True,
+                        ).button_validate()
+
+                        if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                            backorder_wiz = (
+                                request.env['stock.backorder.confirmation']
+                                .with_context(**res.get('context', {}))
+                                .sudo()
+                                .create({})
+                            )
+                            backorder_wiz.process_cancel_backorder()
 
                 # Validar las operaciones internas de Odoo (no_integrado) que comparten
                 # este código — se les propagó el código de este paso WIS y deben quedar
@@ -1008,6 +1132,20 @@ Body: {body_str[:500]}"""
                     "Error procesando despacho para picking '%s': %s", nombre_pedido, e
                 )
                 errores.append(f"Error en picking '{nombre_pedido}': {str(e)}")
+                self._ilog({
+                    'fecha': fields.Datetime.now(),
+                    'nivel': 'error',
+                    'modelo': 'stock.picking',
+                    'texto': (f"confirmacionPedido: el despacho de {nombre_pedido} NO se procesó; "
+                              f"quedó como estaba antes de la notificación."),
+                    'picking_id': picking.id,
+                    'resultado': 'error',
+                    'detalle': f"Motivo: {e}",
+                    'payload_webhook': json.dumps({
+                        'pedido': pedido_data,
+                        'contenedores': contenedores,
+                    }, ensure_ascii=False, indent=2),
+                })
 
         if errores:
             self._ilog({
@@ -1093,24 +1231,13 @@ Body: {body_str[:500]}"""
         }
 
         for contenedor in contenedores:
-            codigo_barras = contenedor.get('codigoBarras', '') or ''
-            nro_contenedor = contenedor.get('numeroContenedor', '')
-            id_externo = contenedor.get('idExternoContenedor', '')
             detalles_contenedor = contenedor.get('detalles', []) or []
 
             # Spec 2.2: name = CodigoBarras (o str(NumeroContenedor) si vacío)
-            nombre_paquete = codigo_barras or (str(nro_contenedor) if nro_contenedor else f"PKG-{picking.name}-{len(paquetes_creados) + 1}")
-
-            paquete = request.env['stock.quant.package'].sudo().search(
-                [('name', '=', nombre_paquete)], limit=1
-            )
-            if not paquete:
-                paquete = request.env['stock.quant.package'].sudo().create({
-                    'name': nombre_paquete,
-                    'wis_id_externo': str(id_externo) if id_externo else False,
-                })
-            elif id_externo and not paquete.wis_id_externo:
-                paquete.sudo().write({'wis_id_externo': str(id_externo)})
+            paquete = self._wis_paquete_para_contenedor(
+                contenedor, f"PKG-{picking.name}-{len(paquetes_creados) + 1}",
+                picking.location_dest_id)
+            nombre_paquete = paquete.name
 
             paquetes_creados.append(paquete)
 
@@ -1186,7 +1313,6 @@ Body: {body_str[:500]}"""
         quedó por debajo de su demanda (genera backorder con el remanente al validar).
         """
         SML = request.env['stock.move.line'].sudo()
-        Package = request.env['stock.quant.package'].sudo()
         paquetes_creados = []
         preparado_por_cod = {}   # codigo_unico producto -> cantidad total preparada (sumada)
         paquete_por_cod = {}     # codigo_unico producto -> paquete que lo contiene
@@ -1202,20 +1328,9 @@ Body: {body_str[:500]}"""
                     "[WIS] preparada | action_assign falló en %s: %s", picking.name, e)
 
         for contenedor in contenedores:
-            codigo_barras = contenedor.get('codigoBarras', '') or ''
-            nro_contenedor = contenedor.get('numeroContenedor', '')
-            id_externo = contenedor.get('idExternoContenedor', '')
-            nombre_paquete = codigo_barras or (
-                str(nro_contenedor) if nro_contenedor
-                else f"PKG-{picking.name}-{len(paquetes_creados) + 1}")
-            paquete = Package.search([('name', '=', nombre_paquete)], limit=1)
-            if not paquete:
-                paquete = Package.create({
-                    'name': nombre_paquete,
-                    'wis_id_externo': str(id_externo) if id_externo else False,
-                })
-            elif id_externo and not paquete.wis_id_externo:
-                paquete.write({'wis_id_externo': str(id_externo)})
+            paquete = self._wis_paquete_para_contenedor(
+                contenedor, f"PKG-{picking.name}-{len(paquetes_creados) + 1}",
+                picking.location_dest_id)
             paquetes_creados.append(paquete)
             for det in (contenedor.get('detalles') or []):
                 cod = det.get('producto', '')
@@ -1225,18 +1340,42 @@ Body: {body_str[:500]}"""
                 preparado_por_cod[cod] = preparado_por_cod.get(cod, 0) + cant
                 paquete_por_cod.setdefault(cod, paquete)
 
+        # WIS notifica una sola vez lo que preparó físicamente: el pedido se procesa con lo que
+        # calza para que Odoo pueda seguir trabajando, y lo que no calza queda como AVISO en el
+        # log de integración (antes sólo en el log del servidor):
+        #  - un producto que el pedido no tiene pendiente se ignora;
+        #  - lo que supera lo pendiente se recorta a lo pendiente.
+        # Si no queda NADA de este pedido, no hay qué preparar: se deja como estaba (marcarlo
+        # 'preparado' sin cantidades hacía rechazar después la preparación de verdad).
+        pendientes = picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel'))
+        avisos = []
+        for cod in list(preparado_por_cod):
+            cant_total = preparado_por_cod[cod]
+            del_producto = pendientes.filtered(lambda m: m.product_id.codigo_unico == cod)
+            if not del_producto:
+                avisos.append(_(
+                    "WIS informó %(cant)s de %(cod)s y el pedido no lo tiene pendiente: "
+                    "se ignoró", cant=cant_total, cod=cod))
+                del preparado_por_cod[cod]
+                continue
+            demanda = sum(del_producto.mapped('product_uom_qty'))
+            if cant_total > demanda:
+                avisos.append(_(
+                    "WIS informó %(cant)s de %(cod)s y el pedido tenía pendiente %(dem)s: "
+                    "se tomó %(dem)s", cant=cant_total, cod=cod, dem=demanda))
+                preparado_por_cod[cod] = demanda
+        if not preparado_por_cod:
+            raise UserError(_(
+                "Lo preparado no coincide con el pedido %(picking)s: la notificación no trae "
+                "cantidades preparadas para este pedido%(det)s.",
+                picking=picking.name,
+                det=(": " + "; ".join(avisos)) if avisos else ""))
+        self._wis_avisos_preparada = avisos
+
         es_parcial = False
         cods_aplicados = set()
         for cod, cant_total in preparado_por_cod.items():
-            moves = picking.move_ids.filtered(
-                lambda m: m.product_id.codigo_unico == cod
-                and m.state not in ('done', 'cancel')
-            ).sorted('id')
-            if not moves:
-                _logger.warning(
-                    "[WIS] preparada | contenedor con producto '%s' sin move en picking %s.",
-                    cod, picking.name)
-                continue
+            moves = pendientes.filtered(lambda m: m.product_id.codigo_unico == cod).sorted('id')
             cods_aplicados.add(cod)
             paquete = paquete_por_cod.get(cod)
             restante = cant_total
@@ -1281,11 +1420,6 @@ Body: {body_str[:500]}"""
                 # (o 'partially_available' si es parcial) y el picking en 'assigned'. Si el
                 # producto queda en 0, el move queda 'confirmed' y el picking NO 'assigned'.
                 # El picked lo setea el button_validate de más abajo al validar.
-            if restante > 0:
-                _logger.warning(
-                    "[WIS] preparada | WIS preparó %s del producto %s por encima de la demanda "
-                    "total del picking %s (se topeó a la demanda).", restante, cod, picking.name)
-
         # Productos del picking que WIS NO informó como preparados -> quedan en 0 (backorder).
         # Se setea quantity=0 en sus líneas (sin borrarlas).
         for move in picking.move_ids:
@@ -1386,6 +1520,7 @@ Body: {body_str[:500]}"""
                 errores.append("Un pedido del array no tiene campo 'pedido'.")
                 continue
 
+            self._wis_reconocer_envio(nombre_pedido)
             # Spec 3.3 paso 1: buscar por codigo_unico el picking PROCESABLE, luego name.
             # Excluir 'no_integrado': operaciones internas (ej. crosspick) que comparten el código
             # del paso WIS anterior; no deben resolver los webhooks entrantes.
@@ -1467,30 +1602,14 @@ Body: {body_str[:500]}"""
                     or picking.wms_nro_preparacion
                     or ''
                 )
-                # Spec 3.3 paso 2: actualizar estado y fecha.
-                picking.with_context(skip_wms_integration=True).write({
-                    'wms_estado':            'preparado',
-                    'wms_origen':            'mercaderia_preparada',
-                    'wms_fecha_preparacion': fecha_preparacion,
-                    'wms_nro_preparacion':   nro_preparacion,
-                })
-
                 # Contenedores que informa WIS con lo preparado. El seteo de cantidades + el
                 # armado de paquetes se hace más abajo en UN solo paso (set MANUAL, sin reserva).
-                contenedores_prep = (
-                    pedido_data.get('contenedores')
-                    or data.get('contenedores')
-                    or []
-                )
+                # Sólo los contenedores de ESTE pedido: WIS manda la lista de todo el envío.
+                contenedores_envio = (pedido_data.get('contenedores')
+                                      or data.get('contenedores') or [])
+                contenedores_prep = self._wis_contenedores_del_pedido(
+                    contenedores_envio, nombre_pedido)
                 paquetes_creados = []
-
-                # Autocompletar document_type y partner (consistente con los otros
-                # handlers: confirmacionRecepcion, confirmacionPedido, almacenamiento).
-                # Si el picking no tiene partner_id, lo completa con el partner de la
-                # company del picking_type. Si ya tiene uno (ej. asignado por el módulo
-                # de crossdocking con la dirección de la sucursal destino), lo respeta —
-                # así la dirección de entrega en el e-Remito es la correcta del picking.
-                picking.sudo()._wis_complete_document_type()
 
                 # Spec 3.3 paso 3: el eRemito NO se emite acá. La emisión se difiere a la
                 # VALIDACIÓN del picking (button_validate -> _action_done ->
@@ -1509,55 +1628,92 @@ Body: {body_str[:500]}"""
                 # con el remanente. Ver [[wis-cfe-no-emitir-cantidad-cero]].
                 es_parcial = False
                 error_validacion = None
+                # Si el CFE se emite y DESPUÉS algo falla, el savepoint lo deshace en Odoo pero
+                # en UCFE queda emitido: hay que saberlo para avisar (ver más abajo).
+                cfe_previo = bool(getattr(picking, 'cfe_emitido', False))
+                cfe_en_falla = None
                 try:
-                    if contenedores_prep:
-                        paquetes_creados, es_parcial = (
-                            self._wis_setear_cantidades_y_paquetes_preparada(
-                                picking, contenedores_prep)
-                        )
-                    else:
-                        # Sin contenedores: validar la demanda completa (comportamiento previo).
-                        for move_line in picking.move_line_ids:
-                            if move_line.qty_done == 0:
-                                move_line.sudo().qty_done = (
-                                    move_line.quantity_product_uom
-                                    or move_line.qty_done
-                                    or move_line.move_id.product_uom_qty
-                                )
+                    # Savepoint: TODO lo de este pedido o nada. WIS no reenvía la notificación;
+                    # si algo falla, el pedido queda como estaba y el motivo en el log. Antes el
+                    # except de abajo se tragaba el error con los quants ya movidos, el backorder
+                    # creado y el picking en «Listo» (support, 12-10-2026).
+                    self._wis_avisos_preparada = []
+                    with request.env.cr.savepoint():
+                        try:
+                            # Spec 3.3 paso 2: actualizar estado y fecha.
+                            picking.with_context(skip_wms_integration=True).write({
+                                'wms_estado':            'preparado',
+                                'wms_origen':            'mercaderia_preparada',
+                                'wms_fecha_preparacion': fecha_preparacion,
+                                'wms_nro_preparacion':   nro_preparacion,
+                            })
+                            # Autocompletar document_type y partner (consistente con los otros
+                            # handlers). Si el picking ya tiene partner (ej. la sucursal destino
+                            # que asigna el crossdocking) lo respeta: es la dirección del remito.
+                            picking.sudo()._wis_complete_document_type()
 
-                    # MEZCLA (algunas líneas con cantidad, otras en 0): mover las líneas en 0 a un
-                    # backorder para validar/emitir el remito SOLO con las que tienen valor. Tras
-                    # esto el picking original queda 'assigned' (solo líneas >0). Si TODAS quedaron
-                    # en 0, no separa y el picking sigue 'confirmed' (no se valida ni emite).
-                    self._wis_separar_ceros_a_backorder(picking)
-
-                    # Validar SOLO si el picking quedó 'assigned'. Al setear el `quantity` de WIS
-                    # en las move_lines, el picking queda 'assigned' cuando NINGÚN producto quedó
-                    # en 0 (un producto en 0 deja su move 'confirmed' y el picking NO 'assigned')
-                    # -> en ese caso NO se valida ni se emite remito con 0. El button_validate
-                    # dispara _action_done -> _wis_emitir_eremito_si_corresponde (emite el CFE).
-                    # NO pasamos skip_backorder: si es parcial necesitamos el wizard de backorder
-                    # para generar la orden con el remanente.
-                    if picking.state == 'assigned':
-                        res = picking.with_context(
-                            skip_wms_integration=True,
-                        ).button_validate()
-
-                        if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
-                            backorder_wiz = (
-                                request.env['stock.backorder.confirmation']
-                                .with_context(**res.get('context', {}))
-                                .sudo()
-                                .create({})
-                            )
-                            if es_parcial:
-                                backorder_wiz.process()  # crea el backorder con el remanente
-                                _logger.info(
-                                    "[WIS] preparada | backorder generado para picking=%s "
-                                    "(remanente no preparado).", picking.name,
+                            if contenedores_envio and not contenedores_prep:
+                                # Hay contenedores, pero ninguno de este pedido: no hay nada que
+                                # preparar. Sin esto caía en «sin contenedores» y validaba TODA
+                                # la demanda como si WIS la hubiera preparado.
+                                raise UserError(_(
+                                    "Lo preparado no coincide con el pedido %s: la notificación "
+                                    "no trae cantidades preparadas para este pedido.")
+                                    % picking.name)
+                            if contenedores_prep:
+                                paquetes_creados, es_parcial = (
+                                    self._wis_setear_cantidades_y_paquetes_preparada(
+                                        picking, contenedores_prep)
                                 )
                             else:
-                                backorder_wiz.process_cancel_backorder()
+                                # Sin contenedores: validar la demanda completa (comportamiento previo).
+                                for move_line in picking.move_line_ids:
+                                    if move_line.qty_done == 0:
+                                        move_line.sudo().qty_done = (
+                                            move_line.quantity_product_uom
+                                            or move_line.qty_done
+                                            or move_line.move_id.product_uom_qty
+                                        )
+
+                            # MEZCLA (algunas líneas con cantidad, otras en 0): mover las líneas en 0 a un
+                            # backorder para validar/emitir el remito SOLO con las que tienen valor. Tras
+                            # esto el picking original queda 'assigned' (solo líneas >0). Si TODAS quedaron
+                            # en 0, no separa y el picking sigue 'confirmed' (no se valida ni emite).
+                            self._wis_separar_ceros_a_backorder(picking)
+
+                            # Validar SOLO si el picking quedó 'assigned'. Al setear el `quantity` de WIS
+                            # en las move_lines, el picking queda 'assigned' cuando NINGÚN producto quedó
+                            # en 0 (un producto en 0 deja su move 'confirmed' y el picking NO 'assigned')
+                            # -> en ese caso NO se valida ni se emite remito con 0. El button_validate
+                            # dispara _action_done -> _wis_emitir_eremito_si_corresponde (emite el CFE).
+                            # NO pasamos skip_backorder: si es parcial necesitamos el wizard de backorder
+                            # para generar la orden con el remanente.
+                            if picking.state == 'assigned':
+                                res = picking.with_context(
+                                    skip_wms_integration=True,
+                                ).button_validate()
+
+                                if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                                    backorder_wiz = (
+                                        request.env['stock.backorder.confirmation']
+                                        .with_context(**res.get('context', {}))
+                                        .sudo()
+                                        .create({})
+                                    )
+                                    if es_parcial:
+                                        backorder_wiz.process()  # crea el backorder con el remanente
+                                        _logger.info(
+                                            "[WIS] preparada | backorder generado para picking=%s "
+                                            "(remanente no preparado).", picking.name,
+                                        )
+                                    else:
+                                        backorder_wiz.process_cancel_backorder()
+                            if es_parcial:
+                                self._wis_unificar_saldos(picking)
+                        except Exception:
+                            if not cfe_previo and getattr(picking, 'cfe_emitido', False):
+                                cfe_en_falla = picking.name
+                            raise
                 except Exception as e:
                     error_validacion = str(e)
                     _logger.warning(
@@ -1565,15 +1721,16 @@ Body: {body_str[:500]}"""
                         "validar picking=%s: %s. Estado actual: %s",
                         picking.name, e, picking.state,
                     )
+                    if cfe_en_falla:
+                        error_validacion += (
+                            f" — ATENCIÓN: el e-Remito {cfe_en_falla} se emitió en UCFE antes de "
+                            f"la falla y Odoo no lo conserva; revisarlo en UCFE.")
 
-                # Si la validación FALLÓ (excepción en el button_validate: cantidad en 0 que el
-                # guard del e-Remito bloquea, falta de stock para reservar, etc.), NO se marca
-                # 'preparado' como éxito (antes el except se tragaba la falla y reportaba OK igual).
-                # Se registra el error, se revierte wms_estado a 'enviado' (para permitir reintento)
-                # y se agrega a `errores` (así la respuesta a WIS refleja el fallo).
+                # Si FALLÓ (cantidad en 0 que el guard del e-Remito bloquea, un paquete con stock
+                # en otro lado, falta de stock, etc.) el savepoint dejó el pedido como estaba:
+                # sin preparar, sin stock movido, sin backorder. WIS no reenvía la notificación,
+                # así que el log guarda el motivo y lo que mandó WIS para resolverlo de este lado.
                 if error_validacion:
-                    picking.with_context(skip_wms_integration=True).write(
-                        {'wms_estado': 'enviado'})
                     _logger.warning(
                         "[WIS] confirmacionMercaderiaPreparada | picking=%s NO se validó: %s",
                         picking.name, error_validacion)
@@ -1583,11 +1740,14 @@ Body: {body_str[:500]}"""
                         'modelo': 'stock.picking',
                         'texto': (
                             f"confirmacionMercaderiaPreparada: el picking {picking.name} NO se "
-                            f"pudo validar/completar."),
+                            f"procesó; quedó como estaba antes de la notificación."),
                         'picking_id': picking.id,
                         'resultado': 'error',
                         'detalle': f"Motivo: {error_validacion}",
-                        'payload_webhook': json.dumps(pedido_data, ensure_ascii=False, indent=2),
+                        'payload_webhook': json.dumps({
+                            'pedido': pedido_data,
+                            'contenedores': contenedores_prep,
+                        }, ensure_ascii=False, indent=2),
                     })
                     errores.append(
                         f"Picking '{picking.name}': no se completó la preparación — "
@@ -1598,6 +1758,24 @@ Body: {body_str[:500]}"""
                     "Picking %s marcado como 'preparado' por WMS (fecha=%s)",
                     picking.name, fecha_preparacion,
                 )
+                avisos = getattr(self, '_wis_avisos_preparada', None) or []
+                self._wis_avisos_preparada = []
+                if avisos:
+                    self._ilog({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'warning',
+                        'modelo': 'stock.picking',
+                        'texto': (
+                            f"confirmacionMercaderiaPreparada: {picking.name} se procesó, pero "
+                            f"lo que informó WIS no coincide del todo con el pedido."),
+                        'picking_id': picking.id,
+                        'resultado': 'exito',
+                        'detalle': ' | '.join(avisos),
+                        'payload_webhook': json.dumps({
+                            'pedido': pedido_data,
+                            'contenedores': contenedores_prep,
+                        }, ensure_ascii=False, indent=2),
+                    })
 
                 self._ilog({
                     'fecha': fields.Datetime.now(),
@@ -1631,6 +1809,20 @@ Body: {body_str[:500]}"""
                 errores.append(f"Error en picking '{nombre_pedido}': {str(e)}")
 
         if errores:
+            # WIS no reenvía la notificación: lo que no se procesó tiene que quedar a la vista
+            # en el log de integración, no sólo en la respuesta del webhook.
+            self._ilog({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'error',
+                'modelo': 'stock.picking',
+                'texto': (
+                    f"confirmacionMercaderiaPreparada: {len(errores)} de {len(pedidos)} "
+                    f"pedido(s) NO se procesaron."
+                ),
+                'picking_id': False,
+                'resultado': 'error',
+                'detalle': ' | '.join(errores),
+            })
             raise ValueError(
                 f"Se procesaron {len(pedidos) - len(errores)}/{len(pedidos)} pedidos. "
                 f"Errores: {' | '.join(errores)}"
