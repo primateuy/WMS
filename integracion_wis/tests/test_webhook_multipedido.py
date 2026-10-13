@@ -357,6 +357,43 @@ class TestWebhookMultipedido(TransactionCase):
             self.assertEqual(picking.wms_cantidad_bultos, 1,
                              "los bultos son los del pedido, no los de los 5")
 
+    def test_entrega_con_producto_partido_no_mueve_de_mas(self):
+        """Caso MELO (support, 13-10-2026): la entrega tenía el mismo producto en dos
+        movimientos y cada uno tomó las mismas unidades del paquete (salieron 318 de 159)."""
+        tienda = self.tiendas[0]
+        picking = self._preparo(tienda, [(self.producto_a, 6)])
+        # Dos movimientos del mismo producto que NO se fusionan (en support venían de orígenes
+        # distintos); el helper `_picking` confirma con fusión y los juntaría en uno.
+        entrega = self.env['stock.picking'].with_context(skip_wms_integration=True).create({
+            'picking_type_id': self.tipo_interno.id, 'group_id': tienda['grupo'].id,
+            'location_id': tienda['salida'].id, 'location_dest_id': tienda['transito'].id,
+            'move_ids': [(0, 0, {
+                'name': 'partido', 'product_id': self.producto_a.id, 'product_uom_qty': 3,
+                'product_uom': self.producto_a.uom_id.id, 'group_id': tienda['grupo'].id,
+                'location_id': tienda['salida'].id, 'location_dest_id': tienda['transito'].id,
+            }) for _ in range(2)],
+        })
+        entrega.move_ids._action_confirm(merge=False)
+        entrega = self.env['stock.picking'].browse(entrega.id)
+        self.assertEqual(len(entrega.move_ids), 2)
+        entrega.with_context(skip_wms_integration=True).write({
+            'codigo_unico': picking.codigo_unico, 'wms_estado': 'no_integrado'})
+        # WIS prepara 4 de 6: queda saldo, y la entrega sólo puede llevar esas 4.
+        contenedor = self._contenedor('WISCO-PARTIDO', 8, picking.codigo_unico,
+                                      [(self.producto_a, 4)])
+        self._preparada([picking], [contenedor])
+        self.controller._handle_confirmacion_pedido({
+            'pedidos': [{'pedido': picking.codigo_unico}], 'contenedores': [contenedor]})
+
+        Quant = self.env['stock.quant']
+        self.assertEqual(Quant._get_available_quantity(self.producto_a, tienda['transito']), 4,
+                         "a la tienda van las 4 preparadas, no el doble")
+        negativos = Quant.search([('product_id', '=', self.producto_a.id),
+                                  ('location_id', 'in', (tienda['salida'] | tienda['transito']).ids),
+                                  ('quantity', '<', 0)])
+        self.assertFalse(negativos, "sin stock negativo en la salida")
+        self.assertEqual(sum(entrega.move_ids.filtered(lambda m: m.state == 'done').mapped('quantity')), 4)
+
     def test_entrega_a_tienda_fallida_no_deja_stock_a_medias(self):
         """Si la «Entrega a Tiendas» no se puede validar, se deshace entera y queda el error en
         el log; antes quedaban los quants movidos y la operación en «Listo»."""

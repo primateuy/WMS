@@ -713,20 +713,39 @@ Body: {body_str[:500]}"""
             return False
         SML = request.env['stock.move.line'].sudo()
         PL = request.env['stock.package_level'].sudo()
+        Quant = request.env['stock.quant'].sudo()
         seteado = False
         pl_por_paquete = {}  # paquete.id -> stock.package_level (1 por paquete, alimenta el listado)
-        for move in pick.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
-            fuentes = por_producto.get(move.product_id.id)
-            if not fuentes:
-                continue
-            move.move_line_ids.unlink()
+        moves = pick.move_ids.filtered(
+            lambda m: m.state not in ('done', 'cancel') and m.product_id.id in por_producto)
+        # Se liberan primero las líneas propias, para que su reserva no cuente como ocupada.
+        moves.move_line_ids.unlink()
+        # Lo que se toma de cada paquete es el stock que TIENE HOY en esa ubicación, y se va
+        # descontando entre movimientos. Antes se usaba la cantidad histórica de las líneas del
+        # predecesor, sin descontar: dos movimientos del mismo producto tomaban las mismas
+        # unidades (support, 13-10-2026: la entrega de MELO movió 318 de un paquete de 159), y un
+        # saldo posterior volvía a contar paquetes que ya habían salido.
+        disponible = {}
+        for producto_id, fuentes in por_producto.items():
+            for paquete, _qty, src_loc in fuentes:
+                clave = (producto_id, paquete.id, src_loc.id)
+                if clave not in disponible:
+                    quants = Quant._gather(request.env['product.product'].browse(producto_id),
+                                           src_loc, package_id=paquete, strict=True)
+                    disponible[clave] = sum(q.quantity - q.reserved_quantity for q in quants)
+        for move in moves:
+            fuentes = por_producto[move.product_id.id]
             restante = move.product_uom_qty
-            for paquete, qty, src_loc in fuentes:
-                if restante <= 0:
-                    break
-                aplicar = min(qty, restante)
+            vistas = set()
+            for paquete, _qty, src_loc in fuentes:
+                clave = (move.product_id.id, paquete.id, src_loc.id)
+                if restante <= 0 or clave in vistas:
+                    continue
+                vistas.add(clave)
+                aplicar = min(disponible.get(clave, 0), restante)
                 if aplicar <= 0:
                     continue
+                disponible[clave] -= aplicar
                 restante -= aplicar
                 # Gap de cadena: si el paquete quedó en una ubicación distinta al origen del move,
                 # reasignar el origen del move a donde está el paquete (sino el move no tendría
