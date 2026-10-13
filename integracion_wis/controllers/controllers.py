@@ -806,8 +806,14 @@ Body: {body_str[:500]}"""
                 # Savepoint: si la validación falla después de mover stock (p. ej. el core
                 # rechaza un paquete), no queda nada a medias. Antes el except se tragaba el
                 # error con los quants ya movidos y la operación seguía en «Listo».
-                with request.env.cr.savepoint():
+                # Si la operación tiene que emitir e-Remito, la emisión hace COMMIT y destruiría
+                # un savepoint abierto acá: en ese caso el resguardo es el de `_action_done`.
+                if (getattr(pick, 'uses_cfe', False) and not pick.cfe_emitido
+                        and not pick.wis_skip_eremito):
                     self._wis_validar_operacion_interna(pick, codigo_unico, origen)
+                else:
+                    with request.env.cr.savepoint():
+                        self._wis_validar_operacion_interna(pick, codigo_unico, origen)
             except Exception as e:
                 _logger.warning(
                     "[WIS] %s | no se pudo validar la operación interna %s: %s",
@@ -1048,10 +1054,8 @@ Body: {body_str[:500]}"""
                 for _pk in pickings_despachados:
                     self._intentar_emitir_eremito(_pk, origen='confirmacionPedido')
 
-                # Savepoint: TODO lo del despacho de este pedido o nada. WIS no reenvía la
-                # notificación; si algo falla, el pedido queda como estaba (sin 'despachado' ni
-                # stock movido) y el motivo en el log. Antes quedaban quants movidos con el
-                # picking en «Listo».
+                # Savepoint: datos de transporte y paquetes del despacho, todo o nada. La
+                # validación va después, fuera: ver abajo.
                 with request.env.cr.savepoint():
                     # Spec 2.4 paso 2: registrar datos de transporte en TODAS las cajas despachadas.
                     pickings_despachados.with_context(skip_wms_integration=True).write({
@@ -1093,21 +1097,23 @@ Body: {body_str[:500]}"""
                                 move_line.quantity_product_uom or move_line.qty_done or move_line.move_id.product_uom_qty
                             )
 
-                    # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder)
-                    if picking.state == 'assigned':
-                        res = picking.with_context(
-                            skip_wms_integration=True,
-                            skip_backorder=True,
-                        ).button_validate()
+                # Spec 2.4 paso 4: validar (sin backorder; despachos no generan backorder).
+                # FUERA del savepoint: si todavía tiene que emitir el e-Remito, la emisión hace
+                # COMMIT y destruiría el savepoint. `_action_done` protege el «Hecho» del core.
+                if picking.state == 'assigned':
+                    res = picking.with_context(
+                        skip_wms_integration=True,
+                        skip_backorder=True,
+                    ).button_validate()
 
-                        if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
-                            backorder_wiz = (
-                                request.env['stock.backorder.confirmation']
-                                .with_context(**res.get('context', {}))
-                                .sudo()
-                                .create({})
-                            )
-                            backorder_wiz.process_cancel_backorder()
+                    if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                        backorder_wiz = (
+                            request.env['stock.backorder.confirmation']
+                            .with_context(**res.get('context', {}))
+                            .sudo()
+                            .create({})
+                        )
+                        backorder_wiz.process_cancel_backorder()
 
                 # Validar las operaciones internas de Odoo (no_integrado) que comparten
                 # este código — se les propagó el código de este paso WIS y deben quedar
@@ -1646,113 +1652,95 @@ Body: {body_str[:500]}"""
                 # emite el e-Remito sobre esas cantidades. Si lo preparado < demanda -> backorder
                 # con el remanente. Ver [[wis-cfe-no-emitir-cantidad-cero]].
                 es_parcial = False
+                error_preparacion = None
                 error_validacion = None
-                # Si el CFE se emite y DESPUÉS algo falla, el savepoint lo deshace en Odoo pero
-                # en UCFE queda emitido: hay que saberlo para avisar (ver más abajo).
-                cfe_previo = bool(getattr(picking, 'cfe_emitido', False))
-                cfe_en_falla = None
+                # 1) PREPARACIÓN, en savepoint: estado, cantidades y paquetes que informa WIS,
+                #    separación de las líneas en 0 y control de paquetes. Si algo falla, el pedido
+                #    queda como estaba. La VALIDACIÓN no entra acá: la emisión del e-Remito
+                #    (l10n_uy_einvoice_uruware) hace COMMIT y destruye cualquier savepoint abierto
+                #    antes (support, 13-10-2026: «savepoint … does not exist», notificación abortada
+                #    y el primer pedido a medias).
+                self._wis_avisos_preparada = []
                 try:
-                    # Savepoint: TODO lo de este pedido o nada. WIS no reenvía la notificación;
-                    # si algo falla, el pedido queda como estaba y el motivo en el log. Antes el
-                    # except de abajo se tragaba el error con los quants ya movidos, el backorder
-                    # creado y el picking en «Listo» (support, 12-10-2026).
-                    self._wis_avisos_preparada = []
                     with request.env.cr.savepoint():
-                        try:
-                            # Spec 3.3 paso 2: actualizar estado y fecha.
-                            picking.with_context(skip_wms_integration=True).write({
-                                'wms_estado':            'preparado',
-                                'wms_origen':            'mercaderia_preparada',
-                                'wms_fecha_preparacion': fecha_preparacion,
-                                'wms_nro_preparacion':   nro_preparacion,
-                            })
-                            # Autocompletar document_type y partner (consistente con los otros
-                            # handlers). Si el picking ya tiene partner (ej. la sucursal destino
-                            # que asigna el crossdocking) lo respeta: es la dirección del remito.
-                            picking.sudo()._wis_complete_document_type()
+                        # Spec 3.3 paso 2: actualizar estado y fecha.
+                        picking.with_context(skip_wms_integration=True).write({
+                            'wms_estado':            'preparado',
+                            'wms_origen':            'mercaderia_preparada',
+                            'wms_fecha_preparacion': fecha_preparacion,
+                            'wms_nro_preparacion':   nro_preparacion,
+                        })
+                        # Autocompletar document_type y partner (consistente con los otros
+                        # handlers). Si el picking ya tiene partner (ej. la sucursal destino que
+                        # asigna el crossdocking) lo respeta: es la dirección del remito.
+                        picking.sudo()._wis_complete_document_type()
 
-                            if contenedores_envio and not contenedores_prep:
-                                # Hay contenedores, pero ninguno de este pedido: no hay nada que
-                                # preparar. Sin esto caía en «sin contenedores» y validaba TODA
-                                # la demanda como si WIS la hubiera preparado.
-                                raise UserError(_(
-                                    "Lo preparado no coincide con el pedido %s: la notificación "
-                                    "no trae cantidades preparadas para este pedido.")
-                                    % picking.name)
-                            if contenedores_prep:
-                                paquetes_creados, es_parcial = (
-                                    self._wis_setear_cantidades_y_paquetes_preparada(
-                                        picking, contenedores_prep)
+                        if contenedores_envio and not contenedores_prep:
+                            # Hay contenedores, pero ninguno de este pedido: no hay nada que
+                            # preparar. Sin esto caía en «sin contenedores» y validaba TODA la
+                            # demanda como si WIS la hubiera preparado.
+                            raise UserError(_(
+                                "Lo preparado no coincide con el pedido %s: la notificación no "
+                                "trae cantidades preparadas para este pedido.") % picking.name)
+                        if contenedores_prep:
+                            paquetes_creados, es_parcial = (
+                                self._wis_setear_cantidades_y_paquetes_preparada(
+                                    picking, contenedores_prep)
+                            )
+                        else:
+                            # Sin contenedores: validar la demanda completa (comportamiento previo).
+                            for move_line in picking.move_line_ids:
+                                if move_line.qty_done == 0:
+                                    move_line.sudo().qty_done = (
+                                        move_line.quantity_product_uom
+                                        or move_line.qty_done
+                                        or move_line.move_id.product_uom_qty
+                                    )
+
+                        # MEZCLA (algunas líneas con cantidad, otras en 0): mover las líneas en 0 a
+                        # un backorder para validar/emitir el remito SOLO con las que tienen valor.
+                        # Si TODAS quedaron en 0, no separa y el picking no queda 'assigned'.
+                        self._wis_separar_ceros_a_backorder(picking)
+                        # El paquete se controla ahora, antes de emitir nada.
+                        if picking.state == 'assigned':
+                            picking._wis_controlar_paquetes()
+                except Exception as e:
+                    error_preparacion = str(e)
+
+                # 2) VALIDACIÓN (emite el e-Remito), fuera de cualquier savepoint del webhook.
+                #    `stock.picking._action_done` protege el «Hecho» del core con un savepoint
+                #    propio, abierto DESPUÉS de emitir: si el core rechaza, no se mueve stock.
+                #    Validar SOLO si el picking quedó 'assigned' (ningún producto en 0 → nunca un
+                #    remito con cantidad 0). Sin skip_backorder: si es parcial hace falta el
+                #    wizard para el remanente.
+                if not error_preparacion and picking.state == 'assigned':
+                    try:
+                        res = picking.with_context(skip_wms_integration=True).button_validate()
+                        if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
+                            backorder_wiz = (
+                                request.env['stock.backorder.confirmation']
+                                .with_context(**res.get('context', {}))
+                                .sudo()
+                                .create({})
+                            )
+                            if es_parcial:
+                                backorder_wiz.process()  # crea el backorder con el remanente
+                                _logger.info(
+                                    "[WIS] preparada | backorder generado para picking=%s "
+                                    "(remanente no preparado).", picking.name,
                                 )
                             else:
-                                # Sin contenedores: validar la demanda completa (comportamiento previo).
-                                for move_line in picking.move_line_ids:
-                                    if move_line.qty_done == 0:
-                                        move_line.sudo().qty_done = (
-                                            move_line.quantity_product_uom
-                                            or move_line.qty_done
-                                            or move_line.move_id.product_uom_qty
-                                        )
+                                backorder_wiz.process_cancel_backorder()
+                        if es_parcial:
+                            self._wis_unificar_saldos(picking)
+                    except Exception as e:
+                        error_validacion = str(e)
 
-                            # MEZCLA (algunas líneas con cantidad, otras en 0): mover las líneas en 0 a un
-                            # backorder para validar/emitir el remito SOLO con las que tienen valor. Tras
-                            # esto el picking original queda 'assigned' (solo líneas >0). Si TODAS quedaron
-                            # en 0, no separa y el picking sigue 'confirmed' (no se valida ni emite).
-                            self._wis_separar_ceros_a_backorder(picking)
-
-                            # Validar SOLO si el picking quedó 'assigned'. Al setear el `quantity` de WIS
-                            # en las move_lines, el picking queda 'assigned' cuando NINGÚN producto quedó
-                            # en 0 (un producto en 0 deja su move 'confirmed' y el picking NO 'assigned')
-                            # -> en ese caso NO se valida ni se emite remito con 0. El button_validate
-                            # dispara _action_done -> _wis_emitir_eremito_si_corresponde (emite el CFE).
-                            # NO pasamos skip_backorder: si es parcial necesitamos el wizard de backorder
-                            # para generar la orden con el remanente.
-                            if picking.state == 'assigned':
-                                res = picking.with_context(
-                                    skip_wms_integration=True,
-                                ).button_validate()
-
-                                if isinstance(res, dict) and res.get('res_model') == 'stock.backorder.confirmation':
-                                    backorder_wiz = (
-                                        request.env['stock.backorder.confirmation']
-                                        .with_context(**res.get('context', {}))
-                                        .sudo()
-                                        .create({})
-                                    )
-                                    if es_parcial:
-                                        backorder_wiz.process()  # crea el backorder con el remanente
-                                        _logger.info(
-                                            "[WIS] preparada | backorder generado para picking=%s "
-                                            "(remanente no preparado).", picking.name,
-                                        )
-                                    else:
-                                        backorder_wiz.process_cancel_backorder()
-                            if es_parcial:
-                                self._wis_unificar_saldos(picking)
-                        except Exception:
-                            if not cfe_previo and getattr(picking, 'cfe_emitido', False):
-                                cfe_en_falla = picking.name
-                            raise
-                except Exception as e:
-                    error_validacion = str(e)
+                if error_preparacion:
+                    # El savepoint dejó el pedido como estaba: sin preparar, sin backorder.
                     _logger.warning(
-                        "[WIS] confirmacionMercaderiaPreparada | no se pudo "
-                        "validar picking=%s: %s. Estado actual: %s",
-                        picking.name, e, picking.state,
-                    )
-                    if cfe_en_falla:
-                        error_validacion += (
-                            f" — ATENCIÓN: el e-Remito {cfe_en_falla} se emitió en UCFE antes de "
-                            f"la falla y Odoo no lo conserva; revisarlo en UCFE.")
-
-                # Si FALLÓ (cantidad en 0 que el guard del e-Remito bloquea, un paquete con stock
-                # en otro lado, falta de stock, etc.) el savepoint dejó el pedido como estaba:
-                # sin preparar, sin stock movido, sin backorder. WIS no reenvía la notificación,
-                # así que el log guarda el motivo y lo que mandó WIS para resolverlo de este lado.
-                if error_validacion:
-                    _logger.warning(
-                        "[WIS] confirmacionMercaderiaPreparada | picking=%s NO se validó: %s",
-                        picking.name, error_validacion)
+                        "[WIS] confirmacionMercaderiaPreparada | picking=%s NO se procesó: %s",
+                        picking.name, error_preparacion)
                     self._ilog({
                         'fecha': fields.Datetime.now(),
                         'nivel': 'error',
@@ -1762,7 +1750,7 @@ Body: {body_str[:500]}"""
                             f"procesó; quedó como estaba antes de la notificación."),
                         'picking_id': picking.id,
                         'resultado': 'error',
-                        'detalle': f"Motivo: {error_validacion}",
+                        'detalle': f"Motivo: {error_preparacion}",
                         'payload_webhook': json.dumps({
                             'pedido': pedido_data,
                             'contenedores': contenedores_prep,
@@ -1770,7 +1758,37 @@ Body: {body_str[:500]}"""
                     })
                     errores.append(
                         f"Picking '{picking.name}': no se completó la preparación — "
-                        f"{error_validacion}")
+                        f"{error_preparacion}")
+                    continue
+
+                if error_validacion:
+                    # Quedó PREPARADO con lo que informó WIS (cantidades y paquetes), sin stock
+                    # movido. WIS no reenvía la notificación: se valida desde Odoo una vez resuelto
+                    # el motivo. Si el e-Remito ya se emitió, queda registrado y no se reemite.
+                    picking.invalidate_recordset()
+                    remito = (_(" El e-Remito %s ya está emitido y no se vuelve a emitir.") % picking.name
+                              if getattr(picking, 'cfe_emitido', False) else "")
+                    _logger.warning(
+                        "[WIS] confirmacionMercaderiaPreparada | picking=%s preparado pero NO "
+                        "validado: %s", picking.name, error_validacion)
+                    self._ilog({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error',
+                        'modelo': 'stock.picking',
+                        'texto': (
+                            f"confirmacionMercaderiaPreparada: {picking.name} quedó PREPARADO con lo "
+                            f"que informó WIS, pero NO se validó. Validarlo desde Odoo una vez "
+                            f"resuelto el motivo.{remito}"),
+                        'picking_id': picking.id,
+                        'resultado': 'error',
+                        'detalle': f"Motivo: {error_validacion}",
+                        'payload_webhook': json.dumps({
+                            'pedido': pedido_data,
+                            'contenedores': contenedores_prep,
+                        }, ensure_ascii=False, indent=2),
+                    })
+                    errores.append(
+                        f"Picking '{picking.name}': preparado pero no validado — {error_validacion}")
                     continue
 
                 _logger.info(

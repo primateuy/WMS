@@ -968,7 +968,13 @@ class StockPicking(models.Model):
         # con skip_wms_integration (crossdock / operaciones internas) que se saltaban la emisión.
         # Va ANTES del super() y del check de skip para no dejar ningún camino sin emitir.
         self._wis_emitir_eremito_si_corresponde()
-        res = super(StockPicking, self)._action_done()
+        # 🔴 La emisión del e-Remito (l10n_uy_einvoice_uruware) hace COMMIT de la transacción:
+        # destruye cualquier savepoint abierto antes (support, 13-10-2026: «savepoint … does not
+        # exist» y la notificación entera abortada). Por eso el savepoint va recién acá, DESPUÉS
+        # de emitir: si el core rechaza la validación (p. ej. un paquete en dos ubicaciones),
+        # no queda stock movido. El CFE ya emitido queda registrado y no se reemite.
+        with self.env.cr.savepoint():
+            res = super(StockPicking, self)._action_done()
         if self.env.context.get('skip_wms_integration'):
             return res
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():

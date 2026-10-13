@@ -222,33 +222,61 @@ class TestWebhookMultipedido(TransactionCase):
     # ------------------------------------------------------------------
     # Una falla no deja nada a medias
     # ------------------------------------------------------------------
-    def test_validacion_fallida_no_deja_stock_movido_ni_backorder(self):
+    def test_validacion_fallida_deja_preparado_sin_mover_stock(self):
+        """La validación (que emite el e-Remito) no puede ir en el savepoint del webhook: la
+        emisión hace COMMIT. Si el «Hecho» del core falla, `_action_done` lo deshace con su
+        propio savepoint: no se mueve stock; el pedido queda PREPARADO con lo que informó WIS y
+        el log dice validarlo a mano (WIS no reenvía)."""
         tienda = self.tiendas[0]
         picking = self._preparo(tienda, [(self.producto_a, 4), (self.producto_b, 4)])
-        Picking = type(self.env['stock.picking'])
-        original = Picking._action_done
+        Move = type(self.env['stock.move'])
+        original = Move._action_done
 
-        def falla_despues_de_mover(pickings, *args, **kwargs):
-            original(pickings, *args, **kwargs)
+        def falla_despues_de_mover(moves, *args, **kwargs):
+            original(moves, *args, **kwargs)
             raise UserError("falla de prueba después de mover el stock")
 
         # Producto B en 0 -> se separa a un backorder antes de validar.
         contenedor = self._contenedor('WISCO-FALLA', 1, picking.codigo_unico,
                                       [(self.producto_a, 4)])
-        with patch.object(Picking, '_action_done', falla_despues_de_mover):
+        with patch.object(Move, '_action_done', falla_despues_de_mover):
             with self.assertRaisesRegex(ValueError, 'falla de prueba'):
                 self._preparada([picking], [contenedor])
 
         picking.invalidate_recordset()
         self.assertNotEqual(picking.state, 'done')
-        self.assertEqual(picking.wms_estado, 'enviado', "queda listo para reintentar")
-        self.assertFalse(self.env['stock.picking'].search([('backorder_id', '=', picking.id)]),
-                         "el backorder de la línea en 0 se deshizo con la falla")
+        self.assertEqual(picking.wms_estado, 'preparado', "queda con lo que informó WIS")
+        self.assertEqual(picking.move_line_ids.result_package_id.name, 'WISCO-FALLA')
         self.assertEqual(
             self.env['stock.quant']._get_available_quantity(
                 self.producto_a, tienda['salida']), 0,
             "el stock no se movió")
-        self.assertEqual(len(picking.move_ids), 2)
+        saldo = self.env['stock.picking'].search([('backorder_id', '=', picking.id)])
+        self.assertEqual(saldo.move_ids.product_id, self.producto_b, "la línea en 0 queda en el saldo")
+        log = self.env['wms.integracion.log'].search(
+            [('picking_id', '=', picking.id), ('nivel', '=', 'error')], limit=1)
+        self.assertIn('PREPARADO', log.texto)
+        self.assertIn('Validarlo desde Odoo', log.texto)
+
+    def test_validar_a_mano_despues_de_la_falla(self):
+        """Resuelto el motivo, el operario valida desde Odoo y la cadena sigue."""
+        tienda = self.tiendas[0]
+        picking = self._preparo(tienda, [(self.producto_a, 4)])
+        Move = type(self.env['stock.move'])
+        original = Move._action_done
+
+        def falla(moves, *args, **kwargs):
+            original(moves, *args, **kwargs)
+            raise UserError("falla de prueba")
+
+        contenedor = self._contenedor('WISCO-MANO', 2, picking.codigo_unico, [(self.producto_a, 4)])
+        with patch.object(Move, '_action_done', falla):
+            with self.assertRaises(ValueError):
+                self._preparada([picking], [contenedor])
+        picking.with_context(skip_wms_integration=True).button_validate()
+        self.assertEqual(picking.state, 'done')
+        self.assertEqual(self.env['stock.quant']._get_available_quantity(
+            self.producto_a, tienda['salida']), 4)
 
     def _no_se_proceso(self, picking, contenedores, motivo):
         with self.assertRaisesRegex(ValueError, motivo):
@@ -405,14 +433,14 @@ class TestWebhookMultipedido(TransactionCase):
         self._preparada([picking], [contenedor])
         paquete = picking.move_line_ids.result_package_id
 
-        Picking = type(self.env['stock.picking'])
-        original = Picking._action_done
+        Move = type(self.env['stock.move'])
+        original = Move._action_done
 
-        def falla(pickings, *args, **kwargs):
-            original(pickings, *args, **kwargs)
+        def falla(moves, *args, **kwargs):
+            original(moves, *args, **kwargs)
             raise UserError("falla de prueba en la entrega")
 
-        with patch.object(Picking, '_action_done', falla):
+        with patch.object(Move, '_action_done', falla):
             self.controller._handle_confirmacion_pedido({
                 'pedidos': [{'pedido': picking.codigo_unico}],
                 'contenedores': [contenedor],
