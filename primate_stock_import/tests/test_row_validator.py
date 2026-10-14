@@ -13,7 +13,7 @@ class TestRowValidator(PrimateStockImportCommon):
         parsed = ExcelParser(self.env).parse(self._make_xlsx(rows))
         return RowValidator(self.env).validate(parsed)
 
-    def test_valid_file_groups_by_operation_ref(self):
+    def test_valid_file_groups_by_origin(self):
         result = self._validate([
             self._int_row('IMP-1', 'IMP-A', 10, scheduled_date='2026-09-20'),
             self._int_row('IMP-1', '7790001234567', '2,5', scheduled_date='2026-09-20',
@@ -46,7 +46,7 @@ class TestRowValidator(PrimateStockImportCommon):
 
     def test_default_locations_from_picking_type(self):
         result = self._validate([{
-            'operation_ref': 'REC-1', 'picking_type': self.picking_type_in.name,
+            'origin': 'REC-1', 'picking_type': self.picking_type_in.name,
             'warehouse': self.warehouse.name, 'partner': self.partner.name,
             'product': 'IMP-A', 'quantity': 3,
         }])
@@ -79,16 +79,16 @@ class TestRowValidator(PrimateStockImportCommon):
         self.assertIn('7', errors)  # fecha
         self.assertIn('8', errors)  # UdM de otra categoría
         # los grupos con errores de cabezal no se construyen
-        self.assertNotIn('IMP-2', [group['operation_ref'] for group in result['groups']])
+        self.assertNotIn('IMP-2', [group['origin'] for group in result['groups']])
 
     def test_header_inconsistency_within_group(self):
         result = self._validate([
-            self._int_row('IMP-1', 'IMP-A', 1, origin='OC-1'),
-            self._int_row('IMP-1', 'IMP-B', 1, origin='OC-2'),
+            self._int_row('IMP-1', 'IMP-A', 1, scheduled_date='2026-09-20'),
+            self._int_row('IMP-1', 'IMP-B', 1, scheduled_date='2026-09-21'),
         ])
         self.assertTrue(result['has_blocking_errors'])
         self.assertIn('3', result['errors'])
-        self.assertIn('origin', result['errors']['3'][0])
+        self.assertIn('scheduled_date', result['errors']['3'][0])
 
     def test_lot_warnings(self):
         result = self._validate([

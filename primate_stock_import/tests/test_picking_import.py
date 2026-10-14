@@ -14,8 +14,8 @@ class TestPickingImport(PrimateStockImportCommon):
     def test_wizard_full_flow(self):
         """Validar -> importar crea pickings en borrador vinculados a la sesión."""
         wizard = self._wizard(self._make_xlsx([
-            self._int_row('IMP-1', 'IMP-A', 10, origin='OC-77', scheduled_date='2026-09-20'),
-            self._int_row('IMP-1', 'IMP-B', 2, origin='OC-77', scheduled_date='2026-09-20'),
+            self._int_row('OC-77', 'IMP-A', 10, scheduled_date='2026-09-20'),
+            self._int_row('OC-77', 'IMP-B', 2, scheduled_date='2026-09-20'),
             self._int_row('IMP-2', 'IMP-LOT', 1, lot='L-1'),
         ]))
         wizard.action_validate()
@@ -109,6 +109,46 @@ class TestPickingImport(PrimateStockImportCommon):
         self.assertIn(empty_picking.name, action['params']['message'])
         self.assertTrue(empty_picking.message_ids.filtered(
             lambda message: 'Comprobar disponibilidad' in (message.body or '')
+        ))
+
+    def test_mark_as_todo_batch(self):
+        """Marcar por realizar confirma los borradores y omite los que no lo son."""
+        wizard = self._wizard(self._make_xlsx([
+            self._int_row('IMP-1', 'IMP-A', 10),   # hay 100 en stock: queda lista
+            self._int_row('IMP-2', 'IMP-B', 5),    # sin stock: queda esperando
+        ]))
+        wizard.action_validate()
+        wizard.action_import()
+        pickings = wizard.session_id.picking_ids
+        cancelled_picking = self.env['stock.picking'].create({
+            'picking_type_id': self.picking_type_int.id,
+            'location_id': self.stock_location.id,
+            'location_dest_id': self.shelf_location.id,
+        })
+        cancelled_picking.action_cancel()
+
+        action = (pickings | cancelled_picking).action_mark_as_todo_batch()
+        self.assertEqual(action['params']['type'], 'success')
+        self.assertIn('2 operaciones procesadas', action['params']['message'])
+        self.assertIn('1 omitidas', action['params']['message'])
+        picking_a = pickings.filtered(lambda picking: picking.product_id == self.product_a)
+        picking_b = pickings - picking_a
+        self.assertEqual(picking_a.state, 'assigned')
+        self.assertEqual(picking_b.state, 'confirmed')
+
+    def test_mark_as_todo_batch_logs_failure(self):
+        """Un borrador sin movimientos se informa como error en vez de quedar en silencio."""
+        empty_picking = self.env['stock.picking'].create({
+            'picking_type_id': self.picking_type_int.id,
+            'location_id': self.stock_location.id,
+            'location_dest_id': self.shelf_location.id,
+        })
+        action = empty_picking.action_mark_as_todo_batch()
+        self.assertEqual(action['params']['type'], 'warning')
+        self.assertIn(empty_picking.name, action['params']['message'])
+        self.assertEqual(empty_picking.state, 'draft')
+        self.assertTrue(empty_picking.message_ids.filtered(
+            lambda message: 'Marcar por realizar' in (message.body or '')
         ))
 
     def test_download_template(self):

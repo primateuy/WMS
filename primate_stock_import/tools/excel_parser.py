@@ -22,23 +22,22 @@ _logger = logging.getLogger(__name__)
 
 # Columnas de la plantilla, en el orden en que se generan.
 COLUMNS = (
-    'operation_ref',
+    'origin',
     'picking_type',
     'warehouse',
     'partner',
     'location_origin',
     'location_dest',
     'scheduled_date',
-    'origin',
     'product',
     'lot',
     'quantity',
     'uom',
 )
-REQUIRED_COLUMNS = ('operation_ref', 'picking_type', 'product', 'quantity')
+REQUIRED_COLUMNS = ('origin', 'picking_type', 'product', 'quantity')
 
 # Columnas que definen el cabezal de la operación: deben coincidir en todas las
-# filas con la misma operation_ref.
+# filas con el mismo origin.
 HEADER_COLUMNS = (
     'picking_type',
     'warehouse',
@@ -46,7 +45,6 @@ HEADER_COLUMNS = (
     'location_origin',
     'location_dest',
     'scheduled_date',
-    'origin',
 )
 
 

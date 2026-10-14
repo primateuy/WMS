@@ -16,9 +16,9 @@ _logger = logging.getLogger(__name__)
 
 # Texto de ayuda de cada columna para la hoja "Instrucciones" de la plantilla.
 COLUMN_HELP = {
-    'operation_ref': (
-        "Obligatorio. Identificador libre de la operación. Todas las filas con la misma "
-        "referencia forman una sola operación (un picking con varias líneas)."
+    'origin': (
+        "Obligatorio. Documento de origen (OC, pedido, etc.). Todas las filas con el mismo "
+        "documento de origen forman una sola operación (un picking con varias líneas)."
     ),
     'picking_type': (
         "Obligatorio. Tipo de operación: nombre exacto ('Recepciones'), formato "
@@ -38,7 +38,6 @@ COLUMN_HELP = {
         "Opcional. Fecha programada: AAAA-MM-DD, AAAA-MM-DD HH:MM o DD/MM/AAAA. "
         "Se interpreta en la zona horaria del usuario."
     ),
-    'origin': "Opcional. Documento origen (OC, pedido, etc.). Si se omite se usa operation_ref.",
     'product': "Obligatorio. Referencia interna o código de barras de la variante.",
     'lot': (
         "Opcional. Nombre del lote/serie. En esta versión solo se valida y se anota en la "
@@ -51,11 +50,11 @@ COLUMN_HELP = {
     ),
 }
 EXAMPLE_ROWS = (
-    ('IMP-001', 'Recepciones', 'WH', 'Proveedor SA', '', '', '2026-09-20', 'OC-123',
+    ('OC-123', 'Recepciones', 'WH', 'Proveedor SA', '', '', '2026-09-20',
      'PROD-001', '', '10', ''),
-    ('IMP-001', 'Recepciones', 'WH', 'Proveedor SA', '', '', '2026-09-20', 'OC-123',
+    ('OC-123', 'Recepciones', 'WH', 'Proveedor SA', '', '', '2026-09-20',
      'PROD-002', 'L-2026-01', '5,5', ''),
-    ('IMP-002', 'Transferencias internas', 'WH', '', 'WH/Stock', 'WH/Stock/Tienda', '', '',
+    ('TRASLADO-001', 'Transferencias internas', 'WH', '', 'WH/Stock', 'WH/Stock/Tienda', '',
      'PROD-001', '', '3', 'Unidades'),
 )
 
@@ -263,7 +262,7 @@ class PrimateStockImportWizard(models.TransientModel):
         help_sheet.write(notes_row, 0, "Notas", header_format)
         help_sheet.write(notes_row, 1, (
             "Las filas de ejemplo (en gris) deben borrarse antes de importar. "
-            "Las columnas en rojo son obligatorias. La primera fila de cada operation_ref "
+            "Las columnas en rojo son obligatorias. La primera fila de cada origin "
             "define el cabezal; el resto debe repetir los mismos valores de cabezal."
         ), wrap_format)
         workbook.close()
