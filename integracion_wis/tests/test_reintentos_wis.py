@@ -17,13 +17,22 @@ from odoo import fields
 from odoo.exceptions import ValidationError
 from odoo.tests.common import TransactionCase, tagged
 
-from ..models.models import WisErrorGeneral, WisTimeout, log_id_wis
+from odoo.tools import config as odoo_config
+
+from ..models.models import (WisErrorGeneral, WisTimeout, corte_odoo, log_id_wis,
+                             timeout_maximo)
 
 MODELO_API = 'odoo.addons.integracion_wis.models.models.IntegracionWIS'
 REQUESTS = 'odoo.addons.integracion_wis.models.models.requests.request'
 CUERPO_500 = ('{"LogID":"b714c2de-2801-43af-897e-85df94ffa34d","Message":"Se ha producido '
               'un error no controlado. Por favor consulte con sistemas indicando el LogId"}')
 ERROR_500 = 'Error en la API: 500 - ' + CUERPO_500
+
+
+def _corte(real, cron=-1, workers=4):
+    """Simula los límites de tiempo del servidor de Odoo."""
+    return patch.dict(odoo_config.options, {
+        'limit_time_real': real, 'limit_time_real_cron': cron, 'workers': workers})
 
 
 class _Respuesta:
@@ -154,13 +163,45 @@ class TestReintentosWIS(TransactionCase):
         self.assertTrue(api.call_args.kwargs.get('operaciones'))
 
     def test_timeout_fuera_de_rango_no_se_acepta(self):
-        with self.assertRaises(ValidationError):
+        with _corte(240), self.assertRaises(ValidationError):
             self.config.timeout_api_operaciones = 300
 
     def test_el_presupuesto_deja_terminar_el_ultimo_envio(self):
         """Odoo mata la corrida a los 240 s: el último envío tiene que entrar."""
-        self.assertEqual(self.config._presupuesto_corrida(operaciones=True), 200 - 120)
-        self.assertEqual(self.config._presupuesto_corrida(llamadas_por_envio=2), 200 - 2 * 60)
+        with _corte(240):
+            self.assertEqual(self.config._presupuesto_corrida(operaciones=True), 200 - 120)
+            self.assertEqual(self.config._presupuesto_corrida(llamadas_por_envio=2), 200 - 2 * 60)
+
+    def test_el_tope_sale_del_corte_del_servidor(self):
+        """Con el corte de producción (480 s) se puede configurar hasta 420 s: 60 s de
+        margen para que el envío termine antes de que Odoo mate el proceso."""
+        with _corte(480):
+            self.assertEqual(timeout_maximo(), 420)
+            self.config.timeout_api_operaciones = 300
+            self.config.timeout_api_operaciones = 420
+            with self.assertRaisesRegex(ValidationError, '420.*480'):
+                self.config.timeout_api_operaciones = 421
+            # Con el tope, la cola empieza envíos durante 20 s y el último termina a los
+            # 440 s: 40 s antes del corte.
+            self.assertEqual(self.config._presupuesto_corrida(operaciones=True), 20)
+            self.config.timeout_api_operaciones = 300
+            self.assertEqual(self.config._presupuesto_corrida(operaciones=True), 440 - 300)
+
+    def test_el_corte_de_cron_manda_si_es_menor(self):
+        with _corte(600, cron=300):
+            self.assertEqual(corte_odoo(), 300)
+            self.assertEqual(timeout_maximo(), 240)
+        with _corte(480, cron=0):
+            # 0 = los crons sin corte: queda el de las peticiones.
+            self.assertEqual(corte_odoo(), 480)
+
+    def test_sin_workers_se_supone_el_corte_por_defecto(self):
+        """Sin workers Odoo no corta nada: se toma 240 s, el tope queda en 180 s."""
+        with _corte(480, workers=0):
+            self.assertEqual(corte_odoo(), 240)
+            self.assertEqual(timeout_maximo(), 180)
+        with _corte(0):
+            self.assertEqual(corte_odoo(), 240)
 
     def test_enviar_ws_no_disfraza_el_timeout(self):
         """`enviarWS` envolvía todo en ValidationError: la cola no podía distinguir un

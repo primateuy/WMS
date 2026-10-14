@@ -52,12 +52,43 @@ def log_id_wis(texto):
 
 # Escalones de la pausa general ante WIS sin responder: 1.ª falla seguida, 2.ª, 3.ª o más.
 PAUSA_WIS_MINUTOS = (5, 15, 60)
-# Lo que tarda como máximo una corrida de cron antes de que Odoo la mate (240 s de
-# reloj en los servidores), con margen. Las colas no empiezan un envío que no entre.
-LIMITE_CORRIDA_CRON = 200
 TIMEOUT_API_POR_DEFECTO = 60
 TIMEOUT_OPERACIONES_POR_DEFECTO = 120
-TIMEOUT_MAXIMO = 150
+# Corte que se supone cuando el servidor no corta (sin workers, o límites en 0).
+CORTE_ODOO_POR_DEFECTO = 240
+# Resguardo entre el fin de la corrida de una cola y el corte de Odoo.
+MARGEN_CORRIDA = 40
+# Lo mínimo que una corrida de cola sigue empezando envíos (ver `_presupuesto_corrida`).
+PRESUPUESTO_MINIMO = 20
+
+
+def corte_odoo():
+    """Segundos de reloj tras los que Odoo mata un proceso en este servidor.
+
+    Sale de la configuración del servidor, no de un valor fijo: con `workers`, Odoo mata
+    una petición al pasar `limit_time_real` y un cron al pasar `limit_time_real_cron`
+    (-1 = el mismo que las peticiones, 0 = sin corte). Se toma el menor, porque el
+    tiempo de espera de WIS lo usan tanto las colas como los envíos desde una pantalla.
+    Sin workers Odoo no corta: se supone `CORTE_ODOO_POR_DEFECTO`.
+    """
+    real = (tools.config.get('limit_time_real') or 0) if tools.config.get('workers') else 0
+    cron = tools.config.get('limit_time_real_cron', -1)
+    if cron == -1:
+        cron = real
+    cortes = [c for c in (real, cron) if c and c > 0]
+    return min(cortes) if cortes else CORTE_ODOO_POR_DEFECTO
+
+
+def limite_corrida_cron():
+    """Hasta dónde puede llegar una corrida de cola sin que Odoo la mate, con margen.
+    Las colas no empiezan un envío que no alcance a terminar antes."""
+    return corte_odoo() - MARGEN_CORRIDA
+
+
+def timeout_maximo():
+    """El tiempo de espera de WIS más largo que se puede configurar: un envío que arranca
+    al final del presupuesto mínimo todavía termina antes del límite de la corrida."""
+    return limite_corrida_cron() - PRESUPUESTO_MINIMO
 
 
 class ErrorConsultaStockWIS(ValidationError):
@@ -218,7 +249,8 @@ class IntegracionWIS(models.Model):
         default=TIMEOUT_OPERACIONES_POR_DEFECTO,
         help='Igual que el anterior, para recepciones, pedidos y devoluciones: una '
              'recepción de cientos de líneas tarda en WIS bastante más que un producto. '
-             f'Máximo {TIMEOUT_MAXIMO} s: Odoo corta cualquier proceso que pase los 240 s.',
+             'El máximo sale del corte de procesos que tiene configurado el servidor de '
+             'Odoo, menos 60 s de margen (con un corte de 480 s, 420 s).',
     )
 
     espera_timeout_minutos = fields.Integer(
@@ -282,12 +314,14 @@ class IntegracionWIS(models.Model):
 
     @api.constrains('timeout_api', 'timeout_api_operaciones')
     def _check_timeouts(self):
+        maximo = timeout_maximo()
         for config in self:
             for valor in (config.timeout_api, config.timeout_api_operaciones):
-                if valor and not 5 <= valor <= TIMEOUT_MAXIMO:
+                if valor and not 5 <= valor <= maximo:
                     raise ValidationError(_(
-                        "El tiempo de espera de WIS tiene que estar entre 5 y %s segundos.")
-                        % TIMEOUT_MAXIMO)
+                        "El tiempo de espera de WIS tiene que estar entre 5 y %(maximo)s "
+                        "segundos: este servidor de Odoo corta los procesos a los %(corte)s s.",
+                        maximo=maximo, corte=corte_odoo()))
 
     def _timeout(self, operaciones=False):
         """Segundos de espera por llamada a WIS."""
@@ -355,7 +389,7 @@ class IntegracionWIS(models.Model):
         no queda registrado nada.
         """
         timeout = self._get_config()._timeout(operaciones)
-        return max(LIMITE_CORRIDA_CRON - llamadas_por_envio * timeout, 20)
+        return max(limite_corrida_cron() - llamadas_por_envio * timeout, PRESUPUESTO_MINIMO)
 
     @api.model
     def _get_config(self):
