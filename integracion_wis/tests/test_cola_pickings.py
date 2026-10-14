@@ -168,3 +168,52 @@ class TestColaPickingsWIS(TransactionCase):
         self.assertEqual(picking.state, 'confirmed')
         self.assertEqual(picking.codigo_unico, f"W-P-{picking.id}")
         self.assertEqual(picking.wms_estado, 'sin_enviar')
+
+    # ------------------------------------------------------------------
+    # Movimientos nuevos y operaciones que WIS ya tiene
+    # ------------------------------------------------------------------
+    def _con_grupo(self, wms_estado):
+        """Una operación abierta con grupo de abastecimiento, en el estado WIS dado."""
+        grupo = self.env['procurement.group'].create({'name': 'Grupo cola WIS'})
+        picking = self._nuevo_picking()
+        picking.with_context(skip_wms_integration=True).write({'group_id': grupo.id})
+        picking.move_ids.with_context(skip_wms_integration=True).write({'group_id': grupo.id})
+        picking.with_context(skip_wms_integration=True).action_confirm()
+        picking.with_context(skip_wms_integration=True).write({'wms_estado': wms_estado})
+        return picking
+
+    def _movimiento_nuevo(self, picking):
+        """Lo que hace una reposición: un movimiento suelto del mismo grupo que Odoo ubica."""
+        producto = self.env['product.product'].create({
+            'name': 'Variante nueva cola WIS', 'type': 'product'})
+        move = self.env['stock.move'].create({
+            'name': 'nueva', 'product_id': producto.id, 'product_uom_qty': 3,
+            'product_uom': producto.uom_id.id, 'group_id': picking.group_id.id,
+            'picking_type_id': self.tipo.id, 'partner_id': self.partner.id,
+            'location_id': self.almacen.lot_stock_id.id, 'location_dest_id': self.destino.id,
+        })
+        with self._parchear_envio(return_value=False):
+            move._action_confirm()
+        return move
+
+    def test_linea_nueva_no_se_suma_a_una_operacion_ya_enviada(self):
+        """14-10, support: una reposición sumó líneas a pedidos que WIS ya tenía y WIS
+        nunca se enteró. La línea nueva tiene que abrir otra operación."""
+        enviada = self._con_grupo('enviado')
+        move = self._movimiento_nuevo(enviada)
+        self.assertTrue(move.picking_id)
+        self.assertNotEqual(move.picking_id, enviada)
+        self.assertEqual(len(enviada.move_ids), 1, "la operación enviada queda como WIS la tiene")
+
+    def test_linea_nueva_se_suma_a_una_operacion_en_cola(self):
+        """La que espera turno en la cola sale como esté: puede recibir líneas."""
+        en_cola = self._con_grupo('en_cola')
+        move = self._movimiento_nuevo(en_cola)
+        self.assertEqual(move.picking_id, en_cola)
+
+    def test_linea_nueva_no_se_suma_a_la_que_se_esta_enviando(self):
+        en_cola = self._con_grupo('en_cola')
+        self.env['wis.picking.cola'].sudo().create({
+            'picking_id': en_cola.id, 'tipo': 'REP', 'estado': 'procesando'})
+        move = self._movimiento_nuevo(en_cola)
+        self.assertNotEqual(move.picking_id, en_cola)

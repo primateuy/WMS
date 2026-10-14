@@ -11,6 +11,11 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
+# Operaciones que WIS ya tiene: no se les agregan movimientos (ver
+# `StockMove._search_picking_for_assignation_domain`).
+WMS_ESTADOS_EN_WIS = ('enviado', 'preparado', 'despachado', 'anulado',
+                      'en_proceso_cancelacion', 'error_cancelacion')
+
 class StockPicking(models.Model):
 
     _inherit = 'stock.picking'
@@ -1307,6 +1312,27 @@ class StockMove(models.Model):
         readonly=True, copy=False, default=0.0,
         help="Cantidad acumulada anulada por WIS sobre este movimiento (anulaciones "
              "parciales de demanda). Valor inicial 0; solo la integración lo modifica.")
+
+    def _search_picking_for_assignation_domain(self):
+        """Un movimiento nuevo no se suma a una operación que WIS ya recibió.
+
+        Odoo agrega el movimiento a cualquier operación abierta con el mismo grupo, origen,
+        destino y tipo. Si esa operación ya está en WIS, la línea queda sólo en Odoo: el envío
+        no se repite y la actualización de WIS sólo viaja cuando cambia la cantidad de una
+        línea existente. 14-oct-2026, support: una reposición agregó 85 líneas a 9 pedidos ya
+        enviados y WIS preparó sólo las originales. Así, el movimiento abre una operación
+        nueva, que va a WIS como un pedido más.
+
+        Tampoco se suma a una que la cola está enviando en este momento: el envío ya armó
+        sus líneas. Las «en cola» que esperan turno sí reciben líneas: salen como estén.
+        """
+        domain = super()._search_picking_for_assignation_domain()
+        domain = domain + [('wms_estado', 'not in', WMS_ESTADOS_EN_WIS)]
+        enviando = self.env['wis.picking.cola'].sudo().search(
+            [('estado', '=', 'procesando')]).picking_id
+        if enviando:
+            domain = domain + [('id', 'not in', enviando.ids)]
+        return domain
 
     def _action_confirm(self, merge=True, merge_into=False):
         res = super()._action_confirm(merge=merge, merge_into=merge_into)
