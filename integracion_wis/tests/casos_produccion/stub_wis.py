@@ -6,6 +6,7 @@
   recibido se registra en log/wis_requests.jsonl.
 - /Pedido/Create con fechaEntrega anterior a hoy -> 400 con el mismo mensaje que WIS
   devolvió en producción el 22-10 (caso C10).
+- Con el archivo log/wis_rechaza_anulacion, la anulación de una recepción responde 400.
 
 Uso: python3 stub_wis.py [puerto]   (default 8765)
 """
@@ -75,6 +76,11 @@ class Handler(BaseHTTPRequestHandler):
                                 f"'FechaEntrega': La fecha ingresada '{vencida}' no puede ser "
                                 f"menor a la fecha 'Emitida'."]}]),
                             'instance': '/Pedido/Create'}
+            elif ('AnulacionReferenciaRecepcion' in self.path and os.path.exists(
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'log', 'wis_rechaza_anulacion'))):
+                status = 400
+                resp = {'title': f"Error Interfaz Nro. '{nro}'", 'status': 400,
+                        'detail': json.dumps([{'ItemId': 1, 'Messages': ['La referencia tiene recepciones en curso.']}])}
             elif '/GetProducto' in self.path or '/GetAgente' in self.path:
                 resp = {'codigoEmpresa': 6005, 'existe': True, 'cantidadGenerica': 0}
             elif '/ConsultaDeStock/GetData' in self.path:

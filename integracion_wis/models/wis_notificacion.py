@@ -28,6 +28,7 @@ from datetime import timedelta
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 from odoo.http import _request_stack
+from psycopg2.errors import UniqueViolation
 
 _logger = logging.getLogger(__name__)
 
@@ -116,13 +117,20 @@ class WisNotificacion(models.Model):
                 return existente, False
         datos = payload.get(tipo) or payload.get(tipo[:1].upper() + tipo[1:]) or {}
         pedidos = self._pedidos_de(tipo, datos)
-        rec = self.create({
+        vals = {
             'tipo': tipo,
             'numero_interfaz': numero_interfaz or 0,
             'payload': json.dumps(payload, ensure_ascii=False),
             'pedidos_total': len(pedidos),
             'pendientes': json.dumps(pedidos),
-        })
+        }
+        try:
+            with self.env.cr.savepoint():
+                rec = self.create(vals)
+        except UniqueViolation:
+            # Dos copias de la misma notificación al mismo tiempo: la otra ganó. Es un reenvío
+            # (la de esta transacción puede no verla todavía).
+            return self.search([('tipo', '=', tipo), ('numero_interfaz', '=', numero_interfaz)], limit=1), False
         return rec, True
 
     @api.model

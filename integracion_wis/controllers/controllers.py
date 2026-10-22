@@ -94,9 +94,10 @@ Body: {body_str[:500]}"""
             Notificacion = request.env['wis.notificacion'].sudo()
             notif, nueva = Notificacion._registrar(event_id, numero_interfaz, payload)
             if not nueva:
+                estado = dict(Notificacion._fields['estado'].selection).get(notif.estado) if notif else 'en curso'
                 response = {'status': 200, 'detail': (
-                    f'La notificación {numero_interfaz} ya se había recibido '
-                    f'({dict(notif._fields["estado"].selection).get(notif.estado)}); no se vuelve a procesar.')}
+                    f'La notificación {numero_interfaz} ya se había recibido ({estado}); '
+                    f'no se vuelve a procesar.')}
                 self._create_log(payload, response, event_id, 'exito', numero_interfaz)
                 return response
             if self._wis_en_segundo_plano():
@@ -1297,6 +1298,29 @@ Body: {body_str[:500]}"""
                 pedido_data.get('contenedores') or data.get('contenedores') or [], nombre_pedido)
             cajas_nuevas = self._wis_sin_aplicar(nombre_pedido, cajas_pedido)
             if cajas_pedido and not cajas_nuevas:
+                # Ya aplicadas. Si alguna operación quedó sin validar (Uruware caído, receptor),
+                # el reproceso la valida con lo que tiene cargado; no se vuelve a cargar nada.
+                claves = [self._wis_clave_contenedor(c) for c in cajas_pedido]
+                sin_validar = request.env['wis.preparacion.aplicada'].sudo().search([
+                    ('pedido', '=', nombre_pedido), ('contenedor', 'in', claves),
+                ]).picking_id.filtered(lambda p: p.state not in ('done', 'cancel'))
+                for pk in sin_validar:
+                    motivo = self._wis_validar_preparado(pk, pk._wis_es_parcial())
+                    self._ilog({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error' if motivo else 'info',
+                        'modelo': 'stock.picking',
+                        'texto': (f"confirmacionMercaderiaPreparada: {pk.name} " + (
+                            "sigue sin poder validarse." if motivo else
+                            "validado con lo que WIS ya había informado.")),
+                        'picking_id': pk.id,
+                        'resultado': 'error' if motivo else 'exito',
+                        'detalle': motivo or False,
+                    })
+                    if motivo:
+                        errores.append(f"Picking '{pk.name}': {motivo}")
+                if sin_validar:
+                    continue
                 self._ilog({
                     'fecha': fields.Datetime.now(),
                     'nivel': 'info',
@@ -1476,10 +1500,14 @@ Body: {body_str[:500]}"""
                 #    Validar SOLO si el picking quedó 'assigned' (ningún producto en 0 → nunca un
                 #    remito con cantidad 0). Sin skip_backorder: si es parcial hace falta el
                 #    wizard para el remanente.
-                if not error_preparacion:
-                    error_validacion = self._wis_validar_preparado(picking, es_parcial)
+                # Las cajas quedan registradas ANTES de validar: la emisión del e-Remito hace
+                # commit a mitad de la validación, y si el proceso muere ahí (corte, caída) el
+                # reproceso tiene que saber que ya se cargaron y sólo validar, sin volver a
+                # cargar ni a emitir (variante V19 de la réplica).
                 if not error_preparacion and contenedores_prep:
                     self._wis_registrar_aplicados(nombre_pedido, contenedores_prep, picking)
+                if not error_preparacion:
+                    error_validacion = self._wis_validar_preparado(picking, es_parcial)
 
                 if error_preparacion:
                     # El savepoint dejó el pedido como estaba: sin preparar, sin backorder.

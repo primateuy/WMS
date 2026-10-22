@@ -4,7 +4,9 @@
 - .../rest/Invoke con TipoMensaje 310 (firma): aprueba y numera (serie A, desde 970001).
   Si el XML del CFE no trae el bloque <Receptor>, responde 31 con el mismo
   mensaje que Uruware dio en producción a Portones (caso C7).
+- Un reenvío con el mismo Uuid devuelve el mismo CFE (repetido=true en el log), como UCFE.
 - Otros TipoMensaje (consulta de estado): 00.
+- Con el archivo log/ucfe_caido, la firma responde 503 (Uruware caído).
 - ObtenerPdf*: 404 (Odoo lo registra y sigue, igual que si UCFE no devolviera PDF).
 
 UCFE_DEMORA (segundos, env) o el archivo log/ucfe_demora simula la latencia por emisión, para reproducir los cortes por tiempo.
@@ -28,6 +30,9 @@ def demora():
     except (OSError, ValueError):
         return float(os.environ.get('UCFE_DEMORA', '0'))
 _numero = itertools.count(970001)
+# UCFE identifica cada requerimiento por su Uuid: un reenvío con el mismo Uuid devuelve el CFE ya
+# firmado, no uno nuevo (supuesto a confirmar con Uruware).
+_por_uuid = {}
 
 OK = ('<RespBody xmlns="http://schemas.datacontract.org/2004/07/Uruware.Ucfe.Inbox.WebService" '
       'xmlns:i="http://www.w3.org/2001/XMLSchema-instance"><ErrorCode>0</ErrorCode>'
@@ -53,8 +58,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             body = {}
         req = (body or {}).get('Req') or {}
-        status, out = 200, ''
-        if 'ObtenerPdf' in self.path:
+        status, out, repetido = 200, '', False
+        caido = os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'log', 'ucfe_caido'))
+        if caido and str(req.get('TipoMensaje')) == '310':
+            status, out = 503, 'UCFE fuera de servicio (simulado)'
+        elif 'ObtenerPdf' in self.path:
             status, out = 404, 'sin pdf en local'
         elif str(req.get('TipoMensaje')) == '310':
             time.sleep(demora())
@@ -62,7 +70,11 @@ class Handler(BaseHTTPRequestHandler):
             if '<Receptor' not in xml:
                 out = ERR.format(cod='31', msg='El CFE de tipo ERemito omite encabezado y/o receptor')
             else:
-                out = OK.format(n=next(_numero), tipo=req.get('TipoCfe') or 181,
+                uuid = req.get('Uuid')
+                repetido = bool(uuid) and uuid in _por_uuid
+                if not repetido:
+                    _por_uuid[uuid] = next(_numero)
+                out = OK.format(n=_por_uuid[uuid], tipo=req.get('TipoCfe') or 181,
                                 fecha=datetime.datetime.now().isoformat())
         else:
             out = ('<RespBody><Resp xmlns:a="x"><a:CodRta>00</a:CodRta>'
@@ -70,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(LOG, 'a') as f:
             f.write(json.dumps({'ts': datetime.datetime.now().isoformat(), 'path': self.path,
                                 'tipo_mensaje': req.get('TipoMensaje'), 'uuid': req.get('Uuid'),
-                                'status': status, 'cod': ('00' if 'CodRta>00<' in out else ('31' if 'CodRta>31<' in out else '')), 'resp': out[:300]}, ensure_ascii=False) + '\n')
+                                'status': status, 'repetido': repetido, 'cod': ('00' if 'CodRta>00<' in out else ('31' if 'CodRta>31<' in out else '')), 'resp': out[:300]}, ensure_ascii=False) + '\n')
         data = out.encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/xml')

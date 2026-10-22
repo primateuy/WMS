@@ -22,6 +22,48 @@ Son los 12 casos de la auditoría del 08 al 22-10-2026, armados con el flujo rea
 | C11 | Ajuste fuera de escala |
 | C12 | Dos preparaciones despachadas en dos camiones |
 
+## Variantes (`sh/c20.py`, `sh/c21.py`)
+
+Son las situaciones que pueden romper la integración de punta a cabo. Además de su control puntual, cada una pasa por `integridad()` (`sh/integridad.py`), que revisa:
+
+- stock sin negativos nuevos;
+- cajas en una sola ubicación;
+- e-Remitos, uno por operación y sin líneas en 0;
+- lo despachado entregado entero y lo no despachado sin entregar;
+- la recepción validada en la tienda.
+
+| Variante | Qué prueba |
+|---|---|
+| V01 | Reenvío con otro número de interfaz y las mismas cajas |
+| V02 | Dos copias de la misma notificación al mismo tiempo |
+| V03 | El despacho llega antes que la preparación |
+| V04 | El mismo despacho dos veces |
+| V05 | Tres tandas de preparación y un solo camión |
+| V06 | WIS prepara más de lo pedido |
+| V07 | Producto que el pedido no tiene |
+| V08 | Anulación parcial y preparación del resto |
+| V09 | Pedido que Odoo no conoce |
+| V10 | Un pedido falla (receptor), se corrige y se reprocesa |
+| V11 | Entrega unificada despachada en desorden |
+| V12 | Caja compartida, misma entrega |
+| V13 | Caja compartida y la lista nombra un solo pedido |
+| V14 | Crossdock con caja compartida y parcial |
+| V15 | Mayoristas con y sin teléfono |
+| V16 | WIS rechaza la anulación de la recepción |
+| V17 | Ajuste grande retenido y aprobado; ajuste chico aplicado |
+| V18 | Notificación de 30 pedidos que necesita varias corridas del cron |
+| V19 | El servidor muere a mitad y retoma |
+| V20 | Uruware caído y reproceso |
+| V21 | Despacho de un pedido cancelado en Odoo |
+| V22 | La entrega se validó a mano antes del despacho |
+| V23 | WIS prepara lo que Odoo no tiene en stock |
+
+V18 y V19 se corren con una conf de límites bajos (`limit_time_real = limit_time_real_cron = 90`) y con las variables `CASOS_CONF`, `CASOS_PYTHON` y `CASOS_ODOO`, porque V19 mata y vuelve a levantar el servidor.
+
+**Supuesto de V19:** si el proceso muere mientras Uruware firma, el reproceso reenvía el e-Remito con el mismo Uuid. El simulador devuelve el mismo CFE, que es para lo que UCFE usa el Uuid. Hay que confirmarlo con Uruware.
+
+`grabar_video.py <base> <salida.mp4> log/video_*.json` graba en la interfaz de Odoo cómo quedó cada caso (Playwright + ffmpeg).
+
 ## Cómo se arma
 
 1. **Copia de la base.** Hacerla con `createdb -O odoo -T <base> <copia>`. Si la base no es del usuario de Odoo, Odoo no la lista: `/web/login` manda al selector de bases y el webhook da 404.

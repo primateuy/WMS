@@ -1,8 +1,10 @@
 import glob as _glob
 exec(open(BASE_SH + '/casos.py').read())
+exec(open(BASE_SH + '/integridad.py').read())
 for _f in sorted(_glob.glob(BASE_SH + '/c[0-9]*.py')):
     exec(open(_f).read())
 for nombre in CASOS:
+    INICIO_CASO = fields.Datetime.now()
     try:
         globals()['caso_' + nombre]()
     except Exception as e:
@@ -13,3 +15,4 @@ for nombre in CASOS:
     refrescar()
 print('RESUMEN', sum(r[2] for r in RESULTADOS), 'OK de', len(RESULTADOS))
 json.dump(RESULTADOS, open(BASE + '/log/resultado_' + '_'.join(CASOS) + '.json', 'w'), ensure_ascii=False, indent=1)
+json.dump(VIDEO, open(BASE + '/log/video_' + '_'.join(CASOS) + '.json', 'w'), ensure_ascii=False, indent=1)

@@ -25,6 +25,7 @@ _nie = itertools.count(int(time.time()) % 1000000 * 100)
 _cont = itertools.count(int(time.time()) % 100000 * 10)
 _prep = itertools.count(int(time.time()) % 100000 * 10)
 RESULTADOS = []
+VIDEO = []  # (caso, título, ids de operaciones a mostrar)
 CORRIDA = time.strftime('%H%M%S')
 
 
@@ -140,7 +141,7 @@ def despacho(pickings, contenedores, nie=None):
 def remitos_emitidos():
     if not os.path.exists(UCFE_LOG):
         return 0
-    return sum(1 for l in open(UCFE_LOG) if '"tipo_mensaje": 310' in l and '"cod": "00"' in l)
+    return sum(1 for l in open(UCFE_LOG) if '"tipo_mensaje": 310' in l and '"cod": "00"' in l and '"repetido": true' not in l)
 
 
 def wis_llamadas(fragmento):
@@ -171,3 +172,15 @@ def chequear(caso, descripcion, condicion, detalle=''):
 
 def por_codigo(codigo):
     return env['stock.picking'].search([('codigo_unico', '=', codigo), ('wms_estado', '!=', 'no_integrado')])
+
+
+def para_video(caso, titulo, pickings):
+    VIDEO.append({'caso': caso, 'titulo': titulo, 'pickings': [int(i) for i in pickings.ids]})
+
+
+def interruptor(nombre, activo):
+    ruta = BASE + '/log/' + nombre
+    if activo:
+        open(ruta, 'w').write('1')
+    elif os.path.exists(ruta):
+        os.remove(ruta)

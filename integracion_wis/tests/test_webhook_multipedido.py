@@ -608,6 +608,26 @@ class TestWebhookMultipedido(TransactionCase):
         self.assertTrue(logs.filtered(lambda l: l.resultado == 'error' and 'SMS' in (l.detalle or '')),
                         [(l.nivel, l.resultado, l.texto, l.detalle) for l in logs])
 
+    def test_reproceso_valida_lo_ya_aplicado_que_no_se_valido(self):
+        """Uruware caído o receptor: la preparación queda cargada sin validar. El reproceso de
+        la misma notificación no vuelve a cargar nada, pero tiene que validarla."""
+        picking = self._preparo(self.tiendas[4], [(self.producto_a, 2)])
+        caja = self._contenedor('WISCO-REPRO', 101, picking.codigo_unico, [(self.producto_a, 2)])
+        Picking = type(self.env['stock.picking'])
+
+        def caida(self):
+            raise UserError("Uruware fuera de servicio (prueba)")
+        with patch.object(Picking, 'button_validate', caida):
+            try:
+                self._preparada([picking], [caja])
+            except ValueError:
+                pass
+        self.assertNotEqual(picking.state, 'done')
+        self.assertEqual(picking.wms_estado, 'preparado')
+        self._preparada([picking], [caja])
+        self.assertEqual(picking.state, 'done')
+        self.assertEqual(sum(picking.move_ids.mapped('quantity')), 2, "no se cargó dos veces")
+
     def test_stock_en_dos_paquetes_no_deja_lineas_en_cero(self):
         """CROSS/00375 y otros: la reserva dejaba dos líneas y una quedaba en 0."""
         tienda = self.tiendas[1]
