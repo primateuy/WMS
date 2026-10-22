@@ -122,13 +122,26 @@ class TestWebhookMultipedido(TransactionCase):
         return picking
 
     def _entrega(self, tienda, preparo):
-        """Operación interna Salida -> Tránsito, sin integración: la que valida la cascada."""
-        cantidades = [(m.product_id, m.product_uom_qty) for m in preparo.move_ids]
-        interna = self._picking(self.tipo_interno, tienda['salida'], tienda['transito'],
-                                tienda['grupo'], cantidades)
+        """Operación interna Salida -> Tránsito, sin integración, encadenada a la preparación
+        por movimientos (como la arma Odoo): es la que avanza cuando WIS despacha."""
+        sin_wis = self.env['stock.picking'].with_context(skip_wms_integration=True)
+        interna = sin_wis.create({
+            'picking_type_id': self.tipo_interno.id,
+            'location_id': tienda['salida'].id,
+            'location_dest_id': tienda['transito'].id,
+            'group_id': tienda['grupo'].id,
+            'move_ids': [(0, 0, {
+                'name': m.product_id.name, 'product_id': m.product_id.id,
+                'product_uom_qty': m.product_uom_qty, 'product_uom': m.product_uom.id,
+                'location_id': tienda['salida'].id, 'location_dest_id': tienda['transito'].id,
+                'group_id': tienda['grupo'].id, 'move_orig_ids': [(6, 0, m.ids)],
+                'procure_method': 'make_to_order',
+            }) for m in preparo.move_ids],
+        })
+        interna.action_confirm()
         interna.with_context(skip_wms_integration=True).write({
             'codigo_unico': preparo.codigo_unico, 'wms_estado': 'no_integrado'})
-        return interna
+        return self.env['stock.picking'].browse(interna.id)
 
     @staticmethod
     def _contenedor(barras, numero, pedido, cantidades, bultos=1):
@@ -399,6 +412,7 @@ class TestWebhookMultipedido(TransactionCase):
                 'name': 'partido', 'product_id': self.producto_a.id, 'product_uom_qty': 3,
                 'product_uom': self.producto_a.uom_id.id, 'group_id': tienda['grupo'].id,
                 'location_id': tienda['salida'].id, 'location_dest_id': tienda['transito'].id,
+                'move_orig_ids': [(6, 0, picking.move_ids.ids)], 'procure_method': 'make_to_order',
             }) for _ in range(2)],
         })
         entrega.move_ids._action_confirm(merge=False)
@@ -440,7 +454,9 @@ class TestWebhookMultipedido(TransactionCase):
             original(moves, *args, **kwargs)
             raise UserError("falla de prueba en la entrega")
 
-        with patch.object(Move, '_action_done', falla):
+        with patch.object(Move, '_action_done', falla), \
+                self.assertRaisesRegex(ValueError, 'falla de prueba'):
+            # El despacho queda registrado y la falla de la entrega vuelve en la respuesta.
             self.controller._handle_confirmacion_pedido({
                 'pedidos': [{'pedido': picking.codigo_unico}],
                 'contenedores': [contenedor],
@@ -475,3 +491,176 @@ class TestWebhookMultipedido(TransactionCase):
         adenda = pickings[0]._get_remito_adenda()
         self.assertIn('Paquetes: WISCO-T0', adenda)
         self.assertNotIn('WISCO-T1', adenda)
+
+    # ------------------------------------------------------------------
+    # 0.10.0: casos de producción del 08 al 22-10-2026
+    # ------------------------------------------------------------------
+    def test_reenvio_de_la_preparacion_no_se_aplica_dos_veces(self):
+        """Producción 21/22-10: WIS reenvió la preparación (corte por tiempo) y Odoo la aplicó
+        otra vez sobre el saldo: 88 e-Remitos duplicados."""
+        picking = self._preparo(self.tiendas[0], [(self.producto_a, 2), (self.producto_b, 2)])
+        caja = self._contenedor('WISCO-REENVIO', 77, picking.codigo_unico,
+                                [(self.producto_a, 2), (self.producto_b, 1)])
+        self._preparada([picking], [caja])
+        self._preparada([picking], [caja])
+        todos = self.env['stock.picking'].search([('codigo_unico', '=', picking.codigo_unico)])
+        self.assertEqual(len(todos.filtered(lambda p: p.state == 'done')), 1)
+        saldo = todos.filtered(lambda p: p.state not in ('done', 'cancel'))
+        self.assertEqual(sum(saldo.move_ids.mapped('product_uom_qty')), 1, "el saldo sigue pendiente")
+
+    def test_despacho_sin_preparacion_previa_valida_con_las_cajas(self):
+        """W-P-26167 y los mayoristas: WIS despachó sin que Odoo tuviera la preparación."""
+        tienda = self.tiendas[1]
+        picking = self._preparo(tienda, [(self.producto_a, 3)])
+        entrega = self._entrega(tienda, picking)
+        caja = self._contenedor('WISCO-DIRECTO', 78, picking.codigo_unico, [(self.producto_a, 3)])
+        self.controller._handle_confirmacion_pedido({
+            'pedidos': [{'pedido': picking.codigo_unico}], 'contenedores': [caja]})
+        self.assertEqual(picking.state, 'done')
+        self.assertEqual(picking.wms_estado, 'despachado')
+        self.assertEqual(entrega.state, 'done')
+
+    def test_despacho_marca_solo_las_cajas_del_camion(self):
+        picking = self._preparo(self.tiendas[2], [(self.producto_a, 4), (self.producto_b, 4)])
+        c1 = self._contenedor('WISCO-T1A', 81, picking.codigo_unico, [(self.producto_a, 4)])
+        c2 = self._contenedor('WISCO-T1B', 82, picking.codigo_unico, [(self.producto_b, 4)])
+        self._preparada([picking], [c1])
+        self._preparada([picking], [c2])
+        hechos = self.env['stock.picking'].search([('codigo_unico', '=', picking.codigo_unico),
+                                                   ('state', '=', 'done')])
+        self.assertEqual(len(hechos), 2)
+        self.controller._handle_confirmacion_pedido({
+            'pedidos': [{'pedido': picking.codigo_unico}], 'contenedores': [c1]})
+        tanda1 = hechos.filtered(lambda p: self.producto_a in p.move_ids.product_id)
+        tanda2 = hechos - tanda1
+        self.assertEqual(tanda1.wms_estado, 'despachado')
+        self.assertEqual(tanda2.wms_estado, 'preparado', "la segunda tanda viaja en otro camión")
+        self.assertTrue(self.env['wms.integracion.log'].search([
+            ('picking_id', '=', tanda1.id), ('texto', 'ilike', 'confirmacionPedido')]))
+
+    def test_entrega_unificada_avanza_solo_lo_despachado(self):
+        """Odoo junta en una entrega los pedidos de una tienda: sólo avanza lo despachado y el
+        resto queda pendiente, aunque ya esté preparado."""
+        tienda = self.tiendas[3]
+        p1 = self._preparo(tienda, [(self.producto_a, 2)])
+        p2 = self._preparo(tienda, [(self.producto_b, 2)])
+        sin_wis = self.env['stock.picking'].with_context(skip_wms_integration=True)
+        entrega = sin_wis.create({
+            'picking_type_id': self.tipo_interno.id, 'group_id': tienda['grupo'].id,
+            'location_id': tienda['salida'].id, 'location_dest_id': tienda['transito'].id,
+            'move_ids': [(0, 0, {
+                'name': m.product_id.name, 'product_id': m.product_id.id,
+                'product_uom_qty': m.product_uom_qty, 'product_uom': m.product_uom.id,
+                'location_id': tienda['salida'].id, 'location_dest_id': tienda['transito'].id,
+                'group_id': tienda['grupo'].id, 'move_orig_ids': [(6, 0, m.ids)],
+                'procure_method': 'make_to_order'}) for m in (p1 | p2).move_ids],
+        })
+        entrega.action_confirm()
+        c1 = self._contenedor('WISCO-U1', 91, p1.codigo_unico, [(self.producto_a, 2)])
+        c2 = self._contenedor('WISCO-U2', 92, p2.codigo_unico, [(self.producto_b, 2)])
+        self._preparada([p1, p2], [c1, c2])
+        self.controller._handle_confirmacion_pedido({
+            'pedidos': [{'pedido': p1.codigo_unico}], 'contenedores': [c1]})
+        m1 = p1.move_ids.move_dest_ids
+        m2 = p2.move_ids.move_dest_ids
+        self.assertTrue(all(m.state == 'done' for m in m1))
+        self.assertTrue(all(m.state not in ('done', 'cancel') for m in m2),
+                        "lo preparado del pedido 2 no salió: no se entrega")
+
+    def test_caja_compartida_entre_entregas(self):
+        """WIS arma una caja por tienda con varios pedidos (producción: 69 OUTCROSS)."""
+        tienda = self.tiendas[4]
+        p1 = self._preparo(tienda, [(self.producto_a, 2)])
+        p2 = self._preparo(tienda, [(self.producto_b, 3)])
+        e1 = self._entrega(tienda, p1)
+        e2 = self._entrega(tienda, p2)
+        caja = {
+            'numeroContenedor': 95, 'idExternoContenedor': '95', 'codigoBarras': 'WISCO-COMPARTIDA',
+            'cantidadBultos': 1,
+            'detalles': [{'pedido': p1.codigo_unico, 'producto': self.producto_a.codigo_unico, 'cantidadPreparada': 2},
+                         {'pedido': p2.codigo_unico, 'producto': self.producto_b.codigo_unico, 'cantidadPreparada': 3}],
+        }
+        self._preparada([p1, p2], [caja])
+        self.controller._handle_confirmacion_pedido({
+            'pedidos': [{'pedido': p1.codigo_unico}, {'pedido': p2.codigo_unico}], 'contenedores': [caja]})
+        self.assertEqual(e1.state, 'done')
+        self.assertEqual(e2.state, 'done')
+        Quant = self.env['stock.quant']
+        self.assertEqual(Quant._get_available_quantity(self.producto_a, tienda['transito']), 2)
+        self.assertEqual(Quant._get_available_quantity(self.producto_b, tienda['transito']), 3)
+
+    def test_otro_asistente_al_validar_no_se_da_por_bueno(self):
+        """Los mayoristas: «Validar» devolvía el asistente de SMS, no validaba y el log decía éxito."""
+        picking = self._preparo(self.tiendas[0], [(self.producto_a, 2)])
+        caja = self._contenedor('WISCO-SMS', 96, picking.codigo_unico, [(self.producto_a, 2)])
+        Picking = type(self.env['stock.picking'])
+        # Sin assertRaises: en Odoo deshace el savepoint y se lleva los logs que hay que mirar.
+        with patch.object(Picking, 'button_validate',
+                          lambda self: {'res_model': 'confirm.stock.sms', 'name': 'SMS', 'type': 'ir.actions.act_window'}):
+            try:
+                self._preparada([picking], [caja])
+                self.fail("la preparación tenía que informar el error")
+            except ValueError:
+                pass
+        self.assertNotEqual(picking.state, 'done')
+        logs = self.env['wms.integracion.log'].search([('picking_id', '=', picking.id)])
+        self.assertFalse(logs.filtered(lambda l: l.nivel == 'info' and l.resultado == 'exito'))
+        self.assertTrue(logs.filtered(lambda l: l.resultado == 'error' and 'SMS' in (l.detalle or '')),
+                        [(l.nivel, l.resultado, l.texto, l.detalle) for l in logs])
+
+    def test_stock_en_dos_paquetes_no_deja_lineas_en_cero(self):
+        """CROSS/00375 y otros: la reserva dejaba dos líneas y una quedaba en 0."""
+        tienda = self.tiendas[1]
+        producto = self._producto('Remera dos paquetes', 'PRD-TMP-DOS')
+        for n in (1, 2):
+            paq = self.env['stock.quant.package'].create({'name': f'PAQ-DOS-{n}'})
+            self.env['stock.quant']._update_available_quantity(producto, self.origen, 6, package_id=paq)
+        picking = self._preparo(tienda, [(producto, 10)])
+        self.assertEqual(len(picking.move_line_ids), 2)
+        self._preparada([picking], [self._contenedor('WISCO-DOS', 97, picking.codigo_unico, [(producto, 10)])])
+        self.assertEqual(picking.state, 'done')
+        self.assertFalse(picking.move_line_ids.filtered(lambda l: l.quantity <= 0))
+
+    def test_pedido_que_solo_esta_en_las_cajas_se_procesa(self):
+        """642399: WIS mandó cajas de pedidos que no estaban en la lista Pedidos."""
+        a = self._preparo(self.tiendas[2], [(self.producto_a, 1)])
+        b = self._preparo(self.tiendas[3], [(self.producto_b, 1)])
+        self.controller._handle_mercaderia_preparada({
+            'fechaFacturacion': '20/10/2026',
+            'pedidos': [{'pedido': a.codigo_unico}],
+            'contenedores': [self._contenedor('WISCO-LA', 98, a.codigo_unico, [(self.producto_a, 1)]),
+                             self._contenedor('WISCO-LB', 99, b.codigo_unico, [(self.producto_b, 1)])],
+        })
+        self.assertEqual(a.state, 'done')
+        self.assertEqual(b.state, 'done')
+
+    def test_ajuste_fuera_de_escala_queda_retenido(self):
+        """Ajuste 275407 «ASD»: +430.970 bolsas aplicadas sin control."""
+        self.env['ir.config_parameter'].sudo().set_param('integracion_wis.ajuste_tope_unidades', '5000')
+        antes = self.env['stock.picking'].search_count([])
+        self.controller._wis_retenida = False
+        self.controller._handle_ajustes({'ajustes': [{
+            'producto': self.producto_a.codigo_unico, 'cantidadMovimiento': 430970.0,
+            'tipoAjuste': 'US', 'numeroAjusteStock': 275407, 'descripcionMotivo': 'ASD'}]})
+        self.assertTrue(self.controller._wis_retenida)
+        self.assertEqual(self.env['stock.picking'].search_count([]), antes)
+
+
+@tagged('post_install', '-at_install', 'wis_notificaciones')
+class TestNotificacionesWIS(TransactionCase):
+
+    def test_reenvio_con_el_mismo_numero_no_se_registra_dos_veces(self):
+        Notif = self.env['wis.notificacion']
+        payload = {'Id': 'ConfirmacionMercaderiaPreparada', 'NumeroInterfazEjecucion': 645737,
+                   'ConfirmacionMercaderiaPreparada': {'Pedidos': [{'Pedido': 'W-P-1'}], 'Contenedores': []}}
+        n1, nueva1 = Notif._registrar('confirmacionMercaderiaPreparada', 645737, payload)
+        n2, nueva2 = Notif._registrar('confirmacionMercaderiaPreparada', 645737, payload)
+        self.assertTrue(nueva1)
+        self.assertFalse(nueva2)
+        self.assertEqual(n1, n2)
+
+    def test_pedidos_de_la_lista_y_de_las_cajas(self):
+        datos = {'Pedidos': [{'Pedido': 'W-P-1'}],
+                 'Contenedores': [{'Detalles': [{'Pedido': 'W-P-1'}, {'Pedido': 'W-P-2'}]}]}
+        self.assertEqual(self.env['wis.notificacion']._pedidos_de('confirmacionPedido', datos),
+                         ['W-P-1', 'W-P-2'])

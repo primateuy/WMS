@@ -581,7 +581,7 @@ class StockPicking(models.Model):
             if not original.picking_type_id.integra_parciales and original.codigo_unico:
                 # Si el original es una operación INTERNA (no_integrado, ej. crosspick), su
                 # backorder debe seguir siendo no_integrado — sino la cascada
-                # `_wis_validar_operaciones_internas` (que busca no_integrado) NO lo encuentra y el
+                # la cascada vieja por código (que buscaba no_integrado) NO lo encuentra y el
                 # paso salida->transito del saldo queda sin procesar. El resto (intermedio
                 # preparado/enviado) hereda 'enviado' (saldo pendiente de preparar).
                 backorder.with_context(skip_wms_integration=True).write({
@@ -752,14 +752,29 @@ class StockPicking(models.Model):
         if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
             return super().action_cancel()
 
-        TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
-        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
         # Lo que todavía está en la cola nunca llegó a WIS: se saca de la cola y se cancela
         # con el flujo estándar, sin notificar.
         en_cola = self.filtered(lambda p: p.wms_estado == 'en_cola')
         if en_cola:
             self.env['wis.picking.cola'].sudo()._cancelar_de_pickings(en_cola)
             en_cola.with_context(skip_wms_integration=True).write({'wms_estado': 'sin_enviar'})
+        self._wis_anular_recepciones_en_wis()
+        return super().action_cancel()
+
+    def _wis_anular_recepciones_en_wis(self):
+        """Avisa a WIS la anulación de las recepciones integradas de `self` que WIS tiene
+        abiertas. Si WIS rechaza, frena la cancelación (UserError) y deja la traza.
+
+        Lo llaman `action_cancel` y la cancelación de movimientos: cancelar la compra cancela
+        primero los movimientos y la recepción queda cancelada sin pasar por `action_cancel`
+        (producción, 22-10-2026: POLO/IMPO/00022 y 00025 siguen abiertas en WIS).
+        """
+        if self.env.context.get('skip_wms_integration'):
+            return
+        if not self.env['integracion_wis.integracion_wis']._comunicacion_habilitada():
+            return
+        TIPOS_DEVOLUCION = ('ODM', 'ODT', 'ODW', 'ODFT')
+        datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
         for picking in self:
             if (not picking.picking_type_id.integracion_wms
                     or not picking.codigo_unico
@@ -803,7 +818,6 @@ class StockPicking(models.Model):
                     f"El picking quedó marcado como 'Error en cancelación'. "
                     f"Contactar a Polo Oeste para resolver."
                 )
-        return super().action_cancel()
 
     def _wis_log_cancelacion_rechazada(self, picking, error):
         """Persiste la traza del rechazo de una cancelación en un cursor SEPARADO.
@@ -835,7 +849,7 @@ class StockPicking(models.Model):
         """Emite el e-Remito (CFE) ANTES de que el picking pase a 'done'. INDISPENSABLE: un
         picking que use CFE debe emitir el remito antes de completarse, en CUALQUIER flujo —
         incluida la validación de operaciones internas del crossdock
-        (`_wis_validar_operaciones_internas`), que corre con skip_wms_integration y se saltaba
+        (`_wis_avanzar_cadena`), que corre con skip_wms_integration y se saltaba
         la emisión que hacen los handlers WIS (confirmacionPedido / mercaderiaPreparada).
 
         Si la emisión falla -> UserError: el picking NO pasa a 'done' (decisión del usuario
@@ -884,6 +898,159 @@ class StockPicking(models.Model):
                     f"quedó emitido y es obligatorio antes de pasar a 'Hecho'. "
                     f"Resolver la emisión del CFE y reintentar."
                 )
+
+    # ------------------------------------------------------------------
+    # Cadena de entrega: lo que WIS despachó avanza a la tienda / al cliente
+    # ------------------------------------------------------------------
+    def _wis_es_parcial(self):
+        self.ensure_one()
+        return any(m.quantity < m.product_uom_qty
+                   for m in self.move_ids if m.state not in ('done', 'cancel'))
+
+    def _wis_avanzar_cadena(self, origen='confirmacionPedido'):
+        """`self`: operaciones integradas que WIS ya despachó. Valida en el paso siguiente (la
+        entrega a la tienda o al cliente, que no va a WIS) SÓLO las líneas que vienen de lo
+        despachado, con sus cajas, y deja el resto en un pendiente. Devuelve la lista de errores.
+
+        Antes se buscaba el paso siguiente por código único. Odoo junta en una sola entrega
+        (POLO/OUT) los pedidos de una tienda y la entrega toma el código del primero: para los
+        demás no encontraba nada, y cuando WIS despachaba el primero se validaba también lo
+        preparado de los otros, aunque no hubiera salido (producción: 39 entregas trabadas).
+        """
+        hechos = self.move_ids.filtered(lambda m: m.state == 'done')
+        destinos = hechos.move_dest_ids.filtered(
+            lambda m: m.state not in ('done', 'cancel') and m.picking_id
+            and not m.picking_id.picking_type_id.integracion_wms)
+        errores = []
+        Log = self.env['wms.integracion.log'].sudo()
+        for entrega in destinos.picking_id:
+            lineas = destinos.filtered(lambda m: m.picking_id == entrega)
+            usa_cfe = (getattr(entrega, 'uses_cfe', False) and not getattr(entrega, 'cfe_emitido', False))
+            try:
+                if usa_cfe:
+                    entrega._wis_validar_lo_despachado(lineas, hechos)
+                else:
+                    with self.env.cr.savepoint():
+                        entrega._wis_validar_lo_despachado(lineas, hechos)
+                Log.create({
+                    'fecha': fields.Datetime.now(), 'nivel': 'info', 'modelo': 'stock.picking',
+                    'proceso': 'confirmacionPedido', 'codigo_unico': entrega.codigo_unico,
+                    'texto': _("%(origen)s: %(n)s línea(s) de %(op)s validadas con lo despachado; "
+                               "el resto queda pendiente.", origen=origen, n=len(lineas), op=entrega.name),
+                    'picking_id': entrega.id, 'resultado': 'exito',
+                    'detalle': ', '.join(self.filtered(lambda p: p.move_ids & lineas.move_orig_ids).mapped('codigo_unico')),
+                })
+            except Exception as e:
+                _logger.warning("[WIS] %s | no se pudo avanzar %s: %s", origen, entrega.name, e)
+                errores.append(f"{entrega.name}: {e}")
+                Log.create({
+                    'fecha': fields.Datetime.now(), 'nivel': 'error', 'modelo': 'stock.picking',
+                    'proceso': 'confirmacionPedido', 'codigo_unico': entrega.codigo_unico,
+                    'texto': _("%(origen)s: la entrega %(op)s no se pudo validar con lo despachado; la "
+                               "tienda no la va a ver pendiente hasta resolverlo.", origen=origen, op=entrega.name),
+                    'picking_id': entrega.id, 'resultado': 'error', 'detalle': str(e),
+                })
+        return errores
+
+    def _wis_validar_lo_despachado(self, lineas, origen_moves):
+        """Valida en esta entrega sólo `lineas`, con las cantidades y cajas de `origen_moves`.
+
+        Una caja de WIS se mueve entera sólo si todo su contenido va en esta entrega. Si no (WIS
+        arma una caja por tienda con varios pedidos), se mueve el contenido sin la caja: el core
+        no permite partir un paquete entre dos entregas («same package content», producción: 69
+        OUTCROSS trabados).
+        """
+        self.ensure_one()
+        SML = self.env['stock.move.line'].sudo()
+        Quant = self.env['stock.quant'].sudo()
+        self.do_unreserve()
+        plan = []
+        # Cada línea de origen se consume una sola vez: dos líneas de la entrega que vienen del
+        # mismo movimiento no pueden tomar las mismas unidades (caso MELO, support 13-10-2026).
+        disponible = {}
+        for dm in lineas:
+            pendiente = dm.product_uom_qty
+            for ml in dm.move_orig_ids.filtered(lambda m: m in origen_moves).move_line_ids:
+                disponible.setdefault(ml.id, ml.quantity)
+                cant = min(disponible[ml.id], pendiente)
+                if cant <= 0:
+                    continue
+                disponible[ml.id] -= cant
+                pendiente -= cant
+                plan.append((dm, cant, ml.result_package_id, ml.location_dest_id))
+        if not plan:
+            raise UserError(_("No hay cantidades despachadas para %s.") % self.name)
+        por_caja = {}
+        for dm, cant, caja, ubic in plan:
+            if caja:
+                por_caja[(caja.id, ubic.id)] = por_caja.get((caja.id, ubic.id), 0) + cant
+        enteras = {k for k, cant in por_caja.items()
+                   if abs(sum(Quant.search([('package_id', '=', k[0]), ('location_id', '=', k[1])])
+                              .mapped('quantity')) - cant) < 0.0001}
+        for dm, cant, caja, ubic in plan:
+            entera = bool(caja) and (caja.id, ubic.id) in enteras
+            SML.create({
+                'move_id': dm.id, 'picking_id': self.id,
+                'product_id': dm.product_id.id, 'product_uom_id': dm.product_uom.id,
+                'location_id': ubic.id, 'location_dest_id': dm.location_dest_id.id,
+                'quantity': cant, 'picked': True,
+                'package_id': caja.id if caja else False,
+                'result_package_id': caja.id if entera else False,
+            })
+        lineas.write({'picked': True})
+        res = self.with_context(skip_wms_integration=True, skip_sms=True).button_validate()
+        if isinstance(res, dict):
+            if res.get('res_model') == 'stock.backorder.confirmation':
+                (self.env['stock.backorder.confirmation'].with_context(**res.get('context', {}))
+                 .sudo().create({}).with_context(skip_sms=True).process())
+            else:
+                raise UserError(_("Odoo pidió confirmar «%s» y la entrega no se validó.")
+                                % (res.get('name') or res.get('res_model')))
+        lineas.invalidate_recordset()
+        if any(m.state != 'done' for m in lineas.filtered(lambda m: m.picking_id == self)):
+            raise UserError(_("La entrega %s no quedó validada.") % self.name)
+
+    def action_wis_reprocesar(self):
+        """Valida desde Odoo una operación que WIS ya preparó y que no se pudo validar (por
+        ejemplo, la sucursal con «Es receptor» desmarcado). Usa las cantidades ya cargadas."""
+        from odoo.http import _request_stack
+        from odoo.addons.integracion_wis.controllers.controllers import WebhookWIS
+        from .wis_notificacion import RequestCola
+        Log = self.env['wms.integracion.log'].sudo()
+        ctrl = WebhookWIS()
+        ctrl._wis_cola = None
+        ctrl._wis_evento_actual = 'confirmacionMercaderiaPreparada'
+        _request_stack.push(RequestCola(self.env(su=True)))
+        try:
+            for picking in self.filtered(lambda p: p.state not in ('done', 'cancel') and p.wms_estado == 'preparado'):
+                ctrl._wis_codigo_actual = picking.codigo_unico
+                motivo = ctrl._wis_validar_preparado(picking, picking._wis_es_parcial())
+                Log.create({
+                    'fecha': fields.Datetime.now(), 'modelo': 'stock.picking',
+                    'proceso': 'confirmacionMercaderiaPreparada', 'codigo_unico': picking.codigo_unico,
+                    'nivel': 'error' if motivo else 'info', 'resultado': 'error' if motivo else 'exito',
+                    'texto': (_("Reprocesar WIS: %s no se pudo validar.") % picking.name if motivo
+                              else _("Reprocesar WIS: %s validado.") % picking.name),
+                    'picking_id': picking.id, 'detalle': motivo or False,
+                })
+                if motivo:
+                    raise UserError(motivo)
+        finally:
+            _request_stack.pop()
+        return True
+
+    def action_wis_avanzar_cadena(self):
+        """Avanza la entrega a tienda de lo que WIS ya despachó. Sirve desde la operación
+        despachada o desde la entrega trabada."""
+        despachados = self.filtered(lambda p: p.wms_estado == 'despachado' and p.state == 'done')
+        despachados |= self.move_ids.move_orig_ids.picking_id.filtered(
+            lambda p: p.wms_estado == 'despachado' and p.state == 'done')
+        if not despachados:
+            raise UserError(_("No hay operaciones despachadas por WIS para avanzar."))
+        errores = despachados._wis_avanzar_cadena(origen=_('Avanzar cadena WIS'))
+        if errores:
+            raise UserError('\n'.join(errores))
+        return True
 
     def _wis_controlar_paquetes(self):
         """Anticipa el control de paquetes del core (`stock.move._action_done`).
@@ -1333,6 +1500,21 @@ class StockMove(models.Model):
         if enviando:
             domain = domain + [('id', 'not in', enviando.ids)]
         return domain
+
+    def _action_cancel(self):
+        """Cancelar la compra cancela primero los movimientos de la recepción: la recepción queda
+        cancelada sin pasar por `action_cancel`, y WIS no se enteraba (producción, 22-10-2026:
+        POLO/IMPO/00022 y 00025). Se avisa a WIS cuando se cancela todo lo pendiente de una
+        recepción integrada; si WIS rechaza, la cancelación no sigue."""
+        if not self.env.context.get('skip_wms_integration'):
+            recepciones = self.picking_id.filtered(
+                lambda p: p.state != 'cancel' and p.picking_type_id.code == 'incoming'
+                and p.wms_estado == 'enviado')
+            completas = recepciones.filtered(
+                lambda p: not (p.move_ids - self).filtered(lambda m: m.state not in ('done', 'cancel')))
+            if completas:
+                completas._wis_anular_recepciones_en_wis()
+        return super()._action_cancel()
 
     def _action_confirm(self, merge=True, merge_into=False):
         res = super()._action_confirm(merge=merge, merge_into=merge_into)

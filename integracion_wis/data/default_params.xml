@@ -5,5 +5,15 @@
             <field name="key">wis.webhook_secret</field>
             <field name="value">1234</field>
         </record>
+        <!-- 1: el webhook guarda la notificación y un cron la procesa (recomendado). 0: dentro de la petición. -->
+        <record id="param_wis_webhook_en_segundo_plano" model="ir.config_parameter">
+            <field name="key">integracion_wis.webhook_en_segundo_plano</field>
+            <field name="value">1</field>
+        </record>
+        <!-- Ajustes de WIS por encima de esta cantidad (en unidades) quedan retenidos hasta aprobarlos. 0 = sin tope. -->
+        <record id="param_wis_ajuste_tope_unidades" model="ir.config_parameter">
+            <field name="key">integracion_wis.ajuste_tope_unidades</field>
+            <field name="value">5000</field>
+        </record>
     </data>
 </odoo>

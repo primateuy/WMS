@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <data>
+
+    <record id="view_wis_notificacion_tree" model="ir.ui.view">
+      <field name="name">wis.notificacion.tree</field>
+      <field name="model">wis.notificacion</field>
+      <field name="arch" type="xml">
+        <tree decoration-danger="estado in ('error', 'con_errores')" decoration-warning="estado == 'retenida'"
+              decoration-muted="estado == 'hecho'" create="false">
+          <field name="recibida"/>
+          <field name="tipo"/>
+          <field name="numero_interfaz"/>
+          <field name="pedidos_hechos"/>
+          <field name="pedidos_total"/>
+          <field name="estado"/>
+          <field name="intentos" optional="hide"/>
+          <field name="fin" optional="show"/>
+        </tree>
+      </field>
+    </record>
+
+    <record id="view_wis_notificacion_form" model="ir.ui.view">
+      <field name="name">wis.notificacion.form</field>
+      <field name="model">wis.notificacion</field>
+      <field name="arch" type="xml">
+        <form create="false">
+          <header>
+            <button name="action_reprocesar" type="object" string="Reprocesar"
+                    invisible="estado not in ('con_errores', 'error')"
+                    groups="stock.group_stock_manager"
+                    help="Vuelve a procesar lo que falló. Lo ya aplicado no se repite."/>
+            <button name="action_aprobar" type="object" string="Aprobar y aplicar"
+                    invisible="estado != 'retenida'" groups="stock.group_stock_manager"
+                    confirm="Se aplica lo que superaba el tope configurado. ¿Continuar?"/>
+            <field name="estado" widget="statusbar" statusbar_visible="pendiente,procesando,hecho"/>
+          </header>
+          <sheet>
+            <group>
+              <group>
+                <field name="tipo"/>
+                <field name="numero_interfaz"/>
+                <field name="recibida"/>
+                <field name="inicio"/>
+                <field name="fin"/>
+              </group>
+              <group>
+                <field name="pedidos_total"/>
+                <field name="pedidos_hechos"/>
+                <field name="intentos"/>
+                <field name="fase"/>
+                <field name="aprobada_por"/>
+              </group>
+            </group>
+            <notebook>
+              <page string="Errores" name="errores">
+                <field name="errores"/>
+              </page>
+              <page string="Despachadas" name="despachadas" invisible="tipo != 'confirmacionPedido'">
+                <field name="despachado_ids">
+                  <tree>
+                    <field name="name"/>
+                    <field name="codigo_unico"/>
+                    <field name="state"/>
+                    <field name="wms_estado"/>
+                  </tree>
+                </field>
+              </page>
+              <page string="Notificación" name="payload">
+                <field name="payload"/>
+              </page>
+            </notebook>
+          </sheet>
+        </form>
+      </field>
+    </record>
+
+    <record id="view_wis_notificacion_search" model="ir.ui.view">
+      <field name="name">wis.notificacion.search</field>
+      <field name="model">wis.notificacion</field>
+      <field name="arch" type="xml">
+        <search>
+          <field name="numero_interfaz"/>
+          <field name="tipo"/>
+          <field name="payload" string="Pedido o contenido"/>
+          <filter name="filtro_atencion" string="Requieren atención"
+                  domain="[('estado', 'in', ('con_errores', 'error', 'retenida'))]"/>
+          <filter name="filtro_pendientes" string="Sin terminar"
+                  domain="[('estado', 'in', ('pendiente', 'procesando'))]"/>
+          <group expand="0" string="Agrupar por">
+            <filter name="agrupar_tipo" string="Tipo" context="{'group_by': 'tipo'}"/>
+            <filter name="agrupar_estado" string="Estado" context="{'group_by': 'estado'}"/>
+          </group>
+        </search>
+      </field>
+    </record>
+
+    <record id="action_wis_notificacion" model="ir.actions.act_window">
+      <field name="name">Notificaciones WIS</field>
+      <field name="res_model">wis.notificacion</field>
+      <field name="view_mode">tree,form</field>
+      <field name="search_view_id" ref="view_wis_notificacion_search"/>
+      <field name="help" type="html">
+        <p class="o_view_nocontent_smiling_face">Todavía no llegaron notificaciones de WIS</p>
+        <p>Cada preparación, despacho, anulación o ajuste que manda WIS queda acá y se procesa
+          en segundo plano, pedido por pedido. Si WIS reenvía la misma notificación, no se vuelve
+          a aplicar.</p>
+      </field>
+    </record>
+
+    <menuitem id="menu_wis_notificacion"
+              name="Notificaciones WIS"
+              parent="menu_integracion_wis_root"
+              action="action_wis_notificacion"
+              sequence="34"/>
+
+  </data>
+</odoo>

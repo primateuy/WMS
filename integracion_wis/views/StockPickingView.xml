@@ -32,6 +32,16 @@
                             string="Reenviar LPN a WIS"
                             invisible="not wis_enviar_lpns"
                             groups="stock.group_stock_user"/>
+                    <!-- WIS ya la preparó y no se pudo validar (p. ej. sucursal sin «Es receptor») -->
+                    <button name="action_wis_reprocesar" type="object"
+                            string="Reprocesar WIS"
+                            invisible="wms_estado != 'preparado' or state in ('done', 'cancel')"
+                            groups="stock.group_stock_user"/>
+                    <!-- Lo despachado por WIS todavía no llegó a la entrega a tienda -->
+                    <button name="action_wis_avanzar_cadena" type="object"
+                            string="Avanzar cadena WIS"
+                            invisible="state != 'done' or wms_estado != 'despachado'"
+                            groups="stock.group_stock_user"/>
                 </xpath>
 
                 <!-- Spec 1: ocultar Cancelar cuando hay una cancelación pendiente de resolver

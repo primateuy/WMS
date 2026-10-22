@@ -1366,7 +1366,10 @@ class IntegracionWIS(models.Model):
             "comparteContenedorEntrega": vals.name,
             "codigoAgente": codigo_agente,
             "tipoAgente": tipo_agente,
-            "fechaEntrega": vals.scheduled_date.isoformat(),
+            # WIS rechaza una fecha de entrega anterior a la de emisión (400 «no puede ser menor
+            # a la fecha Emitida»): una operación con la fecha programada vencida sale con hoy.
+            # Producción, 22-10-2026: los 39 CROSS del crossdock P06871.
+            "fechaEntrega": max(vals.scheduled_date, fields.Datetime.now()).isoformat(),
             "tipoPedido": tipo,
             "direccion": direccion,
             "detalles": detalles,

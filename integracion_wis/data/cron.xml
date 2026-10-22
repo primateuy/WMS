@@ -96,5 +96,20 @@
       <field name="active" eval="True"/>
     </record>
 
+    <!-- Notificaciones de WIS en segundo plano: el webhook guarda y responde, este cron las
+         procesa pedido por pedido. Se dispara al recibir (_trigger); el intervalo es la red
+         de seguridad. -->
+    <record id="ir_cron_wis_notificaciones" model="ir.cron">
+      <field name="name">WIS: Notificaciones recibidas</field>
+      <field name="model_id" ref="model_wis_notificacion"/>
+      <field name="state">code</field>
+      <field name="code">model._cron_procesar()</field>
+      <field name="interval_number">2</field>
+      <field name="interval_type">minutes</field>
+      <field name="numbercall">-1</field>
+      <field name="doall" eval="False"/>
+      <field name="active" eval="True"/>
+    </record>
+
   </data>
 </odoo>
