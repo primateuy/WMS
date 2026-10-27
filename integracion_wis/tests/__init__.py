@@ -8,3 +8,4 @@ from . import test_rendimiento_wis
 from . import test_cola_productos_prioridad
 from . import test_reintentos_wis
 from . import test_webhook_multipedido
+from . import test_wizard_integrar_sin_respuesta

@@ -11,6 +11,7 @@ import logging
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError
 
+from ..models.models import WisErrorGeneral
 from ..models.wis_sync_queue import PRIORIDAD_URGENTE
 
 _logger = logging.getLogger(__name__)
@@ -82,26 +83,35 @@ class WisIntegrarVariantesWizard(models.TransientModel):
         umbral = int(self.env['ir.config_parameter'].sudo().get_param(
             'integracion_wis.integrar_ahora_max_variantes', 50) or 50)
         if len(self.variante_ids) > umbral:
-            self.variante_ids.filtered(lambda v: not v.integracion_wms).with_context(
-                _avoid_wms=True).write({'integracion_wms': True})
-            self.env['wis.sync.queue']._encolar(
-                self.variante_ids, origen='oc', origen_ref=self.order_id.name,
-                prioridad=PRIORIDAD_URGENTE)
-            self.order_id._wis_encolar_resto_variantes()
-            self.order_id.message_post(body=_(
+            return self._encolar_y_confirmar(self.variante_ids, _(
                 "%s variante(s) sin integrar en WIS quedaron en la cola urgente. Las "
                 "operaciones de la orden se envían a WIS cuando estén integradas.")
                 % len(self.variante_ids))
-            return self.order_id.with_context(
-                wis_omitir_control=True, wis_encolar_envios=True).button_confirm()
 
         # 1. Las que la orden necesita: ahora, en un solo lote.
         self.variante_ids.filtered(lambda v: not v.integracion_wms).with_context(
             _avoid_wms=True).write({'integracion_wms': True})
 
-        resultado = self.variante_ids._enviar_wms_en_lote(
-            motivo=f'integración prioritaria desde {self.order_id.name}'
-        )
+        try:
+            resultado = self.variante_ids._enviar_wms_en_lote(
+                motivo=f'integración prioritaria desde {self.order_id.name}'
+            )
+        except WisErrorGeneral as error:
+            # WIS no contestó a tiempo o no atendió (timeout, caído, credenciales): no es
+            # culpa de ninguna variante. Antes subía tal cual: el operador veía el
+            # traceback, la orden no se confirmaba y nada quedaba para reintentar.
+            # Las que no llegaron a tener código van a la cola urgente, que reintenta
+            # y espera si WIS sigue sin responder; el alta en WIS es CreateOrUpdate,
+            # así que reenviar lo que WIS haya llegado a crear no duplica nada.
+            _logger.warning("[WIS] %s: WIS no respondió al integrar %d variantes (%s); "
+                            "van a la cola urgente.", self.order_id.name,
+                            len(self.variante_ids), error)
+            pendientes = self.variante_ids.filtered(lambda v: not v.codigo_unico)
+            return self._encolar_y_confirmar(pendientes, _(
+                "WIS no respondió al integrar las variantes de la orden (%s). %s "
+                "variante(s) quedaron en la cola urgente y se integran solas cuando WIS "
+                "responda. Las operaciones de la orden se envían a WIS cuando estén "
+                "integradas.") % (error, len(pendientes)))
 
         # 2. El resto de las variantes de esos productos: a la cola.
         entradas = self.order_id._wis_encolar_resto_variantes()
@@ -121,6 +131,23 @@ class WisIntegrarVariantesWizard(models.TransientModel):
 
         # 4. Todo listo: se continúa con la confirmación de la orden.
         return self.order_id.with_context(wis_omitir_control=True).button_confirm()
+
+    def _encolar_y_confirmar(self, variantes, mensaje):
+        """Deja las variantes en la cola urgente y confirma la orden.
+
+        Los envíos de las operaciones de la orden también van a la cola, que espera
+        a que los productos tengan su código WIS antes de mandar la recepción.
+        """
+        variantes.filtered(lambda v: not v.integracion_wms).with_context(
+            _avoid_wms=True).write({'integracion_wms': True})
+        if variantes:
+            self.env['wis.sync.queue']._encolar(
+                variantes, origen='oc', origen_ref=self.order_id.name,
+                prioridad=PRIORIDAD_URGENTE)
+        self.order_id._wis_encolar_resto_variantes()
+        self.order_id.message_post(body=mensaje)
+        return self.order_id.with_context(
+            wis_omitir_control=True, wis_encolar_envios=True).button_confirm()
 
     def action_continuar_sin_integrar(self):
         """Confirma la orden igual, dejando constancia.
