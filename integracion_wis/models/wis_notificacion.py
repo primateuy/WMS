@@ -35,6 +35,9 @@ _logger = logging.getLogger(__name__)
 # Notificaciones que se procesan pedido por pedido.
 TIPOS_POR_PEDIDO = ('confirmacionMercaderiaPreparada', 'confirmacionPedido')
 PROCESANDO_COLGADA = timedelta(minutes=30)
+# Sin las marcas de `wis.notificacion.aplicado` se aplicarían de nuevo: el resto se protege
+# solo (picking ya validado, contenedor ya aplicado).
+TIPOS_SIN_GUARDA_PROPIA = ('ajustes', 'pedidosAnulados')
 
 
 def _en_test():
@@ -86,6 +89,10 @@ class WisNotificacion(models.Model):
     recibida = fields.Datetime(default=fields.Datetime.now, readonly=True)
     inicio = fields.Datetime(readonly=True)
     fin = fields.Datetime(readonly=True)
+    marca_aplicado = fields.Boolean(
+        default=True, readonly=True,
+        help="Registra qué partes aplicó (wis.notificacion.aplicado). Las procesadas antes de "
+             "integracion_wis 0.11.0 no lo hacían.")
     aprobada_por = fields.Many2one('res.users', readonly=True, ondelete='set null',
                                    help="Quien aprobó aplicar lo que superaba los topes.")
 
@@ -266,6 +273,7 @@ class WisNotificacion(models.Model):
         if errores:
             respuesta = {'status': 500, 'detail': ' | '.join(errores)[:4000]}
         self.env['wis.webhook.log'].sudo().create({
+            'notificacion_id': self.id,
             'fecha': fields.Date.today(),
             'hora': time.strftime('%H:%M:%S'),
             'numero_interfaz_ejecucion': self.numero_interfaz or 0,
@@ -279,9 +287,19 @@ class WisNotificacion(models.Model):
     # Acciones
     # ------------------------------------------------------------------
     def action_reprocesar(self):
-        """Vuelve a la cola lo que terminó con errores. Lo ya aplicado no se repite: cada
-        contenedor de una preparación se aplica una sola vez."""
-        for rec in self.filtered(lambda r: r.estado in ('con_errores', 'error')):
+        """Vuelve a la cola la notificación, con el JSON que ya mandó WIS: sirve para corregir
+        en Odoo lo que falló y aplicarla sin pedirle a WIS que la reenvíe.
+
+        Lo ya aplicado no se repite: cada contenedor de una preparación se aplica una sola vez
+        (`wis.preparacion.aplicada`) y cada referencia, ajuste, anulación o almacenamiento de
+        esta notificación también (`wis.notificacion.aplicado`). Por eso se puede reprocesar
+        incluso una que terminó bien: sólo entra lo que no había entrado."""
+        for rec in self.filtered(lambda r: r.estado == 'hecho' and not r.marca_aplicado
+                                 and r.tipo in TIPOS_SIN_GUARDA_PROPIA):
+            raise UserError(_(
+                "La notificación %s se procesó antes de que Odoo registrara qué partes aplicaba: "
+                "reprocesar un «%s» que terminó bien lo aplicaría dos veces.") % (rec.display_name, rec.tipo))
+        for rec in self.filtered(lambda r: r.estado in ('con_errores', 'error', 'hecho')):
             datos = json.loads(rec.payload or '{}')
             datos = datos.get(rec.tipo) or datos.get(rec.tipo[:1].upper() + rec.tipo[1:]) or {}
             rec.write({'estado': 'pendiente', 'fase': 'pedidos', 'errores': False, 'pedidos_hechos': 0,
@@ -325,4 +343,22 @@ class WisPreparacionAplicada(models.Model):
     _sql_constraints = [
         ('pedido_contenedor_uniq', 'unique(pedido, contenedor)',
          'Ese contenedor de WIS ya se aplicó a ese pedido.'),
+    ]
+
+
+class WisNotificacionAplicado(models.Model):
+    """Lo que una notificación ya aplicó: una referencia de recepción, una línea de ajuste,
+    un pedido anulado, un almacenamiento. Se graba en la misma transacción que el movimiento
+    de stock, así que si éste se deshace, la marca también. Al reprocesar la notificación
+    (o aprobar una retenida) lo marcado se saltea."""
+    _name = 'wis.notificacion.aplicado'
+    _description = 'Parte de una notificación de WIS ya aplicada'
+    _order = 'id'
+
+    notificacion_id = fields.Many2one('wis.notificacion', required=True, ondelete='cascade', index=True)
+    clave = fields.Char(required=True, help="Tipo, posición en la notificación y código de lo aplicado.")
+
+    _sql_constraints = [
+        ('notificacion_clave_uniq', 'unique(notificacion_id, clave)',
+         'Esa parte de la notificación ya se aplicó.'),
     ]

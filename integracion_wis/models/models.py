@@ -480,6 +480,14 @@ class IntegracionWIS(models.Model):
         self.env.cache.update(self, self._fields['token'], [token])
         self.env.cache.update(self, self._fields['expiracionToken'], [expiracion])
 
+    def _registrar_envio(self, envio, t0, req=None, error=None):
+        """Deja el envío en `wis.envio.log` (menú «Envíos a WIS»)."""
+        self.env['wis.envio.log']._registrar(
+            envio.get('metodo'), envio.get('endpoint'), params=envio.get('params'),
+            body=envio.get('body'), status_http=req.status_code if req is not None else 0,
+            respuesta=req.text if req is not None else None,
+            duracion_ms=int((time.time() - t0) * 1000), error=error)
+
     def consultarAPI(self, link, params, body, method='GET', operaciones=False):
         """Llama a WIS. Lanza:
 
@@ -507,9 +515,16 @@ class IntegracionWIS(models.Model):
 
         api_url = self._get_clean_api_url()
 
+        envio = {'metodo': method, 'endpoint': link, 'params': params, 'body': body}
+        t0 = time.time()
         try:
-            req = requests.request(url=api_url + link, method=method, json=body, headers=headers,
-                                   params=params, timeout=self._timeout(operaciones))
+            try:
+                req = requests.request(url=api_url + link, method=method, json=body, headers=headers,
+                                       params=params, timeout=self._timeout(operaciones))
+            except Exception as e:
+                self._registrar_envio(envio, t0, error=tools.ustr(e))
+                raise
+            self._registrar_envio(envio, t0, req=req)
             _logger.info(f"REQ: {req.text}")
             _logger.info(f"JSON ES BODY => {body}")
             if req.status_code != 200:
@@ -957,6 +972,8 @@ class IntegracionWIS(models.Model):
 
         api_url = self._get_clean_api_url()
 
+        envio = {'metodo': 'GET', 'endpoint': '/CodigoBarras/GetCodigoBarras', 'params': params}
+        t0 = time.time()
         try:
             req = requests.get(
                 url=f"{api_url}/CodigoBarras/GetCodigoBarras",
@@ -964,7 +981,9 @@ class IntegracionWIS(models.Model):
                 params=params,
                 timeout=min(30, self._timeout()),
             )
+            self._registrar_envio(envio, t0, req=req)
         except Exception as e:
+            self._registrar_envio(envio, t0, error=tools.ustr(e))
             _logger.warning("[WIS] No se pudo consultar el código de barras %s: %s — se asume alta",
                             codigo, e)
             return False

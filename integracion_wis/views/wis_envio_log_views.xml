@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_wis_envio_log_tree" model="ir.ui.view">
+        <field name="name">wis.envio.log.tree</field>
+        <field name="model">wis.envio.log</field>
+        <field name="arch" type="xml">
+            <tree string="Envíos a WIS" create="0" edit="0" delete="0"
+                  decoration-danger="resultado in ('rechazado', 'error')" decoration-success="resultado == 'exito'">
+                <field name="fecha"/>
+                <field name="metodo" optional="hide"/>
+                <field name="endpoint"/>
+                <field name="codigo_unico"/>
+                <field name="picking_id" optional="show"/>
+                <field name="status_http"/>
+                <field name="duracion_ms" optional="hide"/>
+                <field name="usuario_id" optional="hide"/>
+                <field name="resultado" widget="badge"
+                       decoration-danger="resultado in ('rechazado', 'error')" decoration-success="resultado == 'exito'"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_wis_envio_log_form" model="ir.ui.view">
+        <field name="name">wis.envio.log.form</field>
+        <field name="model">wis.envio.log</field>
+        <field name="arch" type="xml">
+            <form string="Envío a WIS" create="0" edit="0" delete="0">
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_ver_picking" type="object" class="oe_stat_button"
+                                icon="fa-truck" string="Picking" invisible="not picking_id"/>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="fecha"/>
+                            <field name="metodo"/>
+                            <field name="endpoint"/>
+                            <field name="codigo_unico"/>
+                            <field name="picking_id"/>
+                        </group>
+                        <group>
+                            <field name="resultado" widget="badge"
+                                   decoration-danger="resultado in ('rechazado', 'error')" decoration-success="resultado == 'exito'"/>
+                            <field name="status_http"/>
+                            <field name="duracion_ms"/>
+                            <field name="usuario_id"/>
+                        </group>
+                    </group>
+                    <field name="error" invisible="not error" class="text-danger"/>
+                    <notebook>
+                        <page string="Enviado" name="enviado">
+                            <field name="params" widget="code" options="{'mode': 'json'}" invisible="not params"/>
+                            <field name="request" widget="code" options="{'mode': 'json'}"/>
+                        </page>
+                        <page string="Respuesta" name="respuesta">
+                            <field name="respuesta" widget="code" options="{'mode': 'json'}"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_wis_envio_log_search" model="ir.ui.view">
+        <field name="name">wis.envio.log.search</field>
+        <field name="model">wis.envio.log</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="codigo_unico"/>
+                <field name="endpoint"/>
+                <field name="picking_id"/>
+                <field name="request" string="Contenido enviado"/>
+                <filter name="con_error" string="Con error" domain="[('resultado', 'in', ('rechazado', 'error'))]"/>
+                <filter name="exito" string="Éxito" domain="[('resultado', '=', 'exito')]"/>
+                <separator/>
+                <filter name="hoy" string="Hoy"
+                        domain="[('fecha', '&gt;=', context_today().strftime('%Y-%m-%d'))]"/>
+                <group expand="0" string="Agrupar por">
+                    <filter name="por_endpoint" string="Endpoint" context="{'group_by': 'endpoint'}"/>
+                    <filter name="por_resultado" string="Resultado" context="{'group_by': 'resultado'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_wis_envio_log" model="ir.actions.act_window">
+        <field name="name">Envíos a WIS</field>
+        <field name="res_model">wis.envio.log</field>
+        <field name="view_mode">tree,form</field>
+        <field name="search_view_id" ref="view_wis_envio_log_search"/>
+        <field name="help" type="html">
+            <p>Cada llamada de Odoo a WIS, con lo que se mandó y lo que WIS contestó.</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_wis_envio_log"
+              name="Envíos a WIS"
+              parent="menu_integracion_wis_root"
+              action="action_wis_envio_log"
+              sequence="59"/>
+</odoo>

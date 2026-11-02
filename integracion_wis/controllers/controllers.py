@@ -260,6 +260,33 @@ Body: {body_str[:500]}"""
                 walk(fuente)
         return ', '.join(encontrados)
 
+    def _wis_ya_aplicado(self, clave):
+        """¿Esta parte de la notificación en curso ya se aplicó? (reproceso o aprobación)."""
+        cola = getattr(self, '_wis_cola', None)
+        if not cola:
+            return False
+        return bool(request.env['wis.notificacion.aplicado'].sudo().search_count(
+            [('notificacion_id', '=', cola.id), ('clave', '=', clave)]))
+
+    def _wis_marcar_aplicado(self, clave):
+        """Marca una parte de la notificación como aplicada, en la misma transacción que el
+        movimiento: si éste se deshace, la marca también."""
+        cola = getattr(self, '_wis_cola', None)
+        if cola:
+            request.env['wis.notificacion.aplicado'].sudo().create(
+                {'notificacion_id': cola.id, 'clave': clave})
+
+    def _wis_saltear_aplicado(self, clave, texto):
+        if not self._wis_ya_aplicado(clave):
+            return False
+        _logger.info("[WIS] %s: ya aplicado en esta notificación, se saltea.", texto)
+        self._ilog({
+            'fecha': fields.Datetime.now(), 'nivel': 'info', 'modelo': 'wis.notificacion',
+            'texto': f"{texto}: ya se había aplicado en esta notificación; no se repite.",
+            'picking_id': False, 'resultado': 'omitido',
+        })
+        return True
+
     def _ilog(self, vals):
         """Crea un `wms.integracion.log` inyectando `proceso` (evento WIS en curso) y
         `codigo_unico` cuando el call-site no los pasó explícitamente. Así cada log queda
@@ -322,7 +349,7 @@ Body: {body_str[:500]}"""
 
         errores = []
 
-        for ref in referencias:
+        for indice_ref, ref in enumerate(referencias):
             numero_referencia = ref.get('numeroReferencia')
             tipo_referencia   = ref.get('tipoReferencia', '')
             memo              = ref.get('memo', '')
@@ -344,6 +371,10 @@ Body: {body_str[:500]}"""
                 errores.append(
                     f"Referencia '{numero_referencia}' no tiene detalles de productos."
                 )
+                continue
+
+            clave_aplicado = f"recepcion:{indice_ref}:{numero_referencia}"
+            if self._wis_saltear_aplicado(clave_aplicado, f"confirmacionRecepcion {numero_referencia}"):
                 continue
 
             self._wis_reconocer_envio(numero_referencia)
@@ -617,6 +648,7 @@ Body: {body_str[:500]}"""
                     ),
                     'payload_webhook': json.dumps(ref, ensure_ascii=False, indent=2),
                 })
+                self._wis_marcar_aplicado(clave_aplicado)
 
             except Exception as e:
                 _logger.exception(
@@ -1700,12 +1732,16 @@ Body: {body_str[:500]}"""
 
         errores = []
 
-        for pedido_data in pedidos:
+        for indice_pedido, pedido_data in enumerate(pedidos):
             nombre_pedido = pedido_data.get('pedido')
             codigo_agente = pedido_data.get('codigoAgente', '')
 
             if not nombre_pedido:
                 errores.append("Un pedido del array no tiene campo 'pedido'.")
+                continue
+
+            clave_aplicado = f"anulacion:{indice_pedido}:{nombre_pedido}"
+            if self._wis_saltear_aplicado(clave_aplicado, f"pedidosAnulados {nombre_pedido}"):
                 continue
 
             detalles = pedido_data.get('detalles', []) or []
@@ -1817,6 +1853,7 @@ Body: {body_str[:500]}"""
                     # Sin cantidades informadas -> cancelación TOTAL (comportamiento histórico).
                     self._anular_picking_total(
                         picking, motivo, fecha_anulacion, codigo_agente, detalles, pedido_data)
+                self._wis_marcar_aplicado(clave_aplicado)
 
             except Exception as e:
                 _logger.exception(
@@ -2122,7 +2159,7 @@ Body: {body_str[:500]}"""
         procesados_movimiento = 0
         procesados_recuento = 0
 
-        for ajuste in ajustes:
+        for indice_ajuste, ajuste in enumerate(ajustes):
             cod_producto    = ajuste.get('producto', '')
             cant_movimiento = ajuste.get('cantidadMovimiento', 0) or 0
             tipo_ajuste     = (ajuste.get('tipoAjuste') or '').strip()
@@ -2135,6 +2172,10 @@ Body: {body_str[:500]}"""
 
             if not cod_producto:
                 errores.append("Ajuste sin producto.")
+                continue
+
+            clave_aplicado = f"ajuste:{indice_ajuste}:{nro_ajuste}:{cod_producto}"
+            if self._wis_saltear_aplicado(clave_aplicado, f"ajustes {nro_ajuste} {cod_producto}"):
                 continue
 
             # Spec 6.5 paso 1: buscar el producto
@@ -2203,6 +2244,7 @@ Body: {body_str[:500]}"""
                         config=config,
                     )
                     procesados_recuento += 1
+                    self._wis_marcar_aplicado(clave_aplicado)
                 except Exception as e:
                     _logger.exception(
                         "[WIS] ajustes | error en recuento físico de %s: %s",
@@ -2260,6 +2302,7 @@ Body: {body_str[:500]}"""
                     tipo_ajuste_wis=tipo_ajuste,
                 )
                 procesados_movimiento += 1
+                self._wis_marcar_aplicado(clave_aplicado)
             except Exception as e:
                 _logger.exception(
                     "[WIS] ajustes | error creando picking de ajuste para %s: %s",

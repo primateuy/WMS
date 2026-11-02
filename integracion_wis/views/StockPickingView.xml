@@ -11,6 +11,14 @@
             <field name="priority">100</field>
             <field name="arch" type="xml">
 
+                <!-- Envíos a WIS de este picking (menú «Envíos a WIS») -->
+                <xpath expr="//div[@name='button_box']" position="inside">
+                    <button name="action_ver_envios_wis" type="object" class="oe_stat_button"
+                            icon="fa-exchange" invisible="wis_envio_count == 0">
+                        <field name="wis_envio_count" widget="statinfo" string="Envíos a WIS"/>
+                    </button>
+                </xpath>
+
                 <!-- IDs WMS junto al origen -->
                 <xpath expr="//field[@name='origin']" position="after">
                     <field name="idPedidoWMS" readonly="1"/>

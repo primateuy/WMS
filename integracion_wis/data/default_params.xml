@@ -15,5 +15,10 @@
             <field name="key">integracion_wis.ajuste_tope_unidades</field>
             <field name="value">5000</field>
         </record>
+        <!-- Días que se guardan los envíos a WIS (menú «Envíos a WIS»). 0 = no se borran. -->
+        <record id="param_wis_envio_log_dias" model="ir.config_parameter">
+            <field name="key">integracion_wis.envio_log_dias</field>
+            <field name="value">90</field>
+        </record>
     </data>
 </odoo>

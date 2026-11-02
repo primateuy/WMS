@@ -10,3 +10,4 @@ from . import test_reintentos_wis
 from . import test_webhook_multipedido
 from . import test_wizard_integrar_sin_respuesta
 from . import test_no_agrupar_parciales
+from . import test_envios_y_reproceso

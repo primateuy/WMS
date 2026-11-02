@@ -24,3 +24,4 @@ from . import uom_wis
 from . import wis_sync_queue
 from . import wis_picking_cola
 from . import wis_notificacion
+from . import wis_envio_log

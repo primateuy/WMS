@@ -30,6 +30,9 @@
                     invisible="estado not in ('con_errores', 'error')"
                     groups="stock.group_stock_manager"
                     help="Vuelve a procesar lo que falló. Lo ya aplicado no se repite."/>
+            <button name="action_reprocesar" type="object" string="Reprocesar"
+                    invisible="estado != 'hecho'" groups="stock.group_stock_manager"
+                    confirm="Esta notificación terminó bien. Se vuelve a procesar y sólo entra lo que no había entrado. ¿Continuar?"/>
             <button name="action_aprobar" type="object" string="Aprobar y aplicar"
                     invisible="estado != 'retenida'" groups="stock.group_stock_manager"
                     confirm="Se aplica lo que superaba el tope configurado. ¿Continuar?"/>
