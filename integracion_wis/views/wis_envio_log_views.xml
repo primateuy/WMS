@@ -49,11 +49,11 @@
                     <field name="error" invisible="not error" class="text-danger"/>
                     <notebook>
                         <page string="Enviado" name="enviado">
-                            <field name="params" widget="code" options="{'mode': 'json'}" invisible="not params"/>
-                            <field name="request" widget="code" options="{'mode': 'json'}"/>
+                            <field name="params" widget="code" options="{'mode': 'js'}" invisible="not params"/>
+                            <field name="request" widget="code" options="{'mode': 'js'}"/>
                         </page>
                         <page string="Respuesta" name="respuesta">
-                            <field name="respuesta" widget="code" options="{'mode': 'json'}"/>
+                            <field name="respuesta" widget="code" options="{'mode': 'js'}"/>
                         </page>
                     </notebook>
                 </sheet>

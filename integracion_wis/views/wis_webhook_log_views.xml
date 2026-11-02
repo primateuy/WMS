@@ -46,10 +46,10 @@
                     </group>
                     <notebook>
                         <page string="Request">
-                            <field name="request" widget="code" options="{'mode': 'json'}" readonly="1"/>
+                            <field name="request" widget="code" options="{'mode': 'js'}" readonly="1"/>
                         </page>
                         <page string="Respuesta">
-                            <field name="respuesta" widget="code" options="{'mode': 'json'}" readonly="1"/>
+                            <field name="respuesta" widget="code" options="{'mode': 'js'}" readonly="1"/>
                         </page>
                     </notebook>
                 </sheet>
