@@ -58,6 +58,12 @@ Son las situaciones que pueden romper la integración de punta a cabo. Además d
 | V22 | La entrega se validó a mano antes del despacho |
 | V23 | WIS prepara lo que Odoo no tiene en stock |
 
+## Individualización (`sh/c30.py`)
+
+| Caso | Qué prueba |
+|---|---|
+| X01 | Unión: «Reabastecer» 10, WIS prepara 8, otro «Reabastecer». La segunda solicitud abre su propia preparación y su propio envío; el parcial y el envío de la primera no reciben nada |
+
 V18 y V19 se corren con una conf de límites bajos (`limit_time_real = limit_time_real_cron = 90`) y con las variables `CASOS_CONF`, `CASOS_PYTHON` y `CASOS_ODOO`, porque V19 mata y vuelve a levantar el servidor.
 
 **Supuesto de V19:** si el proceso muere mientras Uruware firma, el reproceso reenvía el e-Remito con el mismo Uuid. El simulador devuelve el mismo CFE, que es para lo que UCFE usa el Uuid. Hay que confirmarlo con Uruware.

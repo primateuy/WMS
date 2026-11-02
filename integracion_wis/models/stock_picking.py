@@ -1499,6 +1499,29 @@ class StockMove(models.Model):
             [('estado', '=', 'procesando')]).picking_id
         if enviando:
             domain = domain + [('id', 'not in', enviando.ids)]
+        return domain + self._wis_individualizar_domain(enviando)
+
+    def _wis_individualizar_domain(self, enviando):
+        """Individualización de operaciones con WIS (Forum, documento del 21-10-2026).
+
+        Sólo para tipos integrados o que adquieren el código de WIS; el resto se agrupa
+        como siempre.
+
+        - Un parcial pendiente (backorder) no recibe movimientos de otra solicitud.
+        - Una operación que adquiere el código (Intercambio – Envíos, Entrega a Tiendas)
+          recibe movimientos mientras su predecesora los reciba: si la preparación de la
+          que viene ya está en WIS o se está enviando, el movimiento nuevo sale de otra
+          preparación y abre su propio envío.
+        """
+        tipo = self.picking_type_id
+        if not (tipo.integracion_wms or tipo.adquiere_codigo_unico_wms):
+            return []
+        domain = [('backorder_id', '=', False)]
+        if tipo.adquiere_codigo_unico_wms:
+            domain += ['!', ('move_ids.move_orig_ids.picking_id.wms_estado', 'in',
+                             WMS_ESTADOS_EN_WIS)]
+            if enviando:
+                domain += ['!', ('move_ids.move_orig_ids.picking_id', 'in', enviando.ids)]
         return domain
 
     def _action_cancel(self):
