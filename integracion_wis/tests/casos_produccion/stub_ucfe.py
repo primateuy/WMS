@@ -2,7 +2,7 @@
 """UCFE (Uruware) falso para replicar en local. Ningún CFE sale a DGI.
 
 - .../rest/Invoke con TipoMensaje 310 (firma): aprueba y numera (serie A, desde 970001).
-  Si el XML del CFE no trae el bloque <Receptor>, responde 31 con el mismo
+  Si el XML de un e-Remito no trae el bloque <Receptor>, responde 31 con el mismo
   mensaje que Uruware dio en producción a Portones (caso C7).
 - Un reenvío con el mismo Uuid devuelve el mismo CFE (repetido=true en el log), como UCFE.
 - Otros TipoMensaje (consulta de estado): 00.
@@ -67,7 +67,9 @@ class Handler(BaseHTTPRequestHandler):
         elif str(req.get('TipoMensaje')) == '310':
             time.sleep(demora())
             xml = req.get('CfeXmlOTexto') or ''
-            if '<Receptor' not in xml:
+            # Como DGI: el e-Remito exige receptor; un e-Ticket a consumidor final por
+            # debajo del monto límite va sin él.
+            if '<Receptor' not in xml and str(req.get('TipoCfe') or 181) in ('181', '281'):
                 out = ERR.format(cod='31', msg='El CFE de tipo ERemito omite encabezado y/o receptor')
             else:
                 uuid = req.get('Uuid')
