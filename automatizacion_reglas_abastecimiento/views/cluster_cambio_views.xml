@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <record id="view_cluster_cambio_almacen_tree" model="ir.ui.view">
+    <field name="name">cluster.cambio.almacen.tree</field>
+    <field name="model">cluster.cambio.almacen</field>
+    <field name="arch" type="xml">
+      <tree string="Cambios de Cluster" create="0" edit="0" delete="0"
+            decoration-muted="estado == 'aplicado'" decoration-info="estado == 'en_proceso'">
+        <header>
+          <button name="action_aplicar" type="object" string="Actualizar reglas" class="btn-primary"
+                  display="always" groups="stock.group_stock_manager"
+                  confirm="Se alinean las automatizaciones de rutas y se actualizan, en segundo plano, las rutas y reglas de los productos afectados por los cambios pendientes. ¿Continuar?"/>
+        </header>
+        <field name="create_date" string="Fecha"/>
+        <field name="warehouse_id"/>
+        <field name="tipo"/>
+        <field name="resumen" string="Cambio"/>
+        <field name="user_id" optional="show"/>
+        <field name="proceso_id" optional="show"/>
+        <field name="estado" widget="badge" decoration-warning="estado == 'pendiente'"
+               decoration-info="estado == 'en_proceso'" decoration-success="estado == 'aplicado'"/>
+      </tree>
+    </field>
+  </record>
+
+  <record id="view_cluster_cambio_almacen_search" model="ir.ui.view">
+    <field name="name">cluster.cambio.almacen.search</field>
+    <field name="model">cluster.cambio.almacen</field>
+    <field name="arch" type="xml">
+      <search>
+        <field name="warehouse_id"/>
+        <filter name="pendientes" string="Pendientes" domain="[('estado', '=', 'pendiente')]"/>
+        <filter name="en_proceso" string="En proceso" domain="[('estado', '=', 'en_proceso')]"/>
+        <filter name="aplicados" string="Aplicados" domain="[('estado', '=', 'aplicado')]"/>
+        <group expand="0" string="Agrupar por">
+          <filter name="por_sucursal" string="Sucursal" context="{'group_by': 'warehouse_id'}"/>
+          <filter name="por_tipo" string="Tipo" context="{'group_by': 'tipo'}"/>
+        </group>
+      </search>
+    </field>
+  </record>
+
+  <record id="action_cluster_cambio_almacen" model="ir.actions.act_window">
+    <field name="name">Cambios de Cluster</field>
+    <field name="res_model">cluster.cambio.almacen</field>
+    <field name="view_mode">tree</field>
+    <field name="search_view_id" ref="view_cluster_cambio_almacen_search"/>
+    <field name="context">{'search_default_pendientes': 1}</field>
+    <field name="help" type="html">
+      <p>Cada vez que una sucursal cambia de Cluster queda acá un cambio pendiente.
+        «Actualizar reglas» alinea las automatizaciones de rutas y actualiza los productos afectados.</p>
+    </field>
+  </record>
+
+  <menuitem id="menu_cluster_cambio_almacen" name="Cambios de Cluster"
+            parent="stock.menu_stock_warehouse_mgmt" action="action_cluster_cambio_almacen" sequence="91"/>
+
+  <!-- La sucursal muestra (y permite cambiar) su Cluster -->
+  <record id="view_warehouse_form_cluster" model="ir.ui.view">
+    <field name="name">stock.warehouse.form.cluster</field>
+    <field name="model">stock.warehouse</field>
+    <field name="inherit_id" ref="stock.view_warehouse"/>
+    <field name="arch" type="xml">
+      <xpath expr="//field[@name='code']" position="after">
+        <field name="cluster_id" options="{'no_create': True}"/>
+      </xpath>
+    </field>
+  </record>
+
+  <!-- El proceso de un cambio de sucursal muestra la sucursal -->
+  <record id="view_cluster_proceso_form_almacen" model="ir.ui.view">
+    <field name="name">cluster.proceso.form.almacen</field>
+    <field name="model">cluster.proceso</field>
+    <field name="inherit_id" ref="automatizacion_reglas_abastecimiento.view_cluster_proceso_form"/>
+    <field name="arch" type="xml">
+      <xpath expr="//field[@name='warehouse_ids']" position="before">
+        <field name="almacen_cambio_id" readonly="1" invisible="not almacen_cambio_id"/>
+      </xpath>
+    </field>
+  </record>
+</odoo>

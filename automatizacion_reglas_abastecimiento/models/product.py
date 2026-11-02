@@ -866,6 +866,17 @@ class ProductTemplate(models.Model):
                 objetivo |= contexto['por_almacen'].get(almacen.id, set())
         return objetivo
 
+    def _cluster_aplicar_ruta_almacen(self, rutas_almacen, operacion):
+        """Agrega o saca SÓLO las rutas de una sucursal. True si cambió algo."""
+        self.ensure_one()
+        if operacion not in ('add', 'remove') or not rutas_almacen:
+            return False
+        antes = set(self.route_ids.ids)
+        rutas = (antes | rutas_almacen) if operacion == 'add' else (antes - rutas_almacen)
+        if rutas != antes:
+            self.write({'route_ids': [Command.set(sorted(rutas))]})
+        return rutas != antes
+
     def _cluster_aplicar_rutas_desde_cluster(self, contexto):
         """Deja las rutas de sucursal iguales a los almacenes de su Cluster. True si cambió."""
         self.ensure_one()

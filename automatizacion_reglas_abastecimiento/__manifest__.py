@@ -11,7 +11,7 @@
     'website': "https://avancesoftware.us/",
 
     'category': 'Uncategorized',
-    'version': '0.4',
+    'version': '0.5',
 
     'depends': ['base', 'product', 'stock', 'base_automation', 'setu_intercompany_transaction', 'setu_advance_reordering'],
 
@@ -27,6 +27,7 @@
         'views/WizardView.xml',
         'data/cluster_proceso_data.xml',
         'views/cluster_proceso_views.xml',
+        'views/cluster_cambio_views.xml',
     ],
     'assets': {
         'web.assets_backend': [

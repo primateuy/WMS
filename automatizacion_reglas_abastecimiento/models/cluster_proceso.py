@@ -20,6 +20,7 @@ QUÉ HACE, con el mismo resultado final que el camino anterior:
 Cada tanda es una ejecución del cron con su commit y un tope de tiempo: nunca
 hay una transacción larga ni un worker HTTP ocupado.
 """
+import json
 import logging
 import time
 
@@ -64,6 +65,15 @@ class ClusterProceso(models.Model):
         string='Sólo estos almacenes', readonly=True,
         help="Si tiene almacenes, sólo se crean, modifican o borran reglas de esos almacenes "
              "(«Actualizar Reglas» de un grupo con algunos almacenes elegidos). Vacío: todos.")
+    almacen_cambio_id = fields.Many2one(
+        'stock.warehouse', string='Sucursal que cambió de Cluster', readonly=True,
+        ondelete='set null',
+        help="Proceso de un cambio de Cluster de una sucursal: a los productos sólo se les "
+             "agrega o se les saca la ruta de esta sucursal, y las reglas se sincronizan "
+             "sólo en ella.")
+    operaciones = fields.Text(
+        readonly=True, copy=False,
+        help="{id del Cluster de productos: 'add' | 'remove'} para la ruta de la sucursal.")
     con_rutas = fields.Boolean(
         string='Actualizar rutas', default=True, readonly=True,
         help="Si es falso, sólo se regeneran las reglas de abastecimiento (botón "
@@ -139,6 +149,27 @@ class ClusterProceso(models.Model):
         })
         proceso._log(_("En cola: %(t)d producto(s), %(v)d variante(s) sueltas. Origen: %(o)s.",
                        t=len(templates), v=len(variants), o=origen or '-'))
+        proceso._encolar_cron()
+        return proceso
+
+    @api.model
+    def _encolar_almacen(self, almacen, operaciones, templates, origen=''):
+        """Proceso de un cambio de Cluster de `almacen`: ver `cluster_cambio.py`."""
+        templates = templates.exists()
+        if not templates:
+            return self.browse()
+        proceso = self.sudo().create({
+            'template_ids': [Command.set(templates.ids)],
+            'warehouse_ids': [Command.set(almacen.ids)],
+            'almacen_cambio_id': almacen.id,
+            'operaciones': json.dumps({str(k): v for k, v in operaciones.items()}),
+            'con_rutas': True,
+            'user_id': self.env.user.id,
+            'company_id': self.env.company.id,
+            'origen': origen,
+        })
+        proceso._log(_("En cola: %(t)d producto(s) para la ruta de %(a)s. Origen: %(o)s.",
+                       t=len(templates), a=almacen.display_name, o=origen or '-'))
         proceso._encolar_cron()
         return proceso
 
@@ -279,7 +310,11 @@ class ClusterProceso(models.Model):
         # una ruta fija por acción y, cuando un Cluster cambia de almacenes, quedan
         # desfasadas y dejan reglas sin ruta («No se encontró regla para abastecer»).
         desde_cluster = self._rutas_desde_cluster()
-        if desde_cluster:
+        if self.almacen_cambio_id:
+            ops = {int(k): v for k, v in json.loads(self.operaciones or '{}').items()}
+            rutas_almacen = self.env['cluster.cambio.almacen']._rutas_por_almacen().get(
+                self.almacen_cambio_id.id, set())
+        elif desde_cluster:
             contexto = self.env['product.template']._cluster_rutas_contexto()
         else:
             automatizaciones = self.env['base.automation']._cluster_automatizaciones()
@@ -288,6 +323,9 @@ class ClusterProceso(models.Model):
                 break
             if not plantilla.exists():
                 cambio = False
+            elif self.almacen_cambio_id:
+                cambio = plantilla._cluster_aplicar_ruta_almacen(
+                    rutas_almacen, ops.get(plantilla.warehouse_group_id.id))
             elif desde_cluster:
                 cambio = plantilla._cluster_aplicar_rutas_desde_cluster(contexto)
             else:
@@ -346,6 +384,8 @@ class ClusterProceso(models.Model):
     def _terminar(self):
         self.sudo().write({'fase': 'terminado', 'estado': 'terminado', 'etapa': False,
                            'reglas_ended_at': fields.Datetime.now()})
+        self.env['cluster.cambio.almacen'].sudo().search(
+            [('proceso_id', 'in', self.ids), ('estado', '=', 'en_proceso')]).write({'estado': 'aplicado'})
         self._log(_("Terminado. Reglas: %(c)d creadas, %(m)d modificadas, %(b)d borradas, "
                     "%(s)d sin cambio.", c=self.reglas_creadas, m=self.reglas_modificadas,
                     b=self.reglas_borradas, s=self.reglas_sin_cambio))

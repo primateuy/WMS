@@ -1,4 +1,5 @@
 from odoo import _, fields, models, api
+from odoo.exceptions import ValidationError
 
 
 import logging
@@ -85,6 +86,69 @@ class StockWareHouseGroup(models.Model):
             }
         }
     
+    # ------------------------------------------------------------------
+    # Una sola pertenencia por sucursal y registro de cambios de Cluster
+    # (documento «Automatización de Rutas Productos», objetivos 1 y 2)
+    # ------------------------------------------------------------------
+    @api.model
+    def _cluster_pertenencia(self):
+        """{almacén id: {Cluster id}}. Cluster = grupo con nivel de jerarquía."""
+        pertenencia = {}
+        for grupo in self.sudo().search([('nivel_jerarquia_id', '!=', False)]):
+            for almacen in grupo.warehouse_ids:
+                pertenencia.setdefault(almacen.id, set()).add(grupo.id)
+        return pertenencia
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        antes = self._cluster_pertenencia()
+        grupos = super().create(vals_list)
+        grupos._cluster_despues_de_cambiar(antes)
+        return grupos
+
+    def write(self, vals):
+        if ('warehouse_ids' not in vals and 'nivel_jerarquia_id' not in vals) \
+                or self.env.context.get('cluster_moviendo'):
+            return super().write(vals)
+        antes = self._cluster_pertenencia()
+        res = super().write(vals)
+        self._cluster_despues_de_cambiar(antes)
+        return res
+
+    def _cluster_despues_de_cambiar(self, antes):
+        """Una sucursal que entra a un Cluster sale del que tenía: el resultado es una
+        pertenencia única. Cada sucursal que cambió deja un cambio pendiente."""
+        Grupo = self.sudo()
+        for grupo in self.filtered('nivel_jerarquia_id'):
+            for almacen in grupo.warehouse_ids:
+                if grupo.id in antes.get(almacen.id, set()):
+                    continue
+                otros = Grupo.search([('nivel_jerarquia_id', '!=', False), ('id', '!=', grupo.id),
+                                      ('warehouse_ids', 'in', almacen.id)])
+                if otros:
+                    otros.with_context(cluster_moviendo=True).write(
+                        {'warehouse_ids': [(3, almacen.id)]})
+        despues = self._cluster_pertenencia()
+        repetidas = [a for a, g in despues.items() if len(g) > 1
+                     and any(gr.id in g for gr in self)]
+        if repetidas:
+            nombres = ', '.join(self.env['stock.warehouse'].browse(repetidas).mapped('display_name'))
+            raise ValidationError(_("Una sucursal puede estar en un solo Cluster: %s") % nombres)
+        Cambio = self.env['cluster.cambio.almacen'].sudo()
+        for almacen_id in set(antes) | set(despues):
+            ya, va = antes.get(almacen_id, set()), despues.get(almacen_id, set())
+            if ya == va:
+                continue
+            # Si estaba en dos (configuración vieja), recibía lo de los dos: vale el de
+            # nivel más alto, que es el que más productos le daba.
+            anterior = Grupo.browse(list(ya)).sorted(lambda g: g.nivel_jerarquia_id.seq)[:1]
+            Cambio.create({
+                'warehouse_id': almacen_id, 'tipo': 'cambio',
+                'grupo_anterior_id': anterior.id,
+                'grupo_nuevo_id': next(iter(va)) if va else False,
+            })
+
+
 class StockWarehouseGroupRulesWizard(models.TransientModel):
     _name = 'stock.warehouse.group.rules.wizard'
     _description = 'Wizard para actualización en almacenes seleccionados'
@@ -214,6 +278,9 @@ class StockWarehouseGroupRulesWizard(models.TransientModel):
                     'sticky': False,
                 }
             }
+        # Primero los cambios de Cluster pendientes de TODAS las sucursales, no sólo las de
+        # este grupo: la que se fue también tiene que perder lo que ya no le corresponde.
+        procesos_cambio = self.env['cluster.cambio.almacen']._aplicar_pendientes()
         grupo = self.warehouse_group_id
         Grupo = self.env['stock.warehouse.group']
         if grupo.nivel_jerarquia_id:
@@ -229,4 +296,6 @@ class StockWarehouseGroupRulesWizard(models.TransientModel):
             templates=variantes.product_tmpl_id if con_rutas else None,
             variants=variantes, con_rutas=con_rutas, warehouses=self.warehouse_ids,
             origen=_("Actualizar Reglas del grupo %s") % grupo.display_name)
+        if procesos_cambio and not proceso:
+            return procesos_cambio[:1]._notificacion_encolado(len(procesos_cambio.template_ids))
         return proceso._notificacion_encolado(len(variantes))
