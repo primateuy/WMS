@@ -194,12 +194,13 @@ class PurchaseOrderLine(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            # Cargar distribution_multiple desde product_template si no está definido
+            # Cargar distribution_multiple desde la VARIANTE (no el template): una
+            # variante puede tener su propio múltiplo (override) distinto al del template.
             if 'distribution_multiple' not in vals and vals.get('product_id'):
                 product = self.env['product.product'].browse(vals['product_id'])
                 if hasattr(product, 'mutiplos_distribucion'):
                     if product.mutiplos_distribucion > 1:
-                        vals['distribution_multiple'] = product.product_tmpl_id.mutiplos_distribucion
+                        vals['distribution_multiple'] = product.mutiplos_distribucion
             
             if 'order_id' in vals:
                 order = self.env['purchase.order'].browse(vals['order_id'])

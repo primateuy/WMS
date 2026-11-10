@@ -643,12 +643,9 @@ class PurchaseOrder(models.Model):
         for line in crossdock_lines:
             porcentaje = line.line_crossdock_percentage or (self.crossdock_percentage / 100)
             
-            operacion = almacen_principal.crossdocking_type_id;
-
-            if operacion and operacion.respeta_multiplos:
-                multiple = getattr(line, 'distribution_multiple', 1) or 1
-                if multiple > 1 and line.product_qty % multiple != 0:
-                    raise ValidationError("La operación respeta multiplos. La línea de orden de compra %s tiene una cantidad total (%s) que no es múltiplo de %s. Por favor, ajuste la cantidad o el múltiplo." % (line.name, line.product_qty, multiple))
+            # La cantidad de compra es de LIBRE INGRESO: el múltiplo de distribución se
+            # respeta al repartir a las sucursales (_apply_distribution_with_limit_control),
+            # no se exige que la cantidad comprada sea múltiplo.
 
             if porcentaje <= 0:
                 continue
@@ -1568,60 +1565,98 @@ class PurchaseOrder(models.Model):
 
     def _apply_distribution_with_limit_control(self, line, distributions, total_crossdock_quantity, rounding_method):
         """
-        Aplica redondeo con control de límites
-        IMPORTANTE: total_crossdock_quantity es solo la cantidad para CROSSDOCK, no la línea completa
+        Convierte la distribución objetivo a cantidades en MÚLTIPLOS enteros del múltiplo
+        de la línea, SIN superar el cupo de crossdock (`total_crossdock_quantity`).
+
+        Respeta la distribución que viene calculada (pareja en el camino equitativo, o
+        ponderada por capacidad en el camino por grupos): cada sucursal recibe
+        `floor(objetivo/m)` packs y los packs que sobran hasta `floor(cupo/m)` se reparten
+        de a uno a las sucursales con mayor resto fraccionario, desempatando por el ORDEN
+        en que se generan las operaciones (método de mayor-resto / Hare). Así, cuando el
+        cupo no alcanza para dar un múltiplo a todas, lo reciben las primeras (mayor
+        objetivo, y a igual objetivo el orden), y las demás quedan en 0 con una alerta.
+
+        El sobrante del cupo (lo que no completa un múltiplo) queda sin asignar: los
+        callers lo devuelven al principal como `cantidad_total - total_distribuido`.
+
+        Mantiene el contrato anterior: devuelve (final_distributions, central_adjustment,
+        warnings). `rounding_method` se conserva por compatibilidad de firma; con el
+        modelo de packs el reparto es determinístico y no depende de él.
         """
         import math
-        
+
         multiple = getattr(line, 'distribution_multiple', 1) or 1
         if multiple <= 1:
             return distributions, 0, []
-        
-        total_distributed = 0
-        adjusted_distributions = []
-        warnings = []
-        
-        # Aplicar redondeo a cada distribución
-        for dist in distributions:
-            cantidad_calculada = dist['quantity']
-            
-            if rounding_method == 'ceil':
-                cantidad_redondeada = math.ceil(cantidad_calculada / multiple) * multiple
-            elif rounding_method == 'floor':
-                cantidad_redondeada = math.floor(cantidad_calculada / multiple) * multiple
-            else:  # nearest
-                cantidad_redondeada = round(cantidad_calculada / multiple) * multiple
-            
-            adjusted_distributions.append({
-                'location': dist.get('location'),
-                'warehouse': dist.get('warehouse'),
-                'rounded_quantity': cantidad_redondeada,
-                'line': line
+
+        cupo = max(0, int(total_crossdock_quantity))
+        total_packs = cupo // multiple
+
+        # Packs base por sucursal (floor del objetivo) + resto fraccionario, preservando
+        # el orden de entrada (= orden de generación de las operaciones).
+        entradas = []
+        for idx, dist in enumerate(distributions):
+            objetivo = max(0.0, float(dist.get('quantity') or 0.0))
+            packs_ideal = objetivo / multiple
+            base = int(math.floor(packs_ideal))
+            entradas.append({
+                'idx': idx,
+                'dist': dist,
+                'packs': base,
+                'frac': packs_ideal - base,
             })
-            
-            total_distributed += cantidad_redondeada
-        
-        # Calcular el ajuste necesario para el almacén central
-        excess = total_distributed - total_crossdock_quantity
-        
-        if excess > 0:
-            self.write({'exceso': True})
-        
-        # NO reducir las distribuciones - mantener el redondeo deseado
+
+        asignados = sum(e['packs'] for e in entradas)
+        sobrantes = total_packs - asignados
+        if sobrantes > 0:
+            # Repartir los packs que sobran: mayor resto primero, luego orden de generación.
+            # (En uso real sobrantes <= nº de sucursales; el ciclo cubre el caso extremo.)
+            orden = sorted(entradas, key=lambda x: (-x['frac'], x['idx']))
+            i = 0
+            while sobrantes > 0 and orden:
+                orden[i % len(orden)]['packs'] += 1
+                sobrantes -= 1
+                i += 1
+        elif sobrantes < 0:
+            # Los objetivos floor exceden el cupo (entrada patológica): recortar de a un
+            # pack, menor resto primero y orden inverso, ciclando hasta cubrir el déficit.
+            orden = sorted(entradas, key=lambda x: (x['frac'], -x['idx']))
+            while sobrantes < 0 and any(e['packs'] > 0 for e in orden):
+                for e in orden:
+                    if sobrantes >= 0:
+                        break
+                    if e['packs'] > 0:
+                        e['packs'] -= 1
+                        sobrantes += 1
+
         final_distributions = []
-        for dist in adjusted_distributions:
-            if dist['rounded_quantity'] > 0:
+        total_distributed = 0
+        for e in entradas:
+            qty = e['packs'] * multiple
+            if qty > 0:
+                d = e['dist']
                 final_distributions.append({
-                    'location': dist['location'],
-                    'warehouse': dist['warehouse'],
-                    'quantity': dist['rounded_quantity'],
+                    'location': d.get('location'),
+                    'warehouse': d.get('warehouse'),
+                    'quantity': qty,
                     'line': line,
-                    'was_adjusted': False
+                    'was_adjusted': False,
                 })
-        
-        # El exceso se compensa en la cantidad central (puede ser negativo)
-        central_adjustment = -excess
-        
+                total_distributed += qty
+
+        warnings = []
+        abastecidas = sum(1 for e in entradas if e['packs'] > 0)
+        candidatas = sum(1 for e in entradas if (e['dist'].get('quantity') or 0) > 0)
+        if abastecidas < candidatas:
+            warnings.append(
+                "El cupo de Crossdocking alcanza para abastecer a %d de las %d sucursales "
+                "con el múltiplo de distribución de %d unidades. Revisá la distribución si "
+                "necesitás cambiar qué sucursales reciben mercadería."
+                % (abastecidas, candidatas, multiple)
+            )
+
+        # total_distributed nunca supera el cupo, así que exceso <= 0 (no se marca `exceso`).
+        central_adjustment = cupo - total_distributed
         return final_distributions, central_adjustment, warnings
 
     def _calculate_crossdock_distribution(self, crossdock_lines):
@@ -1733,12 +1768,9 @@ class PurchaseOrder(models.Model):
             porcentaje = line.line_crossdock_percentage or (self.crossdock_percentage / 100)
 
 
-            operacion = main_warehouse.crossdocking_type_id;
-            
-            if operacion and operacion.respeta_multiplos:
-                multiple = getattr(line, 'distribution_multiple', 1) or 1
-                if multiple > 1 and line.product_qty % multiple != 0:
-                    raise ValidationError("La operación respeta multiplos. La línea de orden de compra %s tiene una cantidad total (%s) que no es múltiplo de %s. Por favor, ajuste la cantidad o el múltiplo." % (line.name, line.product_qty, multiple))
+            # La cantidad de compra es de LIBRE INGRESO: el múltiplo de distribución se
+            # respeta al repartir a las sucursales (_apply_distribution_with_limit_control),
+            # no se exige que la cantidad comprada sea múltiplo.
 
             if porcentaje <= 0:
                 continue

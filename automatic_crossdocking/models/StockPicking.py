@@ -30,30 +30,90 @@ class StockPicking(models.Model):
             
             if len(move_line) > 1:
                 move_line = move_line[0]
-            
-            old_quantity = move_line.product_uom_qty
-            quantity_difference = float(new_quantity) - old_quantity
-            
-            # Solo se ajusta la DEMANDA (`product_uom_qty`). NO se escribe `quantity`: estas
-            # operaciones tienen reserva MANUAL (WIS es la fuente de verdad de lo recibido/
-            # preparado), así que sugerir/reservar cantidad automáticamente al editar la
-            # distribución no es el comportamiento esperado.
-            move_line.with_context(do_not_propagate=True, no_recompute=True).write({
-                'product_uom_qty': float(new_quantity),
-            })
+
+            # --- Validación de distribución: solo 0 o múltiplos, dentro del cupo -------
+            import math
+            new_q = float(new_quantity)
+            if new_q < 0:
+                return {'error': 'La cantidad no puede ser negativa.'}
 
             purchase_line = move_line.purchase_line_id
-            surplus_updated = False
-            
-            if purchase_line and purchase_line.order_id.crossdock_enabled:
-                purchase_order = purchase_line.order_id
-                surplus_updated = self._update_surplus_picking_quantity(
-                    purchase_order, purchase_line, -quantity_difference  # Signo contrario
-                )
+            multiple = (purchase_line and getattr(purchase_line, 'distribution_multiple', 1)) or 1
+            if multiple <= 1:
+                multiple = getattr(move_line.product_id, 'mutiplos_distribucion', 1) or 1
 
-                self.update_transfer_picking(purchase_order, purchase_line, quantity_difference, picking)
-            
-            picking.write({'state': original_state})
+            if multiple > 1 and new_q != 0 and (new_q % multiple) != 0:
+                return {'error': 'La cantidad debe ser 0 o un múltiplo de %d.' % int(multiple)}
+
+            # Tope por el cupo de Crossdocking de la línea: lo ya distribuido a las otras
+            # sucursales (pickings del mismo tipo en esta OC) + lo nuevo no puede superarlo.
+            if multiple > 1 and purchase_line:
+                order = purchase_line.order_id
+                porcentaje = purchase_line.line_crossdock_percentage or (order.crossdock_percentage / 100.0)
+                cupo = math.floor(purchase_line.product_qty * porcentaje)
+                hermanos = self.env['stock.move'].search([
+                    ('product_id', '=', int(product_id)),
+                    ('picking_id.picking_type_id', '=', picking.picking_type_id.id),
+                    ('purchase_line_id.order_id', '=', order.id),
+                    ('state', 'not in', ('done', 'cancel')),
+                ])
+                total_otros = sum(h.product_uom_qty for h in hermanos if h.id != move_line.id)
+                if (total_otros + new_q) > cupo:
+                    return {'error': 'La cantidad excede el cupo de Crossdocking (%d). '
+                                     'Ya distribuido en otras sucursales: %d.'
+                                     % (int(cupo), int(total_otros))}
+            # --------------------------------------------------------------------------
+
+            old_quantity = move_line.product_uom_qty
+            quantity_difference = new_q - old_quantity
+
+            # Aplica la nueva demanda y la propaga por la cadena interna. Solo se ajusta la
+            # DEMANDA (`product_uom_qty`); NO `quantity`: estas operaciones tienen reserva
+            # MANUAL (WIS es la fuente de verdad de lo recibido/preparado).
+            def _aplicar_cambio(ctx_extra=None):
+                ctx = {'do_not_propagate': True, 'no_recompute': True}
+                if ctx_extra:
+                    ctx.update(ctx_extra)
+                move_line.with_context(**ctx).write({'product_uom_qty': new_q})
+                _surplus = False
+                if purchase_line and purchase_line.order_id.crossdock_enabled:
+                    _po = purchase_line.order_id
+                    _surplus = self._update_surplus_picking_quantity(_po, purchase_line, -quantity_difference)
+                    self.update_transfer_picking(_po, purchase_line, quantity_difference, picking)
+                picking.write({'state': original_state})
+                return _surplus
+
+            # Si el pedido XD YA está integrado en WIS, la modificación se gestiona con la
+            # tarea de actualización de cantidades: se guarda SOLO si WIS confirma; si WIS
+            # rechaza, se revierte (savepoint) y se le muestra el motivo al operador.
+            integrado = bool(getattr(picking, 'wms_estado', False) == 'enviado'
+                             and getattr(picking.picking_type_id, 'integracion_wms', False))
+            if integrado:
+                datosAPI = None
+                if 'integracion_wis.integracion_wis' in self.env:
+                    datosAPI = self.env['integracion_wis.integracion_wis']._get_config()
+                try:
+                    with self.env.cr.savepoint():
+                        surplus_updated = _aplicar_cambio({'skip_wms_integration': True})
+                        if datosAPI:
+                            datosAPI.actualizarReferenciaRecepcion(picking)
+                except Exception as e:
+                    if 'wms.integracion.log' in self.env:
+                        self.env['wms.integracion.log'].create({
+                            'fecha': fields.Datetime.now(), 'nivel': 'error', 'modelo': 'stock.picking',
+                            'texto': f"WIS rechazó la actualización de cantidad de {picking.name}: {str(e)}",
+                            'picking_id': picking.id, 'resultado': 'error',
+                        })
+                    return {'error': 'WIS rechazó el cambio; se conservaron las cantidades '
+                                     'anteriores. Motivo: %s' % str(e)}
+                if 'wms.integracion.log' in self.env:
+                    self.env['wms.integracion.log'].create({
+                        'fecha': fields.Datetime.now(), 'nivel': 'info', 'modelo': 'stock.picking',
+                        'texto': f"Cantidad actualizada y confirmada en WIS para {picking.name}",
+                        'picking_id': picking.id, 'resultado': 'exito',
+                    })
+            else:
+                surplus_updated = _aplicar_cambio()
 
             message = f'Cantidad actualizada a {new_quantity} unidades'
             if surplus_updated:
