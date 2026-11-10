@@ -52,6 +52,16 @@ class StockPickingType(models.Model):
         ('cancel', 'Cancelado')
     ], string='Estado para Disparo WIS', default='confirmed')
 
+    integracion_manual_wis = fields.Boolean(
+        string='Integración Manual',
+        default=False,
+        help='Si está activo, las operaciones de este tipo NO se envían a WIS '
+             'automáticamente por estado: se integran sólo con la acción manual '
+             '"Integrar con WMS" (individual o masiva), que las encola. El envío en '
+             'sí es el mismo que el automático. Con esto el campo "Estado para '
+             'Disparo WIS" deja de aplicar.'
+    )
+
 
     metodo_cancelacion_wis = fields.Boolean(
         string='Método de Cancelación WIS',

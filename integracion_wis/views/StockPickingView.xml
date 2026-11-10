@@ -50,6 +50,13 @@
                             string="Avanzar cadena WIS"
                             invisible="state != 'done' or wms_estado != 'despachado'"
                             groups="stock.group_stock_user"/>
+                    <!-- Integración MANUAL: enviar a WIS con una acción (encola). Sólo
+                         para tipos con Integración Manual y operaciones aún sin enviar. -->
+                    <field name="wis_integracion_manual" invisible="1"/>
+                    <button name="action_integrar_wms_manual" type="object"
+                            string="Integrar con WMS"
+                            invisible="not wis_integracion_manual or wms_estado != 'sin_enviar'"
+                            groups="stock.group_stock_user"/>
                 </xpath>
 
                 <!-- Spec 1: ocultar Cancelar cuando hay una cancelación pendiente de resolver

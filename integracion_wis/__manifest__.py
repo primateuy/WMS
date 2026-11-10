@@ -11,7 +11,7 @@
     'author': "Avance Software",
     'website': "https://avancesoftware.us/",
     'category': 'Uncategorized',
-    'version': '0.11.0',
+    'version': '0.12.0',
     'application': True,
     'installable': True,
     'icon': '/integracion_wis/static/description/icon.png',
@@ -19,8 +19,10 @@
     'depends': ['base', 'contacts', 'stock', 'account', 'sale_management', 'purchase', 'purchase_stock', 'product', 'stock_barcode', 'l10n_uy_einvoice_base', 'l10n_uy_einvoice_uruware'],
 
     'data': [
+        'security/wis_groups.xml',
         'security/ir.model.access.csv',
         'views/views.xml',
+        'views/wis_integrar_pickings_views.xml',
         'views/wis_webhook_log_views.xml',
         'views/wis_envio_log_views.xml',
         'views/wis_sync_queue_views.xml',

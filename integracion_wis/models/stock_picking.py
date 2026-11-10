@@ -39,6 +39,11 @@ class StockPicking(models.Model):
         index=True,
     )
 
+    wis_integracion_manual = fields.Boolean(
+        related='picking_type_id.integracion_manual_wis',
+        string="Integración Manual WMS",
+    )
+
     wms_origen = fields.Selection(
         selection=[
             ("manual", "Manual"),
@@ -283,6 +288,15 @@ class StockPicking(models.Model):
             self.partner_id.id if self.partner_id else None,
             self.picking_type_id.name if self.picking_type_id else 'SIN TIPO',
         )
+
+        # Integración manual: este tipo NO se envía por disparo automático. Sólo desde
+        # la acción manual (wis_envio_manual) o desde la cola (wis_envio_desde_cola, que
+        # para estos tipos sólo puede existir si la acción manual lo encoló).
+        if (self.picking_type_id.integracion_manual_wis
+                and not self.env.context.get('wis_envio_manual')
+                and not self.env.context.get('wis_envio_desde_cola')):
+            _logger.info("[WIS] enviarWS | %s: integración manual, no se envía por disparo automático", self.name)
+            return False
 
         state_actual = str(self.state or '').strip()
         state_objetivo = str(self.picking_type_id.estado_disparo_wis or '').strip()
@@ -625,7 +639,9 @@ class StockPicking(models.Model):
                     hook_name, record.name, record.codigo_unico,
                 )
                 continue
-            if not estado_obj or record.state not in estados_aceptados:
+            # El envío manual no exige el estado de disparo: el operador decide cuándo.
+            if (not self.env.context.get('wis_envio_manual')
+                    and (not estado_obj or record.state not in estados_aceptados)):
                 continue
             tipo = record.picking_type_id.tipo_pedido_wis or 'NORM'
             if record._wis_encolar_si_corresponde(tipo, hook_name):
@@ -650,6 +666,75 @@ class StockPicking(models.Model):
                 cod_local = record._wis_codigo_esperado(tipo)
                 record.with_context(skip_wms_integration=True).write({'codigo_unico': cod_local})
                 record._wis_registrar_envio(cod_local, tipo, ok=False, error=str(e))
+
+    # ------------------------------------------------------------------
+    # Integración manual (envío disparado por acción, no por estado)
+    # ------------------------------------------------------------------
+    def action_integrar_wms_manual(self):
+        """Integra manualmente: ENCOLA las operaciones seleccionadas (no espera).
+
+        Reutiliza el MISMO mecanismo de envío que el automático (enviarWS / cola);
+        sólo cambia el disparador. Toma las operaciones cuyo tipo tiene Integración
+        con WMS activa (y no adquieren código) y que todavía no se enviaron. Devuelve
+        el recordset efectivamente encolado.
+        """
+        integrables = self.filtered(
+            lambda p: p.picking_type_id.integracion_wms
+            and not p.picking_type_id.adquiere_codigo_unico_wms
+            and p.wms_estado == 'sin_enviar'
+        )
+        if integrables:
+            integrables.with_context(
+                wis_envio_manual=True, wis_encolar_envios=True,
+            )._enviar_wis_si_corresponde('manual')
+        return integrables
+
+    # ------------------------------------------------------------------
+    # Bloqueo de edición de operaciones ya integradas con WIS
+    # ------------------------------------------------------------------
+    # Una vez que la operación fue enviada a WIS (wms_estado in WMS_ESTADOS_EN_WIS) no
+    # se puede editar su CONTENIDO, salvo por API (contexto skip_wms_integration, que
+    # usan los webhooks/cascada del propio módulo) o por un usuario con el grupo
+    # especial. NO se bloquean los campos de ciclo (state, cantidades hechas,
+    # wms_estado, codigo_unico, etc.) para no romper validación ni las actualizaciones
+    # que manda WIS.
+    _WIS_CAMPOS_BLOQ_PICKING = {
+        'partner_id', 'scheduled_date', 'date_deadline', 'location_id',
+        'location_dest_id', 'picking_type_id', 'origin', 'company_id',
+    }
+
+    def _wis_edicion_permitida(self):
+        """True si se puede editar una operación ya integrada (bypass del candado)."""
+        return bool(
+            self.env.context.get('skip_wms_integration')
+            or self.env.su
+            or self.env.user.has_group('integracion_wis.group_wis_editar_integrado')
+        )
+
+    def _wis_chequear_bloqueo_edicion(self, vals):
+        """Lanza UserError si se intenta editar contenido de un picking integrado."""
+        if self._wis_edicion_permitida():
+            return
+        bloqueados = self._WIS_CAMPOS_BLOQ_PICKING & set(vals or {})
+        if not bloqueados:
+            return
+        trabadas = self.filtered(lambda p: p.wms_estado in WMS_ESTADOS_EN_WIS)
+        if trabadas:
+            raise UserError(_(
+                "No se puede editar una operación ya integrada con WMS (%s). "
+                "Campos bloqueados: %s. Requiere el permiso "
+                "«Editar operaciones integradas con WMS»."
+            ) % (", ".join(trabadas.mapped('name')[:5]), ", ".join(sorted(bloqueados))))
+
+    def unlink(self):
+        if not self.env.context.get('skip_wms_integration') and not self.env.su \
+                and not self.env.user.has_group('integracion_wis.group_wis_editar_integrado'):
+            trabadas = self.filtered(lambda p: p.wms_estado in WMS_ESTADOS_EN_WIS)
+            if trabadas:
+                raise UserError(_(
+                    "No se puede eliminar una operación ya integrada con WMS (%s)."
+                ) % ", ".join(trabadas.mapped('name')[:5]))
+        return super().unlink()
 
     def _wis_adquirir_codigo_si_corresponde(self):
         """Para pickings cuyo tipo tiene `adquiere_codigo_unico_wms=True`: adquieren el
@@ -1197,6 +1282,7 @@ class StockPicking(models.Model):
         return res
 
     def write(self, vals):
+        self._wis_chequear_bloqueo_edicion(vals)
         res = super(StockPicking, self).write(vals)
 
         # Cuando un picking obtiene su `codigo_unico` (por envío a WIS o por adquisición),
@@ -1616,7 +1702,47 @@ class StockMove(models.Model):
             self.picking_id._wis_complete_document_type()
         return res
 
+    # --- Bloqueo de edición de movimientos de operaciones ya integradas -----------
+    _WIS_CAMPOS_BLOQ_MOVE = {
+        'product_id', 'product_uom', 'product_uom_qty', 'location_id',
+        'location_dest_id', 'date', 'date_deadline', 'picking_id',
+    }
+
+    def _wis_pickings_integrados_bloqueados(self):
+        """Pickings integrados de estos moves cuya edición NO está permitida."""
+        if (self.env.context.get('skip_wms_integration') or self.env.su
+                or self.env.user.has_group('integracion_wis.group_wis_editar_integrado')):
+            return self.env['stock.picking']
+        return self.mapped('picking_id').filtered(
+            lambda p: p.wms_estado in WMS_ESTADOS_EN_WIS)
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        moves = super().create(vals_list)
+        # No se pueden AGREGAR movimientos a una operación ya integrada con WIS.
+        trabadas = moves._wis_pickings_integrados_bloqueados()
+        if trabadas:
+            raise UserError(_(
+                "No se pueden agregar movimientos a una operación ya integrada con WMS (%s)."
+            ) % ", ".join(trabadas.mapped('name')[:5]))
+        return moves
+
+    def unlink(self):
+        trabadas = self._wis_pickings_integrados_bloqueados()
+        if trabadas:
+            raise UserError(_(
+                "No se pueden quitar movimientos de una operación ya integrada con WMS (%s)."
+            ) % ", ".join(trabadas.mapped('name')[:5]))
+        return super().unlink()
+
     def write(self, vals):
+        if self._WIS_CAMPOS_BLOQ_MOVE & set(vals or {}):
+            trabadas = self._wis_pickings_integrados_bloqueados()
+            if trabadas:
+                raise UserError(_(
+                    "No se puede editar un movimiento de una operación ya integrada con "
+                    "WMS (%s). Requiere el permiso «Editar operaciones integradas con WMS»."
+                ) % ", ".join(trabadas.mapped('name')[:5]))
         res = super().write(vals)
         # skip_wms_integration corta la notificación a WIS: cubre los cambios de demanda
         # ORIGINADOS por WIS (ej. anulación parcial), que no deben re-notificarse a WIS.
