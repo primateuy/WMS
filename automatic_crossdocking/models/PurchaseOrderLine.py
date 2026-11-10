@@ -24,13 +24,10 @@ class PurchaseOrderLine(models.Model):
 
 
     def _get_default_distribution_multiple(self):
-        
-        multiple = self.product_id.mutiplos_distribucion or 0
-        
-        if multiple == 0:
-            return 1
-        
-        return multiple
+        # Múltiplo efectivo del producto (variante con override, si no la plantilla).
+        if self.product_id:
+            return self.product_id._multiplo_distribucion_efectivo()
+        return 1
     
     distribution_multiple = fields.Integer(
         string="Múltiplo de Distribución",
@@ -146,14 +143,9 @@ class PurchaseOrderLine(models.Model):
 
     @api.onchange('product_id')
     def _onchange_product_id_crossdock(self):
-        # Cargar múltiplo desde el producto
+        # Cargar múltiplo efectivo del producto (variante con override, si no la plantilla)
         if self.product_id:
-            if hasattr(self.product_id, 'mutiplos_distribucion'):
-                multiplo = self.product_id.mutiplos_distribucion
-                if multiplo and multiplo > 0:
-                    self.distribution_multiple = multiplo
-                else:
-                    self.distribution_multiple = 1
+            self.distribution_multiple = self.product_id._multiplo_distribucion_efectivo()
         
         # Aplicar configuraciones de crossdock
         self._apply_crossdock_defaults()
@@ -194,13 +186,14 @@ class PurchaseOrderLine(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            # Cargar distribution_multiple desde la VARIANTE (no el template): una
-            # variante puede tener su propio múltiplo (override) distinto al del template.
+            # Cargar distribution_multiple con el múltiplo EFECTIVO de la variante:
+            # su propio valor si tiene override, si no el de la plantilla. Así la línea
+            # no queda en 1 cuando la variante no está sincronizada con la plantilla.
             if 'distribution_multiple' not in vals and vals.get('product_id'):
                 product = self.env['product.product'].browse(vals['product_id'])
-                if hasattr(product, 'mutiplos_distribucion'):
-                    if product.mutiplos_distribucion > 1:
-                        vals['distribution_multiple'] = product.mutiplos_distribucion
+                multiplo = product._multiplo_distribucion_efectivo()
+                if multiplo > 1:
+                    vals['distribution_multiple'] = multiplo
             
             if 'order_id' in vals:
                 order = self.env['purchase.order'].browse(vals['order_id'])

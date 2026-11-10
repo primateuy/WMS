@@ -39,8 +39,8 @@ class StockPicking(models.Model):
 
             purchase_line = move_line.purchase_line_id
             multiple = (purchase_line and getattr(purchase_line, 'distribution_multiple', 1)) or 1
-            if multiple <= 1:
-                multiple = getattr(move_line.product_id, 'mutiplos_distribucion', 1) or 1
+            if multiple <= 1 and move_line.product_id:
+                multiple = move_line.product_id._multiplo_distribucion_efectivo()
 
             if multiple > 1 and new_q != 0 and (new_q % multiple) != 0:
                 return {'error': 'La cantidad debe ser 0 o un múltiplo de %d.' % int(multiple)}
