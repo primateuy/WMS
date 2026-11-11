@@ -481,6 +481,19 @@ class StockPicking(models.Model):
         Devuelve True si encoló (el que llama no debe enviar).
         """
         self.ensure_one()
+        # Integración manual: ningún disparo AUTOMÁTICO encola este tipo. Sólo la acción
+        # manual (wis_envio_manual) puede encolarlo. Sin esto, el armado del crossdock —que
+        # corre con wis_encolar_envios— encolaba igual los pickings del tipo manual
+        # (POLO/CROSS, "Preparo de Pedidos Crossdocking") y el cron de la cola después los
+        # mandaba con wis_envio_desde_cola, salteando la intención manual. Devuelve True para
+        # que el que llama tampoco envíe: el picking queda 'sin_enviar' con el botón "Integrar
+        # con WMS". Es el embudo de los 4 puntos de envío (create / _enviar_wis_si_corresponde
+        # / write-state / _action_done), así que cubre todos los disparos automáticos.
+        if (self.picking_type_id.integracion_manual_wis
+                and not self.env.context.get('wis_envio_manual')):
+            _logger.info("[WIS] %s | picking=%s: integración manual, no se encola por disparo automático",
+                         hook_name, self.name)
+            return True
         if not self.env.context.get('wis_encolar_envios'):
             return False
         codigo = self._wis_codigo_esperado(tipo)
