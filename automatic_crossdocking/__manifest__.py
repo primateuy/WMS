@@ -12,7 +12,7 @@
     'website': "https://avancesoftware.us/",
 
     'category': 'Uncategorized',
-    'version': '0.4',
+    'version': '0.4.1',
 
     'depends': ['base', 'web','web_grid', 'purchase', 'purchase_stock', 'purchase_order_type', 'stock', 'reorden_rendimiento'],
 

@@ -30,15 +30,26 @@ class PurchaseOrder(models.Model):
                             affected_products.add(product.id)
                 
                 for line in self.order_line.filtered(lambda l: l.product_id.id in affected_products):
-                    
+
                     # Aplicar crossdock
                     if self.crossdock_enabled:
                         line.use_crossdock = True
                         line.line_crossdock_percentage = self.crossdock_percentage / 100.0
-                    
+
                     # Aplicar múltiplo de distribución
                     if line.distribution_multiple > 1 and line.product_qty > 0:
                         self._apply_multiple_to_line(line)
+
+                    # Cargar el múltiplo EFECTIVO de la variante. El configurador en matriz crea
+                    # la línea sin pasar por el onchange de product_id (_onchange_product_id_crossdock),
+                    # así que distribution_multiple quedaba en su default (1) y la columna mostraba 1
+                    # en vez del múltiplo del producto (ej. Bota Trekking = 4). Se setea DESPUÉS del
+                    # redondeo para no alterar la cantidad cargada: el redondeo a múltiplos lo hace
+                    # el armado al distribuir, igual que en las líneas agregadas sueltas.
+                    if line.product_id:
+                        efectivo = line.product_id._multiplo_distribucion_efectivo()
+                        if efectivo and efectivo != line.distribution_multiple:
+                            line.distribution_multiple = efectivo
         
         return result
     
