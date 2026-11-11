@@ -629,6 +629,17 @@ class StockPicking(models.Model):
             )
             if not record.picking_type_id.integracion_wms or record.picking_type_id.adquiere_codigo_unico_wms:
                 continue
+            # Integración manual: ningún disparo automático envía NI ENCOLA este tipo;
+            # sólo la acción manual (wis_envio_manual). Sin esto, un disparo con
+            # `wis_encolar_envios` dejaba el picking en_cola y el cron lo mandaba igual,
+            # pese al modo manual (ocultar el campo wms_estado no alcanzaba).
+            if (record.picking_type_id.integracion_manual_wis
+                    and not self.env.context.get('wis_envio_manual')):
+                _logger.info(
+                    "[WIS] %s | picking=%s: integración manual, no se envía ni encola por disparo automático",
+                    hook_name, record.name,
+                )
+                continue
             if not record.move_ids:
                 continue
             if record.wms_estado != 'sin_enviar':
