@@ -16,16 +16,31 @@ Ahora:
   aunque venga en otra notificación.
 * **Pedido por pedido, cada uno en su transacción.** La corrida respeta el corte del servidor:
   si no le alcanza el tiempo, graba lo hecho y sigue en la corrida siguiente.
-* **El despacho avanza la cadena una vez por notificación**, con todos los pedidos del camión
-  juntos (una caja compartida se mueve una sola vez).
+* **El despacho avanza las entregas a tienda de a una, cada una en su transacción.** Al terminar
+  los pedidos, la notificación arma la lista de entregas (POLO/OUT) con líneas que vienen de lo
+  despachado y las valida una por una, con el mismo tope de tiempo y retomando donde quedó. Cada
+  entrega usa como origen TODO lo despachado por la notificación, así una caja compartida entre
+  tiendas se mueve una sola vez.
+
+  🔴 Antes se validaban todas juntas en una sola transacción. Con 163 y 273 pedidos (producción,
+  17/18-11-2026) pasaban los 600 s del cron, Odoo cortaba, se deshacía todo y la notificación
+  volvía a empezar: 43 y 38 intentos, unas 8.000 entregas parciales creadas y deshechas, y el
+  stock de POLO bloqueado 10 minutos cada vez. Una entrega que corta la corrida
+  `MAX_CORTES_ENTREGA` veces se saltea con error, para que no se repita el bucle.
+* **La corrida también cuida la CPU.** Con workers, Odoo no mata un cron por `limit_time_cpu`:
+  le lanza «CPU time limit exceeded.» en medio de lo que esté haciendo, y lo repite cada
+  segundo. Esa excepción se registraba como error del pedido o de la entrega que estaba en
+  curso, y los siguientes fallaban igual. Ahora la corrida termina antes de quedarse sin CPU, y
+  si igual llega la excepción se trata como un corte: lo que estaba en curso queda pendiente.
 """
 import json
 import logging
+import resource
 import threading
 import time
 from datetime import timedelta
 
-from odoo import _, api, fields, models
+from odoo import _, api, fields, models, tools
 from odoo.exceptions import UserError
 from odoo.http import _request_stack
 from psycopg2.errors import UniqueViolation
@@ -38,10 +53,44 @@ PROCESANDO_COLGADA = timedelta(minutes=30)
 # Sin las marcas de `wis.notificacion.aplicado` se aplicarían de nuevo: el resto se protege
 # solo (picking ya validado, contenedor ya aplicado).
 TIPOS_SIN_GUARDA_PROPIA = ('ajustes', 'pedidosAnulados')
+# Veces que una misma entrega puede cortar la corrida (worker matado) antes de saltearla.
+MAX_CORTES_ENTREGA = 3
+# Lo que manda Odoo cuando un worker se pasa de `limit_time_cpu` (odoo/service/server.py).
+CPU_EXCEDIDA = 'CPU time limit exceeded'
+MARGEN_CPU_MAXIMO = 60
 
 
 def _en_test():
     return getattr(threading.current_thread(), 'testing', False)
+
+
+def _cpu_restante():
+    """Segundos de CPU que le quedan a este proceso antes del límite de Odoo, o None si no
+    hay límite (sin workers). Odoo lo fija con RLIMIT_CPU al empezar cada tanda de trabajo."""
+    try:
+        blando, _duro = resource.getrlimit(resource.RLIMIT_CPU)
+    except (ValueError, OSError):
+        return None
+    if blando == resource.RLIM_INFINITY or blando <= 0:
+        return None
+    uso = resource.getrusage(resource.RUSAGE_SELF)
+    return blando - (uso.ru_utime + uso.ru_stime)
+
+
+def _sin_tiempo(limite):
+    """La corrida no debe empezar otra unidad de trabajo: pasó el tope de reloj o le queda
+    poca CPU. El margen es el 20 % del límite de CPU (60 s con los 300 s de producción)."""
+    if time.time() > limite:
+        return True
+    restante = _cpu_restante()
+    if restante is None:
+        return False
+    margen = min(MARGEN_CPU_MAXIMO, max(5.0, (tools.config.get('limit_time_cpu') or 0) * 0.2))
+    return restante < margen
+
+
+def _es_corte_de_cpu(error):
+    return bool(error) and CPU_EXCEDIDA in str(error)
 
 
 class RequestCola:
@@ -84,6 +133,15 @@ class WisNotificacion(models.Model):
     despachado_ids = fields.Many2many(
         'stock.picking', 'wis_notificacion_picking_rel', 'notificacion_id', 'picking_id',
         string="Operaciones despachadas", readonly=True)
+    entregas_total = fields.Integer(string="Entregas a tienda", readonly=True)
+    entregas_hechas = fields.Integer(string="Entregas avanzadas", readonly=True)
+    entregas_pendientes = fields.Text(
+        readonly=True, help="Entregas a tienda que faltan avanzar (JSON con los ids).")
+    entrega_en_curso_id = fields.Many2one(
+        'stock.picking', string="Entrega en curso", readonly=True, ondelete='set null',
+        help="La que se estaba validando cuando se cortó la corrida, si se cortó.")
+    entrega_cortes = fields.Integer(
+        readonly=True, help="Veces que la entrega en curso cortó la corrida.")
     errores = fields.Text(readonly=True)
     intentos = fields.Integer(readonly=True)
     recibida = fields.Datetime(default=fields.Datetime.now, readonly=True)
@@ -238,12 +296,19 @@ class WisNotificacion(models.Model):
         errores = json.loads(self.errores or '[]')
         pendientes = json.loads(self.pendientes or '[]')
         while pendientes and self.fase == 'pedidos':
-            if time.time() > limite:
+            if _sin_tiempo(limite):
                 self.write({'estado': 'pendiente', 'pendientes': json.dumps(pendientes),
                             'errores': json.dumps(errores, ensure_ascii=False)})
                 return False
             pedido = pendientes.pop(0)
             error = ctrl._wis_ejecutar_handler(self.tipo, payload, pedido=pedido)
+            if _es_corte_de_cpu(error):
+                # No es un error del pedido: se acabó la CPU de la corrida. El handler ya
+                # deshizo lo suyo; el pedido vuelve a la fila y sigue la corrida siguiente.
+                pendientes.insert(0, pedido)
+                self.write({'estado': 'pendiente', 'pendientes': json.dumps(pendientes),
+                            'errores': json.dumps(errores, ensure_ascii=False)})
+                return False
             if error:
                 errores.append(f"{pedido}: {error}")
             despachados = getattr(ctrl, '_wis_despachados', None)
@@ -256,12 +321,103 @@ class WisNotificacion(models.Model):
             if not _en_test():
                 self.env.cr.commit()
         if self.tipo == 'confirmacionPedido' and self.fase == 'pedidos':
-            self.write({'fase': 'cadena'})
-        if self.fase == 'cadena':
-            error = ctrl._wis_avanzar_cadena(self.despachado_ids, origen=f"confirmacionPedido {self.numero_interfaz}")
-            if error:
-                errores.append(error)
+            self._preparar_entregas()
+        if self.fase == 'cadena' and not self._procesar_entregas(limite, errores):
+            return False
         self._terminar(errores)
+        return True
+
+    def _preparar_entregas(self, confirmar=True):
+        """Pasa a la fase de entregas con la lista de las que hay que avanzar.
+
+        Se confirma enseguida: si no, un corte durante las entregas volvía la notificación a la
+        fase de pedidos y la corrida siguiente arrancaba otra vez de cero.
+        """
+        self.ensure_one()
+        hechos = self.despachado_ids.sudo()._wis_movimientos_despachados()
+        entregas = self.env['stock.picking'].sudo()._wis_entregas_a_avanzar(hechos)
+        self.write({
+            'fase': 'cadena',
+            'entregas_pendientes': json.dumps(entregas.ids),
+            'entregas_total': len(entregas),
+            'entregas_hechas': 0,
+            'entrega_en_curso_id': False,
+            'entrega_cortes': 0,
+        })
+        if confirmar and not _en_test():
+            self.env.cr.commit()
+
+    def _procesar_entregas(self, limite, errores):
+        """Avanza las entregas pendientes de a una, confirmando cada una. False si se acabó el
+        tiempo: la corrida siguiente sigue con las que faltan. `errores` se completa acá.
+
+        La entrega se anota «en curso» y se confirma ANTES de validarla. Si la corrida se corta
+        en medio (Odoo mata el proceso), al retomar se sabe cuál fue y cuántas veces cortó; a
+        las `MAX_CORTES_ENTREGA` se saltea con error en vez de volver a intentarla para siempre.
+        """
+        self.ensure_one()
+        Picking = self.env['stock.picking'].sudo()
+        despachados = self.despachado_ids.sudo()
+        hechos = despachados._wis_movimientos_despachados()
+        origen = f"confirmacionPedido {self.numero_interfaz}"
+        pendientes = json.loads(self.entregas_pendientes or '[]')
+
+        def avanzar(hecha, en_curso=False, cortes=0):
+            pendientes.pop(0)
+            self.write({
+                'entregas_pendientes': json.dumps(pendientes),
+                'entregas_hechas': self.entregas_hechas + (1 if hecha else 0),
+                'errores': json.dumps(errores, ensure_ascii=False) if errores else False,
+                'entrega_en_curso_id': en_curso,
+                'entrega_cortes': cortes,
+            })
+            if not _en_test():
+                self.env.cr.commit()
+
+        def cortar():
+            self.write({'estado': 'pendiente', 'entregas_pendientes': json.dumps(pendientes),
+                        'errores': json.dumps(errores, ensure_ascii=False) if errores else False})
+            return False
+
+        while pendientes:
+            if _sin_tiempo(limite):
+                return cortar()
+            entrega = Picking.browse(pendientes[0]).exists()
+            if not entrega:
+                avanzar(False)
+                continue
+            cortes = self.entrega_cortes + 1 if self.entrega_en_curso_id == entrega else 1
+            if cortes > MAX_CORTES_ENTREGA:
+                motivo = _("la corrida se cortó %s veces validando esta entrega; se saltea para no "
+                           "repetir el bucle. Avanzarla a mano o reprocesar la notificación.") % (cortes - 1)
+                _logger.warning("[WIS] %s | %s: %s", origen, entrega.name, motivo)
+                errores.append(f"{entrega.name}: {motivo}")
+                Picking._wis_registrar_error_entrega(entrega, origen, motivo)
+                avanzar(False)
+                continue
+            self.write({'entrega_en_curso_id': entrega.id, 'entrega_cortes': cortes})
+            if not _en_test():
+                self.env.cr.commit()
+
+            # En un test no hay commit ni rollback: el error lo registra el propio método.
+            error = despachados._wis_avanzar_entrega(entrega, hechos, origen,
+                                                     registrar_error=_en_test())
+            if _es_corte_de_cpu(error):
+                # Se acabó la CPU en medio de la entrega: no es un error suyo. Se deshace y queda
+                # primera, «en curso»: si es ella la que no entra nunca, cuenta como corte.
+                if not _en_test():
+                    self.env.cr.rollback()
+                    self.env.invalidate_all()
+                return cortar()
+            if error:
+                if not _en_test():
+                    # Una entrega con e-Remito no va en savepoint: la transacción puede haber
+                    # quedado abortada. Se descarta (sólo tenía esta entrega) y se registra.
+                    self.env.cr.rollback()
+                    self.env.invalidate_all()
+                    Picking._wis_registrar_error_entrega(entrega, origen, error)
+                errores.append(error)
+            avanzar(not error)
         return True
 
     def _terminar(self, errores, retenida=False):
@@ -303,8 +459,39 @@ class WisNotificacion(models.Model):
             datos = json.loads(rec.payload or '{}')
             datos = datos.get(rec.tipo) or datos.get(rec.tipo[:1].upper() + rec.tipo[1:]) or {}
             rec.write({'estado': 'pendiente', 'fase': 'pedidos', 'errores': False, 'pedidos_hechos': 0,
-                       'pendientes': json.dumps(self._pedidos_de(rec.tipo, datos))})
+                       'pendientes': json.dumps(self._pedidos_de(rec.tipo, datos)),
+                       'entregas_pendientes': '[]', 'entregas_total': 0, 'entregas_hechas': 0,
+                       'entrega_en_curso_id': False, 'entrega_cortes': 0})
         self._disparar_cron()
+
+    def action_avanzar_entregas(self):
+        """Vuelve a la cola sólo las entregas a tienda de un despacho, sin reprocesar los
+        pedidos: los despachados ya están registrados en la notificación.
+
+        Es lo que hace falta cuando los pedidos se aplicaron y lo que falló o quedó sin hacer
+        fueron las entregas (producción, 18-11-2026: las notificaciones 514 y 516 se apartaron a
+        mano porque la validación de todas juntas no entraba en el tiempo del cron). Las entregas
+        que ya avanzaron no tienen nada pendiente y no entran.
+        """
+        candidatas = self.filtered(
+            lambda r: r.tipo == 'confirmacionPedido' and r.despachado_ids
+            and r.estado in ('hecho', 'con_errores', 'error'))
+        if not candidatas:
+            raise UserError(_("No hay despachos con entregas para avanzar en lo seleccionado."))
+        for rec in candidatas:
+            rec._preparar_entregas(confirmar=False)
+            rec.write({'estado': 'pendiente', 'errores': False, 'pendientes': '[]'})
+        self._disparar_cron()
+        return {
+            'type': 'ir.actions.client', 'tag': 'display_notification',
+            'params': {
+                'title': _("Entregas a tienda"),
+                'message': _("%s entrega(s) en la cola: se avanzan de a una en segundo plano.")
+                % sum(candidatas.mapped('entregas_total')),
+                'type': 'info',
+                'next': {'type': 'ir.actions.client', 'tag': 'soft_reload'},
+            },
+        }
 
     def action_aprobar(self):
         """Aplica una notificación retenida (por ejemplo un ajuste por encima del tope)."""

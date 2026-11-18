@@ -1025,41 +1025,82 @@ class StockPicking(models.Model):
         (POLO/OUT) los pedidos de una tienda y la entrega toma el código del primero: para los
         demás no encontraba nada, y cuando WIS despachaba el primero se validaba también lo
         preparado de los otros, aunque no hubiera salido (producción: 39 entregas trabadas).
+
+        Todo en la transacción de quien llama. La cola de notificaciones NO usa este método:
+        avanza las entregas de a una con `_wis_avanzar_entrega`, confirmando cada una (ver
+        `wis.notificacion._procesar_entregas`).
         """
-        hechos = self.move_ids.filtered(lambda m: m.state == 'done')
-        destinos = hechos.move_dest_ids.filtered(
-            lambda m: m.state not in ('done', 'cancel') and m.picking_id
-            and not m.picking_id.picking_type_id.integracion_wms)
+        hechos = self._wis_movimientos_despachados()
         errores = []
-        Log = self.env['wms.integracion.log'].sudo()
-        for entrega in destinos.picking_id:
-            lineas = destinos.filtered(lambda m: m.picking_id == entrega)
-            usa_cfe = (getattr(entrega, 'uses_cfe', False) and not getattr(entrega, 'cfe_emitido', False))
-            try:
-                if usa_cfe:
-                    entrega._wis_validar_lo_despachado(lineas, hechos)
-                else:
-                    with self.env.cr.savepoint():
-                        entrega._wis_validar_lo_despachado(lineas, hechos)
-                Log.create({
-                    'fecha': fields.Datetime.now(), 'nivel': 'info', 'modelo': 'stock.picking',
-                    'proceso': 'confirmacionPedido', 'codigo_unico': entrega.codigo_unico,
-                    'texto': _("%(origen)s: %(n)s línea(s) de %(op)s validadas con lo despachado; "
-                               "el resto queda pendiente.", origen=origen, n=len(lineas), op=entrega.name),
-                    'picking_id': entrega.id, 'resultado': 'exito',
-                    'detalle': ', '.join(self.filtered(lambda p: p.move_ids & lineas.move_orig_ids).mapped('codigo_unico')),
-                })
-            except Exception as e:
-                _logger.warning("[WIS] %s | no se pudo avanzar %s: %s", origen, entrega.name, e)
-                errores.append(f"{entrega.name}: {e}")
-                Log.create({
-                    'fecha': fields.Datetime.now(), 'nivel': 'error', 'modelo': 'stock.picking',
-                    'proceso': 'confirmacionPedido', 'codigo_unico': entrega.codigo_unico,
-                    'texto': _("%(origen)s: la entrega %(op)s no se pudo validar con lo despachado; la "
-                               "tienda no la va a ver pendiente hasta resolverlo.", origen=origen, op=entrega.name),
-                    'picking_id': entrega.id, 'resultado': 'error', 'detalle': str(e),
-                })
+        for entrega in self._wis_entregas_a_avanzar(hechos):
+            error = self._wis_avanzar_entrega(entrega, hechos, origen)
+            if error:
+                errores.append(error)
         return errores
+
+    def _wis_movimientos_despachados(self):
+        """`self`: operaciones que WIS despachó. Sus movimientos ya hechos: el origen de lo
+        que se entrega."""
+        return self.move_ids.filtered(lambda m: m.state == 'done')
+
+    @api.model
+    def _wis_entregas_a_avanzar(self, hechos):
+        """Entregas (el paso siguiente, que no va a WIS) con líneas pendientes que vienen de
+        `hechos`."""
+        return hechos.move_dest_ids.filtered(
+            lambda m: m.state not in ('done', 'cancel') and m.picking_id
+            and not m.picking_id.picking_type_id.integracion_wms).picking_id
+
+    def _wis_avanzar_entrega(self, entrega, hechos, origen, registrar_error=True):
+        """Valida en `entrega` las líneas que vienen de `hechos`. Devuelve el error o None.
+
+        `self`: las operaciones despachadas, sólo para el detalle del log. Las líneas se
+        buscan acá y no se reciben: quien procesa de a una entrega, en transacciones
+        separadas, necesita ver lo que quedó pendiente DESPUÉS de las anteriores. Si no
+        queda nada, no hay nada que validar (ya se avanzó, por ejemplo en una corrida que
+        se cortó después de confirmar).
+
+        Con `registrar_error=False` el error no se registra en el log: lo registra quien
+        llama, después de deshacer la transacción (la cola, cuando la entrega emite e-Remito
+        y no puede ir en un savepoint).
+        """
+        Log = self.env['wms.integracion.log'].sudo()
+        lineas = entrega.move_ids.filtered(
+            lambda m: m.state not in ('done', 'cancel') and (m.move_orig_ids & hechos))
+        if not lineas:
+            return None
+        usa_cfe = (getattr(entrega, 'uses_cfe', False) and not getattr(entrega, 'cfe_emitido', False))
+        try:
+            if usa_cfe:
+                entrega._wis_validar_lo_despachado(lineas, hechos)
+            else:
+                with self.env.cr.savepoint():
+                    entrega._wis_validar_lo_despachado(lineas, hechos)
+            Log.create({
+                'fecha': fields.Datetime.now(), 'nivel': 'info', 'modelo': 'stock.picking',
+                'proceso': 'confirmacionPedido', 'codigo_unico': entrega.codigo_unico,
+                'texto': _("%(origen)s: %(n)s línea(s) de %(op)s validadas con lo despachado; "
+                           "el resto queda pendiente.", origen=origen, n=len(lineas), op=entrega.name),
+                'picking_id': entrega.id, 'resultado': 'exito',
+                'detalle': ', '.join(self.filtered(lambda p: p.move_ids & lineas.move_orig_ids).mapped('codigo_unico')),
+            })
+        except Exception as e:
+            _logger.warning("[WIS] %s | no se pudo avanzar %s: %s", origen, entrega.name, e)
+            # Sin CPU no es un error de la entrega (ver wis_notificacion.CPU_EXCEDIDA).
+            if registrar_error and 'CPU time limit exceeded' not in str(e):
+                self._wis_registrar_error_entrega(entrega, origen, str(e))
+            return f"{entrega.name}: {e}"
+        return None
+
+    @api.model
+    def _wis_registrar_error_entrega(self, entrega, origen, detalle):
+        self.env['wms.integracion.log'].sudo().create({
+            'fecha': fields.Datetime.now(), 'nivel': 'error', 'modelo': 'stock.picking',
+            'proceso': 'confirmacionPedido', 'codigo_unico': entrega.codigo_unico,
+            'texto': _("%(origen)s: la entrega %(op)s no se pudo validar con lo despachado; la "
+                       "tienda no la va a ver pendiente hasta resolverlo.", origen=origen, op=entrega.name),
+            'picking_id': entrega.id, 'resultado': 'error', 'detalle': detalle,
+        })
 
     def _wis_validar_lo_despachado(self, lineas, origen_moves):
         """Valida en esta entrega sólo `lineas`, con las cantidades y cajas de `origen_moves`.

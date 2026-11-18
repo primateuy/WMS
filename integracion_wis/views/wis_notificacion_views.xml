@@ -13,6 +13,8 @@
           <field name="numero_interfaz"/>
           <field name="pedidos_hechos"/>
           <field name="pedidos_total"/>
+          <field name="entregas_hechas" optional="show"/>
+          <field name="entregas_total" optional="show"/>
           <field name="estado"/>
           <field name="intentos" optional="hide"/>
           <field name="fin" optional="show"/>
@@ -33,6 +35,11 @@
             <button name="action_reprocesar" type="object" string="Reprocesar"
                     invisible="estado != 'hecho'" groups="stock.group_stock_manager"
                     confirm="Esta notificación terminó bien. Se vuelve a procesar y sólo entra lo que no había entrado. ¿Continuar?"/>
+            <button name="action_avanzar_entregas" type="object" string="Avanzar entregas"
+                    invisible="tipo != 'confirmacionPedido' or estado not in ('hecho', 'con_errores', 'error') or not despachado_ids"
+                    groups="stock.group_stock_manager"
+                    help="Vuelve a la cola sólo las entregas a tienda de este despacho, sin reprocesar los pedidos. Las que ya avanzaron no entran."
+                    confirm="Se avanzan en segundo plano las entregas a tienda que falten de este despacho. ¿Continuar?"/>
             <button name="action_aprobar" type="object" string="Aprobar y aplicar"
                     invisible="estado != 'retenida'" groups="stock.group_stock_manager"
                     confirm="Se aplica lo que superaba el tope configurado. ¿Continuar?"/>
@@ -53,6 +60,12 @@
                 <field name="intentos"/>
                 <field name="fase"/>
                 <field name="aprobada_por"/>
+              </group>
+              <group string="Entregas a tienda" invisible="tipo != 'confirmacionPedido'">
+                <field name="entregas_total"/>
+                <field name="entregas_hechas"/>
+                <field name="entrega_en_curso_id" invisible="not entrega_en_curso_id"/>
+                <field name="entrega_cortes" invisible="not entrega_en_curso_id"/>
               </group>
             </group>
             <notebook>

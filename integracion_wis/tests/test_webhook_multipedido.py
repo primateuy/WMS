@@ -23,8 +23,9 @@ from odoo.tests.common import TransactionCase, tagged
 from odoo.addons.integracion_wis.controllers import controllers as wis_controllers
 
 
-@tagged('post_install', '-at_install', 'wis_webhook_multipedido')
-class TestWebhookMultipedido(TransactionCase):
+class WisMultipedidoCase(TransactionCase):
+    """Armado común: pedidos de crossdock a 5 tiendas, sus cajas y sus entregas. Sin tests
+    propios; lo usan este archivo y `test_notificacion_entregas`."""
 
     @classmethod
     def setUpClass(cls):
@@ -179,6 +180,10 @@ class TestWebhookMultipedido(TransactionCase):
 
     def _ubicaciones_con_stock(self, paquete):
         return paquete.quant_ids.filtered(lambda q: q.quantity > 0).location_id
+
+
+@tagged('post_install', '-at_install', 'wis_webhook_multipedido')
+class TestWebhookMultipedido(WisMultipedidoCase):
 
     # ------------------------------------------------------------------
     # Contenedores por pedido
