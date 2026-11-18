@@ -58,6 +58,7 @@
           <field name="ubicacionReponerStock" string="Ubicación para Reponer Stock" widget="many2one"/>
           <field name="diferenciaMinima" string="Diferencia Mínima" widget="integer"/>
           <field name="ultima_sync_productos" readonly="1"/>
+          <field name="productos_rechazados_wis" readonly="1"/>
           </group>
           <group string="Integración de productos">
             <field name="chunk_size_productos"/>
@@ -224,6 +225,12 @@
                 <field name="productos" string="Conciliar Productos"/>
                 <field name="clientes" string="Conciliar Clientes"/>
                 <field name="codigoBarras" string="Conciliar Códigos de Barras"/>
+              </group>
+              <group string="Envío de productos a WIS (por lotes)" invisible="not prod_total">
+                <field name="prod_total"/>
+                <field name="prod_enviados"/>
+                <field name="prod_errores"/>
+                <field name="prod_omitidos"/>
               </group>
             </group>
             

@@ -177,8 +177,16 @@ class IntegracionWIS(models.Model):
     ultima_sync_productos = fields.Datetime(
         string='Última sincronización de productos',
         readonly=True,
-        help='Fecha de la última conciliación masiva de productos completada exitosamente. '
-             'Solo se sincronizan productos cuyo write_date sea posterior a este valor.',
+        help='Inicio de la última conciliación de productos que terminó. La siguiente manda '
+             'sólo los productos modificados después de esta fecha.',
+    )
+    productos_rechazados_wis = fields.Text(
+        string='Productos rechazados por WIS', readonly=True,
+        help='Productos que WIS rechazó y todavía no se corrigieron, con el motivo (JSON: id → '
+             'motivo). No se vuelven a mandar hasta que se modifiquen: reenviar el mismo dato no '
+             'lo arregla. Al corregirlos entran solos en la próxima conciliación y, si WIS los '
+             'acepta, salen de esta lista. Forum, nov-2026: 12 productos con «ProductoEmpresa: '
+             'El valor está asignado a otro producto».',
     )
 
     comunicacion_activa = fields.Boolean(
