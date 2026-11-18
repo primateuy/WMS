@@ -86,13 +86,32 @@ def paso_cadenas():
     trabados = despachados.filtered(lambda p: p.move_ids.filtered(lambda m: m.state == 'done').move_dest_ids.filtered(
         lambda d: d.state not in ('done', 'cancel') and d.picking_id
         and not d.picking_id.picking_type_id.integracion_wms))
-    entregas = trabados.move_ids.move_dest_ids.picking_id.filtered(lambda d: d.state not in ('done', 'cancel'))
-    errores = []
-    if APLICAR and trabados:
-        errores = trabados._wis_avanzar_cadena(origen='Regularización 0.10.0')
-    _commit()
+    hechos = trabados._wis_movimientos_despachados()
+    entregas = Picking._wis_entregas_a_avanzar(hechos)
+    errores, avanzadas = [], 0
+    # De a una entrega, confirmando cada una. Todas juntas en una sola transacción (como hacía
+    # este paso hasta el 18-11-2026) tenían trabado el stock de POLO más de una hora con las
+    # ~740 entregas del atraso, y un error al final deshacía todo: es el mismo defecto que
+    # tumbó producción con los despachos 514/516/520.
+    origen = 'Regularización 0.10.0'
+    if APLICAR:
+        for n, entrega in enumerate(entregas, 1):
+            error = trabados._wis_avanzar_entrega(entrega, hechos, origen, registrar_error=False)
+            if error:
+                env.cr.rollback()
+                env.invalidate_all()
+                Picking._wis_registrar_error_entrega(entrega, origen, error)
+                errores.append(error)
+            else:
+                avanzadas += 1
+            env.cr.commit()
+            if n % 50 == 0:
+                print(f'[cadenas] {n}/{len(entregas)} entregas | avanzadas {avanzadas} | errores {len(errores)}', flush=True)
+    else:
+        _commit()
     RESUMEN['cadenas'] = {'despachados_con_entrega_pendiente': len(trabados),
-                          'entregas': entregas.mapped('name'), 'errores': errores}
+                          'entregas': entregas.mapped('name'), 'avanzadas': avanzadas,
+                          'errores': errores}
 
 
 def paso_recepciones():
