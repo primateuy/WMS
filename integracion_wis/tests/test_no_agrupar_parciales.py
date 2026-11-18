@@ -106,3 +106,35 @@ class TestNoAgruparParciales(TransactionCase):
         prep2 = self._prep(self.productos[1])
         envio2 = self._envio(self.productos[1], prep2)
         self.assertNotEqual(envio2.picking_id, envio1.picking_id)
+
+    # --- envío a WIS fallido (POLO/TIENDAS/00003, 16/17-11-2026) -------------
+    def test_07_una_operacion_con_envio_fallido_no_recibe_movimientos(self):
+        """WIS rechazó la operación: quedó con su código y «sin enviar», y no se reintenta
+        sola. Si recibe lo que llega después, junta los envíos de todas las tiendas."""
+        primero = self._prep(self.productos[0])
+        fallida = primero.picking_id
+        fallida.write({'codigo_unico': 'W-D-%s' % fallida.id, 'wms_estado': 'sin_enviar'})
+        nuevo = self._prep(self.productos[1])
+        self.assertTrue(nuevo.picking_id)
+        self.assertNotEqual(nuevo.picking_id, fallida, 'El envío nuevo se sumó a la operación fallida.')
+        otro = self._prep(self.productos[2])
+        self.assertEqual(otro.picking_id, nuevo.picking_id,
+                         'Mientras la nueva no se intente mandar, agrupa como siempre.')
+
+    def test_08_una_operacion_en_cola_sigue_recibiendo(self):
+        primero = self._prep(self.productos[0])
+        primero.picking_id.write({'codigo_unico': 'W-D-%s' % primero.picking_id.id,
+                                  'wms_estado': 'en_cola'})
+        nuevo = self._prep(self.productos[1])
+        self.assertEqual(nuevo.picking_id, primero.picking_id)
+
+    def test_09_el_envio_que_adquiere_el_codigo_sigue_agrupando(self):
+        """Los envíos toman el código de su preparación y siguen «sin enviar»: la regla nueva
+        no los alcanza (los agrupa lo que pase con la preparación, test_05)."""
+        prep1 = self._prep(self.productos[0])
+        envio1 = self._envio(self.productos[0], prep1)
+        envio1.picking_id.write({'codigo_unico': 'W-P-%s' % prep1.picking_id.id,
+                                 'wms_estado': 'sin_enviar'})
+        prep2 = self._prep(self.productos[1])
+        envio2 = self._envio(self.productos[1], prep2)
+        self.assertEqual(envio2.picking_id, envio1.picking_id)

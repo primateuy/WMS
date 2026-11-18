@@ -1668,6 +1668,15 @@ class StockMove(models.Model):
         if not (tipo.integracion_wms or tipo.adquiere_codigo_unico_wms):
             return []
         domain = [('backorder_id', '=', False)]
+        if tipo.integracion_wms and not tipo.adquiere_codigo_unico_wms:
+            # Una operación cuyo envío a WIS ya se intentó y falló (tiene el código y quedó
+            # «sin enviar», ver `_enviar_wis_si_corresponde`) no recibe más movimientos: no se
+            # reintenta sola, así que absorbía todo lo que llegaba después. Producción,
+            # 16/17-11-2026: WIS rechazó «Recepcion - Tiendas» (tipo de referencia ODT no
+            # válido) y POLO/TIENDAS/00003 juntó los envíos de todas las tiendas, 749 líneas.
+            # Cada envío la trababa minutos y los usuarios quedaban esperando: tres caídas.
+            # Las «en cola» también tienen código y siguen recibiendo: salen como estén.
+            domain += ['|', ('codigo_unico', '=', False), ('wms_estado', '!=', 'sin_enviar')]
         if tipo.adquiere_codigo_unico_wms:
             domain += ['!', ('move_ids.move_orig_ids.picking_id.wms_estado', 'in',
                              WMS_ESTADOS_EN_WIS)]
