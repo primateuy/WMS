@@ -1011,6 +1011,50 @@ class StockPicking(models.Model):
     # ------------------------------------------------------------------
     # Cadena de entrega: lo que WIS despachó avanza a la tienda / al cliente
     # ------------------------------------------------------------------
+    def _wis_agregar_excedente(self, producto, cantidad):
+        """Agrega a esta operación de WIS `cantidad` de `producto`, que WIS preparó y el pedido no
+        tenía (o tenía menos): es lo que salió en el camión. Devuelve el movimiento nuevo.
+
+        La línea se agrega también en los pasos siguientes de la cadena (la entrega a la tienda,
+        la recepción de la sucursal), siguiendo el recorrido de una línea que ya está en la
+        operación: si no, el despacho la dejaba en la salida de POLO y la tienda no la veía. En
+        un pedido de venta (mayoristas), al validar la entrega al cliente Odoo agrega la línea a
+        la orden de venta con lo entregado (`sale_stock`).
+
+        Si Odoo no tiene stock del producto en el origen, se mueve igual: el stock queda en
+        negativo hasta la conciliación con WIS (decisión de Forum, 19-11-2026).
+        """
+        self.ensure_one()
+        Move = self.env['stock.move'].sudo().with_context(skip_wms_integration=True)
+        referencia = self.move_ids.filtered(lambda m: m.state != 'cancel').sorted('id')[:1]
+
+        def crear(picking, origen=None, desde=None):
+            vals = {
+                'name': producto.display_name, 'product_id': producto.id,
+                'product_uom': producto.uom_id.id, 'product_uom_qty': cantidad,
+                'location_id': (desde or picking).location_id.id,
+                'location_dest_id': (desde or picking).location_dest_id.id,
+                'picking_id': picking.id, 'picking_type_id': picking.picking_type_id.id,
+                'company_id': picking.company_id.id, 'group_id': picking.group_id.id,
+                'origin': picking.origin, 'partner_id': picking.partner_id.id,
+                'procure_method': 'make_to_order' if origen else 'make_to_stock',
+            }
+            if origen:
+                vals['move_orig_ids'] = [(4, origen.id)]
+            movimiento = Move.create(vals)
+            movimiento._action_confirm(merge=False)
+            return movimiento
+
+        nuevo = crear(self)
+        actual, ref = nuevo, referencia
+        while ref:
+            siguiente = ref.move_dest_ids.filtered(lambda m: m.state not in ('done', 'cancel'))[:1]
+            if not siguiente or not siguiente.picking_id:
+                break
+            actual = crear(siguiente.picking_id, origen=actual, desde=siguiente)
+            ref = siguiente
+        return nuevo
+
     def _wis_es_parcial(self):
         self.ensure_one()
         return any(m.quantity < m.product_uom_qty

@@ -994,11 +994,15 @@ Body: {body_str[:500]}"""
                         lambda p: p.state not in ('done', 'cancel') and p.wms_estado == 'enviado')
                     if sin_preparar and receptivo:
                         # WIS despacha cajas que Odoo no tiene preparadas: se aplican primero.
-                        self._handle_mercaderia_preparada({
-                            'pedidos': [{'pedido': nombre_pedido}],
-                            'contenedores': sin_preparar,
-                            'fechaPreparacion': fecha_cierre_raw,
-                        })
+                        self._wis_en_despacho = True
+                        try:
+                            self._handle_mercaderia_preparada({
+                                'pedidos': [{'pedido': nombre_pedido}],
+                                'contenedores': sin_preparar,
+                                'fechaPreparacion': fecha_cierre_raw,
+                            })
+                        finally:
+                            self._wis_en_despacho = False
                         aplicadas = Aplicada.search([('pedido', '=', nombre_pedido),
                                                      ('contenedor', 'in', claves)])
                     # Preparadas que no se pudieron validar antes (receptor, línea en 0...): se
@@ -1084,6 +1088,8 @@ Body: {body_str[:500]}"""
                                                   ensure_ascii=False, indent=2),
                 })
 
+        errores += getattr(self, '_wis_errores_linea_despacho', None) or []
+        self._wis_errores_linea_despacho = []
         if getattr(self, '_wis_cola', None):
             # La cola avanza la cadena una vez, con todos los pedidos de la notificación.
             self._wis_despachados = (self._wis_despachados or Picking.browse()) | despachados
@@ -1137,12 +1143,17 @@ Body: {body_str[:500]}"""
 
     def _wis_hecho_en_el_pedido(self, picking):
         """Cantidad hecha por producto (código único) en las OTRAS operaciones integradas del
-        mismo pedido. Sirve para reconocer un reenvío de WIS de lo que ya se preparó."""
+        mismo pedido que se prepararon SIN registro de cajas (antes de 0.10.0). Sirve para
+        reconocer un reenvío de WIS de lo que ya se preparó: una caja registrada que vuelve se
+        reconoce por su número antes de llegar acá, así que lo hecho con cajas registradas no
+        cuenta (si no, una caja nueva de verdad se tomaba por reenvío)."""
         if not picking.codigo_unico:
             return {}
+        registradas = request.env['wis.preparacion.aplicada'].sudo().search(
+            [('pedido', '=', picking.codigo_unico)]).picking_id
         hechos = request.env['stock.picking'].sudo().search([
             ('codigo_unico', '=', picking.codigo_unico), ('id', '!=', picking.id),
-            ('state', '=', 'done'), ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))])
+            ('state', '=', 'done'), ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))]) - registradas
         cantidades = {}
         for move in hechos.move_ids.filtered(lambda m: m.state == 'done'):
             cod = move.product_id.codigo_unico
@@ -1195,49 +1206,62 @@ Body: {body_str[:500]}"""
                 preparado_por_cod[cod] = preparado_por_cod.get(cod, 0) + cant
                 paquete_por_cod.setdefault(cod, paquete)
 
-        # WIS notifica una sola vez lo que preparó físicamente: el pedido se procesa con lo que
-        # calza para que Odoo pueda seguir trabajando, y lo que no calza queda como AVISO en el
-        # log de integración (antes sólo en el log del servidor):
-        #  - un producto que el pedido no tiene pendiente se ignora;
-        #  - lo que supera lo pendiente se recorta a lo pendiente.
-        # Si no queda NADA de este pedido, no hay qué preparar: se deja como estaba (marcarlo
-        # 'preparado' sin cantidades hacía rechazar después la preparación de verdad).
+        # Lo que informa WIS es lo que salió en el camión (decisión de Forum, 19-11-2026): se
+        # procesa TODO, aunque el pedido no lo tenga o tenga menos. Por producto:
+        #  - hasta lo pendiente, sobre las líneas del pedido, como siempre;
+        #  - lo que pasa de lo pendiente y ya estaba hecho en otra operación del pedido sin cajas
+        #    registradas es un reenvío de WIS: no se vuelve a aplicar (stock y e-Remito dobles);
+        #  - el resto es un EXCEDENTE: se agrega a la operación y a los pasos siguientes
+        #    (`stock.picking._wis_agregar_excedente`), con aviso;
+        #  - un producto que no existe en Odoo no se puede procesar: esa línea queda con ERROR y
+        #    el resto del pedido sigue (WIS notifica una sola vez).
+        # Lo que el pedido tenía y WIS no informó queda en el saldo, como siempre.
         pendientes = picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel'))
-        avisos, reenvios = [], []
+        avisos, reenvios, errores_linea = [], [], []
+        excedentes = []   # (producto, cantidad, cod)
         hecho_por_cod = self._wis_hecho_en_el_pedido(picking)
+        Producto = request.env['product.product'].sudo().with_context(active_test=False)
         for cod in list(preparado_por_cod):
             cant_total = preparado_por_cod[cod]
             del_producto = pendientes.filtered(lambda m: m.product_id.codigo_unico == cod)
-            if not del_producto and hecho_por_cod.get(cod, 0) >= cant_total:
-                # Ya está hecho en otra operación del mismo pedido: es un reenvío de WIS (la caja
-                # se preparó antes de que Odoo registrara los contenedores), no falta nada.
+            pendiente = sum(del_producto.mapped('product_uom_qty'))
+            sobra = cant_total - pendiente
+            if sobra <= 0:
+                continue
+            ya_hecho = min(sobra, hecho_por_cod.get(cod, 0))
+            if ya_hecho:
                 reenvios.append(_(
-                    "WIS informó %(cant)s de %(cod)s, que ya se había hecho en otra operación del "
-                    "pedido: es un reenvío", cant=cant_total, cod=cod))
+                    "WIS informó %(cant)s de %(cod)s y %(ya)s ya se había hecho en otra operación del "
+                    "pedido: es un reenvío", cant=cant_total, cod=cod, ya=ya_hecho))
+            extra = sobra - ya_hecho
+            if extra > 0:
+                producto = del_producto[:1].product_id or Producto.search([('codigo_unico', '=', cod)], limit=1)
+                if not producto:
+                    errores_linea.append(_(
+                        "WIS informó %(cant)s de %(cod)s y ese producto no existe en Odoo: la línea no "
+                        "se procesó", cant=extra, cod=cod))
+                else:
+                    excedentes.append((producto, extra, cod))
+                    avisos.append(_(
+                        "WIS informó %(cant)s de %(cod)s y el pedido tenía pendiente %(dem)s: se "
+                        "agregaron %(extra)s que no estaban en el pedido", cant=cant_total, cod=cod,
+                        dem=pendiente, extra=extra))
+            if pendiente:
+                preparado_por_cod[cod] = pendiente
+            else:
                 del preparado_por_cod[cod]
-                continue
-            if not del_producto:
-                avisos.append(_(
-                    "WIS informó %(cant)s de %(cod)s y el pedido no lo tiene pendiente: "
-                    "se ignoró", cant=cant_total, cod=cod))
-                del preparado_por_cod[cod]
-                continue
-            demanda = sum(del_producto.mapped('product_uom_qty'))
-            if cant_total > demanda:
-                avisos.append(_(
-                    "WIS informó %(cant)s de %(cod)s y el pedido tenía pendiente %(dem)s: "
-                    "se tomó %(dem)s", cant=cant_total, cod=cod, dem=demanda))
-                preparado_por_cod[cod] = demanda
-        if not preparado_por_cod and reenvios and not avisos:
+        if not preparado_por_cod and not excedentes and reenvios and not avisos and not errores_linea:
             raise ReenvioWIS("; ".join(reenvios))
-        if not preparado_por_cod:
+        if not preparado_por_cod and not excedentes:
             raise UserError(_(
                 "Lo preparado no coincide con el pedido %(picking)s: la notificación no trae "
                 "cantidades preparadas para este pedido%(det)s.",
                 picking=picking.name,
-                det=(": " + "; ".join(avisos + reenvios)) if avisos or reenvios else ""))
+                det=(": " + "; ".join(errores_linea + avisos + reenvios))
+                if errores_linea or avisos or reenvios else ""))
         self._wis_avisos_preparada = avisos
         self._wis_reenvios_preparada = reenvios
+        self._wis_errores_linea = errores_linea
 
         es_parcial = False
         cods_aplicados = set()
@@ -1301,6 +1325,18 @@ Body: {body_str[:500]}"""
                 # (o 'partially_available' si es parcial) y el picking en 'assigned'. Si el
                 # producto queda en 0, el move queda 'confirmed' y el picking NO 'assigned'.
                 # El picked lo setea el button_validate de más abajo al validar.
+        # Excedentes: lo que salió en el camión y el pedido no tenía. Línea nueva, con la cantidad
+        # y la caja que informó WIS, encadenada hasta la tienda o el cliente.
+        for producto, extra, cod in excedentes:
+            move = picking._wis_agregar_excedente(producto, extra)
+            paquete = paquete_por_cod.get(cod)
+            SML.create({
+                'move_id': move.id, 'picking_id': picking.id, 'product_id': producto.id,
+                'product_uom_id': producto.uom_id.id, 'location_id': move.location_id.id,
+                'location_dest_id': move.location_dest_id.id, 'quantity': extra, 'qty_done': extra,
+                'result_package_id': paquete.id if paquete else False,
+            })
+            cods_aplicados.add(cod)
         # Productos del picking que WIS NO informó como preparados -> quedan en 0 (backorder).
         # Se setea quantity=0 en sus líneas (sin borrarlas).
         for move in picking.move_ids:
@@ -1393,6 +1429,8 @@ Body: {body_str[:500]}"""
                 )
 
         errores = []
+        # Líneas con producto inexistente en pedidos que sí se procesaron (ver más abajo).
+        errores_de_linea = []
         pedidos = self._wis_pedidos_con_cajas(pedidos, data.get('contenedores'))
 
         for pedido_data in pedidos:
@@ -1561,6 +1599,7 @@ Body: {body_str[:500]}"""
                 #    y el primer pedido a medias).
                 self._wis_avisos_preparada = []
                 self._wis_reenvios_preparada = []
+                self._wis_errores_linea = []
                 reenvio = None
                 try:
                     with request.env.cr.savepoint():
@@ -1703,6 +1742,22 @@ Body: {body_str[:500]}"""
                 self._wis_avisos_preparada = []
                 reenvios = getattr(self, '_wis_reenvios_preparada', None) or []
                 self._wis_reenvios_preparada = []
+                errores_linea = getattr(self, '_wis_errores_linea', None) or []
+                self._wis_errores_linea = []
+                if errores_linea:
+                    # El pedido se procesó; esas líneas no. Queda a la vista como error y la
+                    # notificación «con errores», pero no frena el resto (ni el despacho).
+                    self._ilog({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'error',
+                        'modelo': 'stock.picking',
+                        'texto': (f"confirmacionMercaderiaPreparada: {picking.name} se procesó, pero "
+                                  f"WIS informó productos que no existen en Odoo."),
+                        'picking_id': picking.id,
+                        'resultado': 'error',
+                        'detalle': ' | '.join(errores_linea),
+                    })
+                    errores_de_linea.extend(f"Picking '{picking.name}': {e}" for e in errores_linea)
                 if reenvios:
                     self._ilog({
                         'fecha': fields.Datetime.now(),
@@ -1762,6 +1817,13 @@ Body: {body_str[:500]}"""
                 )
                 errores.append(f"Error en picking '{nombre_pedido}': {str(e)}")
 
+        if errores_de_linea and getattr(self, '_wis_en_despacho', False) and not errores:
+            # Llamada desde el despacho (cajas que no estaban preparadas): lo preparado ya quedó
+            # hecho y se tiene que despachar; los errores de línea los suma el despacho.
+            self._wis_errores_linea_despacho = (
+                getattr(self, '_wis_errores_linea_despacho', None) or []) + errores_de_linea
+            return
+        errores += errores_de_linea
         if errores and getattr(self, '_wis_cola', None):
             raise ErroresProcesados(' | '.join(errores))
         if errores:
