@@ -18,6 +18,11 @@ class ErroresProcesados(ValueError):
     que deshacer nada (la cola confirma lo hecho y sigue con el siguiente)."""
 
 
+class ReenvioWIS(UserError):
+    """WIS volvió a informar una preparación que Odoo ya hizo en otra operación del mismo pedido:
+    no hay nada que preparar y no es un error (validación, 18-11-2026: 305 avisos así)."""
+
+
 class WebhookWIS(http.Controller):
 
     @http.route('/webhook/wis/callback', type='json', auth='public', methods=['POST'], csrf=False)
@@ -982,7 +987,12 @@ Body: {body_str[:500]}"""
                     # lo preparado, como hasta ahora.
                     a_despachar = preparados_previos
                 else:
-                    if sin_preparar:
+                    # Sólo se intenta preparar si queda algo abierto donde aplicar las cajas. Si
+                    # no, la preparación rechazaba con «está en estado 'done'» y el despacho se
+                    # perdía (validación, 18-11-2026: 263 pedidos).
+                    receptivo = validos.filtered(
+                        lambda p: p.state not in ('done', 'cancel') and p.wms_estado == 'enviado')
+                    if sin_preparar and receptivo:
                         # WIS despacha cajas que Odoo no tiene preparadas: se aplican primero.
                         self._handle_mercaderia_preparada({
                             'pedidos': [{'pedido': nombre_pedido}],
@@ -999,6 +1009,21 @@ Body: {body_str[:500]}"""
                             raise UserError(motivo)
                     a_despachar = aplicadas.filtered(lambda a: not a.despachado).picking_id.filtered(
                         lambda p: p.state == 'done')
+                    if not a_despachar and sin_preparar:
+                        a_despachar, reenvio = self._wis_despacho_sin_cajas_registradas(
+                            nombre_pedido, validos, sin_preparar)
+                        if reenvio:
+                            self._ilog({
+                                'fecha': fields.Datetime.now(), 'nivel': 'info',
+                                'modelo': 'stock.picking',
+                                'texto': (f"confirmacionPedido: {nombre_pedido} ya estaba "
+                                          f"despachado; es un reenvío y no se repite."),
+                                'picking_id': reenvio[:1].id, 'resultado': 'exito',
+                                'detalle': ', '.join(claves),
+                            })
+                            continue
+                        aplicadas = Aplicada.search([('pedido', '=', nombre_pedido),
+                                                     ('contenedor', 'in', claves)])
                     if not a_despachar and aplicadas and all(aplicadas.mapped('despachado')):
                         self._ilog({
                             'fecha': fields.Datetime.now(), 'nivel': 'info', 'modelo': 'stock.picking',
@@ -1074,12 +1099,55 @@ Body: {body_str[:500]}"""
                 f"Se procesaron {len(pedidos) - len(errores)}/{len(pedidos)} pedidos. "
                 f"Errores: {' | '.join(errores)}")
 
+    def _wis_despacho_sin_cajas_registradas(self, pedido, validos, cajas):
+        """WIS despacha cajas que Odoo no tiene registradas y no hay nada abierto que preparar.
+
+        Devuelve `(a_despachar, reenvio)`:
+        - las operaciones hechas y preparadas sin cajas registradas (se prepararon antes de que
+          existiera el registro de contenedores): son las que viajan, como hacía el despacho
+          cuando el pedido no tenía ningún registro. Antes se perdía el despacho y la entrega a
+          la tienda quedaba trabada (validación, 18-11-2026: 33 pedidos);
+        - o, si todo lo hecho ya está despachado, esas operaciones: es un reenvío.
+
+        Las cajas quedan registradas en la operación, para que un nuevo reenvío se reconozca
+        enseguida."""
+        Picking = request.env['stock.picking'].sudo()
+        Aplicada = request.env['wis.preparacion.aplicada'].sudo()
+        validos.invalidate_recordset()
+        registradas = Aplicada.search([('pedido', '=', pedido)]).picking_id
+        hechos = validos.filtered(lambda p: p.state == 'done')
+        sueltos = hechos.filtered(lambda p: p.wms_estado == 'preparado' and p not in registradas)
+        if sueltos:
+            self._wis_registrar_aplicados(pedido, cajas, sueltos[:1])
+            return sueltos, Picking
+        if hechos and not hechos.filtered(lambda p: p.wms_estado == 'preparado'):
+            self._wis_registrar_aplicados(pedido, cajas, hechos[:1])
+            claves = [self._wis_clave_contenedor(c) for c in cajas]
+            Aplicada.search([('pedido', '=', pedido), ('contenedor', 'in', claves),
+                             ('despachado', '=', False)]).write({'despachado': True})
+            return Picking, hechos
+        return Picking, Picking
+
     def _wis_avanzar_cadena(self, despachados, origen='confirmacionPedido'):
         """Avanza la entrega a tienda/cliente de lo despachado. Devuelve el error o None."""
         if not despachados:
             return None
         errores = despachados.sudo()._wis_avanzar_cadena(origen=origen)
         return ' | '.join(errores) if errores else None
+
+    def _wis_hecho_en_el_pedido(self, picking):
+        """Cantidad hecha por producto (código único) en las OTRAS operaciones integradas del
+        mismo pedido. Sirve para reconocer un reenvío de WIS de lo que ya se preparó."""
+        if not picking.codigo_unico:
+            return {}
+        hechos = request.env['stock.picking'].sudo().search([
+            ('codigo_unico', '=', picking.codigo_unico), ('id', '!=', picking.id),
+            ('state', '=', 'done'), ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))])
+        cantidades = {}
+        for move in hechos.move_ids.filtered(lambda m: m.state == 'done'):
+            cod = move.product_id.codigo_unico
+            cantidades[cod] = cantidades.get(cod, 0) + move.quantity
+        return cantidades
 
     def _wis_setear_cantidades_y_paquetes_preparada(self, picking, contenedores):
         """confirmacionMercaderiaPreparada: registra MANUALMENTE en el picking lo que WIS informa
@@ -1135,10 +1203,19 @@ Body: {body_str[:500]}"""
         # Si no queda NADA de este pedido, no hay qué preparar: se deja como estaba (marcarlo
         # 'preparado' sin cantidades hacía rechazar después la preparación de verdad).
         pendientes = picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel'))
-        avisos = []
+        avisos, reenvios = [], []
+        hecho_por_cod = self._wis_hecho_en_el_pedido(picking)
         for cod in list(preparado_por_cod):
             cant_total = preparado_por_cod[cod]
             del_producto = pendientes.filtered(lambda m: m.product_id.codigo_unico == cod)
+            if not del_producto and hecho_por_cod.get(cod, 0) >= cant_total:
+                # Ya está hecho en otra operación del mismo pedido: es un reenvío de WIS (la caja
+                # se preparó antes de que Odoo registrara los contenedores), no falta nada.
+                reenvios.append(_(
+                    "WIS informó %(cant)s de %(cod)s, que ya se había hecho en otra operación del "
+                    "pedido: es un reenvío", cant=cant_total, cod=cod))
+                del preparado_por_cod[cod]
+                continue
             if not del_producto:
                 avisos.append(_(
                     "WIS informó %(cant)s de %(cod)s y el pedido no lo tiene pendiente: "
@@ -1151,13 +1228,16 @@ Body: {body_str[:500]}"""
                     "WIS informó %(cant)s de %(cod)s y el pedido tenía pendiente %(dem)s: "
                     "se tomó %(dem)s", cant=cant_total, cod=cod, dem=demanda))
                 preparado_por_cod[cod] = demanda
+        if not preparado_por_cod and reenvios and not avisos:
+            raise ReenvioWIS("; ".join(reenvios))
         if not preparado_por_cod:
             raise UserError(_(
                 "Lo preparado no coincide con el pedido %(picking)s: la notificación no trae "
                 "cantidades preparadas para este pedido%(det)s.",
                 picking=picking.name,
-                det=(": " + "; ".join(avisos)) if avisos else ""))
+                det=(": " + "; ".join(avisos + reenvios)) if avisos or reenvios else ""))
         self._wis_avisos_preparada = avisos
+        self._wis_reenvios_preparada = reenvios
 
         es_parcial = False
         cods_aplicados = set()
@@ -1480,6 +1560,8 @@ Body: {body_str[:500]}"""
                 #    antes (support, 13-10-2026: «savepoint … does not exist», notificación abortada
                 #    y el primer pedido a medias).
                 self._wis_avisos_preparada = []
+                self._wis_reenvios_preparada = []
+                reenvio = None
                 try:
                     with request.env.cr.savepoint():
                         # Spec 3.3 paso 2: actualizar estado y fecha.
@@ -1523,8 +1605,25 @@ Body: {body_str[:500]}"""
                         # El paquete se controla ahora, antes de emitir nada.
                         if picking.state == 'assigned':
                             picking._wis_controlar_paquetes()
+                except ReenvioWIS as e:
+                    reenvio = str(e)
                 except Exception as e:
                     error_preparacion = str(e)
+
+                if reenvio:
+                    # Todo lo de la caja ya estaba hecho en otra operación del pedido: el saldo
+                    # queda como estaba y no es un error.
+                    self._ilog({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'info',
+                        'modelo': 'stock.picking',
+                        'texto': (f"confirmacionMercaderiaPreparada: lo que informó WIS para "
+                                  f"{nombre_pedido} ya estaba hecho; es un reenvío y no se aplica."),
+                        'picking_id': picking.id,
+                        'resultado': 'omitido',
+                        'detalle': reenvio,
+                    })
+                    continue
 
                 # 2) VALIDACIÓN (emite el e-Remito), fuera de cualquier savepoint del webhook.
                 #    `stock.picking._action_done` protege el «Hecho» del core con un savepoint
@@ -1602,6 +1701,19 @@ Body: {body_str[:500]}"""
                 )
                 avisos = getattr(self, '_wis_avisos_preparada', None) or []
                 self._wis_avisos_preparada = []
+                reenvios = getattr(self, '_wis_reenvios_preparada', None) or []
+                self._wis_reenvios_preparada = []
+                if reenvios:
+                    self._ilog({
+                        'fecha': fields.Datetime.now(),
+                        'nivel': 'info',
+                        'modelo': 'stock.picking',
+                        'texto': (f"confirmacionMercaderiaPreparada: {picking.name}: parte de lo "
+                                  f"que informó WIS ya estaba hecho en el pedido (reenvío)."),
+                        'picking_id': picking.id,
+                        'resultado': 'exito',
+                        'detalle': ' | '.join(reenvios),
+                    })
                 if avisos:
                     self._ilog({
                         'fecha': fields.Datetime.now(),

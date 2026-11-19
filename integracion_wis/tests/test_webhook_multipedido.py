@@ -671,6 +671,117 @@ class TestWebhookMultipedido(WisMultipedidoCase):
         self.assertEqual(self.env['stock.picking'].search_count([]), antes)
 
 
+    # ------------------------------------------------------------------
+    # 0.13.3: avisos de la regularización en validación (18-11-2026)
+    # ------------------------------------------------------------------
+    def _despacho(self, pedido, cajas):
+        self.controller._handle_confirmacion_pedido({
+            'pedidos': [{'pedido': pedido}], 'contenedores': cajas})
+
+    def _logs(self, picking_o_codigo, nivel):
+        dominio = ([('picking_id', '=', picking_o_codigo.id)] if not isinstance(picking_o_codigo, str)
+                   else [('codigo_unico', '=', picking_o_codigo)])
+        return self.env['wms.integracion.log'].search(dominio + [('nivel', '=', nivel)])
+
+    def test_preparacion_ya_hecha_en_otra_operacion_es_un_reenvio(self):
+        """305 avisos «el pedido no lo tiene pendiente»: la caja vuelve con otro nombre y lo que
+        trae ya está hecho en otra operación del pedido. No falta nada: no es un error."""
+        picking = self._preparo(self.tiendas[0], [(self.producto_a, 2), (self.producto_b, 2)])
+        self._preparada([picking], [self._contenedor(
+            'WISCO-RE1', 201, picking.codigo_unico, [(self.producto_a, 2)])])
+        saldo = self.env['stock.picking'].search([('codigo_unico', '=', picking.codigo_unico),
+                                                  ('state', 'not in', ('done', 'cancel'))])
+        self.assertEqual(len(saldo), 1)
+        self._preparada([picking], [self._contenedor(
+            'WISCO-RE1-BIS', 202, picking.codigo_unico, [(self.producto_a, 2)])])
+        self.assertEqual(saldo.wms_estado, 'enviado', "el saldo queda como estaba")
+        self.assertNotEqual(saldo.state, 'done')
+        self.assertFalse(self._logs(saldo, 'error'))
+        self.assertFalse(self._logs(saldo, 'warning'))
+        self.assertIn('reenvío', ' '.join(self._logs(saldo, 'info').mapped('texto')))
+
+    def test_reenvio_parcial_aplica_lo_nuevo_y_no_avisa_lo_hecho(self):
+        picking = self._preparo(self.tiendas[1], [(self.producto_a, 2), (self.producto_b, 2)])
+        self._preparada([picking], [self._contenedor(
+            'WISCO-RP1', 203, picking.codigo_unico, [(self.producto_a, 2)])])
+        saldo = self.env['stock.picking'].search([('codigo_unico', '=', picking.codigo_unico),
+                                                  ('state', 'not in', ('done', 'cancel'))])
+        self._preparada([picking], [self._contenedor(
+            'WISCO-RP2', 204, picking.codigo_unico, [(self.producto_a, 2), (self.producto_b, 2)])])
+        self.assertEqual(saldo.state, 'done')
+        self.assertFalse(self._logs(saldo, 'warning'), "lo ya hecho no es un aviso")
+        self.assertIn('PRD-TMP-A', ' '.join(self._logs(saldo, 'info').mapped('detalle')))
+
+    def test_lo_que_no_esta_hecho_en_ninguna_operacion_sigue_avisando(self):
+        picking = self._preparo(self.tiendas[2], [(self.producto_a, 2), (self.producto_b, 2)])
+        self._preparada([picking], [self._contenedor(
+            'WISCO-AV1', 205, picking.codigo_unico, [(self.producto_a, 2)])])
+        saldo = self.env['stock.picking'].search([('codigo_unico', '=', picking.codigo_unico),
+                                                  ('state', 'not in', ('done', 'cancel'))])
+        # 5 de A: sólo 2 están hechos; no es un reenvío y sigue avisando.
+        self._preparada([picking], [self._contenedor(
+            'WISCO-AV2', 206, picking.codigo_unico, [(self.producto_a, 5), (self.producto_b, 2)])])
+        self.assertIn('no lo tiene pendiente', ' '.join(self._logs(saldo, 'warning').mapped('detalle')))
+
+    def test_despacho_de_lo_preparado_sin_cajas_registradas(self):
+        """33 pedidos «está en estado 'done'»: una tanda se preparó antes del registro de cajas.
+        WIS la despacha con cajas que Odoo no conoce y no queda nada abierto: antes se perdía el
+        despacho y la entrega a la tienda quedaba trabada."""
+        tienda = self.tiendas[3]
+        picking = self._preparo(tienda, [(self.producto_a, 2), (self.producto_b, 2)])
+        entrega = self._entrega(tienda, picking)
+        caja_nueva = self._contenedor('WISCO-NUEVA', 207, picking.codigo_unico, [(self.producto_a, 2)])
+        self._preparada([picking], [caja_nueva])
+        self._preparada([picking], [self._contenedor(
+            'WISCO-VIEJA', 208, picking.codigo_unico, [(self.producto_b, 2)])])
+        hechos = self.env['stock.picking'].search([('codigo_unico', '=', picking.codigo_unico),
+                                                   ('state', '=', 'done')])
+        vieja = hechos.filtered(lambda p: self.producto_b in p.move_ids.product_id)
+        nueva = hechos - vieja
+        # La tanda vieja, como antes de 0.10.0: sin registro de cajas.
+        self.env['wis.preparacion.aplicada'].search([('picking_id', '=', vieja.id)]).unlink()
+
+        self._despacho(picking.codigo_unico, [self._contenedor(
+            'WISCO-DESCONOCIDA', 209, picking.codigo_unico, [(self.producto_b, 2)])])
+        self.assertEqual(vieja.wms_estado, 'despachado')
+        self.assertEqual(nueva.wms_estado, 'preparado', "la tanda registrada viaja con sus cajas")
+        movs = entrega.move_ids.filtered(lambda m: m.product_id == self.producto_b)
+        self.assertEqual(movs.mapped('state'), ['done'], "la entrega a la tienda avanzó")
+
+        # El mismo despacho otra vez: se reconoce como reenvío.
+        self._despacho(picking.codigo_unico, [self._contenedor(
+            'WISCO-DESCONOCIDA', 209, picking.codigo_unico, [(self.producto_b, 2)])])
+        self.assertEqual(nueva.wms_estado, 'preparado')
+
+    def test_despacho_repetido_sin_cajas_registradas_es_un_reenvio(self):
+        """166 pedidos «está en estado 'done'» que ya estaban despachados: no es un error."""
+        tienda = self.tiendas[4]
+        picking = self._preparo(tienda, [(self.producto_a, 2)])
+        caja = self._contenedor('WISCO-DESP', 210, picking.codigo_unico, [(self.producto_a, 2)])
+        self._preparada([picking], [caja])
+        self._despacho(picking.codigo_unico, [caja])
+        self.assertEqual(picking.wms_estado, 'despachado')
+        self._despacho(picking.codigo_unico, [self._contenedor(
+            'WISCO-DESP-OTRA', 211, picking.codigo_unico, [(self.producto_a, 2)])])
+        self.assertEqual(picking.wms_estado, 'despachado')
+        self.assertFalse(self._logs(picking, 'error'))
+        self.assertIn('reenvío', ' '.join(self._logs(picking, 'info').mapped('texto')))
+
+    def test_reprocesar_despachado_con_eremito_emitido_no_lo_reemite(self):
+        """71 operaciones de validación: «despachadas» sin terminar y con el e-Remito emitido."""
+        if 'cfe_emitido' not in self.env['stock.picking']._fields:
+            self.skipTest('sin e-Remito')
+        picking = self._preparo(self.tiendas[0], [(self.producto_a, 2)])
+        picking.with_context(skip_wms_integration=True).write({
+            'wms_estado': 'despachado', 'cfe_emitido': True})
+        Picking = type(self.env['stock.picking'])
+        with patch.object(Picking, 'create_delivery_guide', side_effect=AssertionError('reemitió'),
+                          create=True):
+            picking.action_wis_reprocesar()
+        self.assertEqual(picking.state, 'done')
+        self.assertEqual(picking.wms_estado, 'despachado')
+
+
 @tagged('post_install', '-at_install', 'wis_notificaciones')
 class TestNotificacionesWIS(TransactionCase):
 

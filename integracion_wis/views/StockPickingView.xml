@@ -43,7 +43,7 @@
                     <!-- WIS ya la preparó y no se pudo validar (p. ej. sucursal sin «Es receptor») -->
                     <button name="action_wis_reprocesar" type="object"
                             string="Reprocesar WIS"
-                            invisible="wms_estado != 'preparado' or state in ('done', 'cancel')"
+                            invisible="state in ('done', 'cancel') or not (wms_estado == 'preparado' or (wms_estado == 'despachado' and cfe_emitido))"
                             groups="stock.group_stock_user"/>
                     <!-- Lo despachado por WIS todavía no llegó a la entrega a tienda -->
                     <button name="action_wis_avanzar_cadena" type="object"

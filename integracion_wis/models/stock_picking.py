@@ -1162,7 +1162,11 @@ class StockPicking(models.Model):
 
     def action_wis_reprocesar(self):
         """Valida desde Odoo una operación que WIS ya preparó y que no se pudo validar (por
-        ejemplo, la sucursal con «Es receptor» desmarcado). Usa las cantidades ya cargadas."""
+        ejemplo, la sucursal con «Es receptor» desmarcado). Usa las cantidades ya cargadas.
+
+        También valida las que quedaron «despachadas» sin terminar con el e-Remito ya emitido
+        (versiones anteriores a 0.10.0): el e-Remito no se vuelve a emitir, porque la validación
+        respeta `cfe_emitido` (validación, 18-11-2026: 71 operaciones)."""
         from odoo.http import _request_stack
         from odoo.addons.integracion_wis.controllers.controllers import WebhookWIS
         from .wis_notificacion import RequestCola
@@ -1172,7 +1176,9 @@ class StockPicking(models.Model):
         ctrl._wis_evento_actual = 'confirmacionMercaderiaPreparada'
         _request_stack.push(RequestCola(self.env(su=True)))
         try:
-            for picking in self.filtered(lambda p: p.state not in ('done', 'cancel') and p.wms_estado == 'preparado'):
+            for picking in self.filtered(lambda p: p.state not in ('done', 'cancel') and (
+                    p.wms_estado == 'preparado'
+                    or (p.wms_estado == 'despachado' and getattr(p, 'cfe_emitido', False)))):
                 ctrl._wis_codigo_actual = picking.codigo_unico
                 motivo = ctrl._wis_validar_preparado(picking, picking._wis_es_parcial())
                 Log.create({

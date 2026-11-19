@@ -11,19 +11,23 @@ Pasos, en orden (cada uno se puede saltear con PASOS = {...}):
 1. `preparados`  Operaciones que WIS preparó y Odoo no validó (receptor, línea en 0, asistente
                  de SMS): se validan con lo que tienen cargado. Lo que todavía no se puede
                  validar (por ejemplo, la sucursal sin «Es receptor») queda listado.
-2. `despachos`   Despachos de WIS que Odoo no pudo registrar («No se encontró picking»,
+2. `remitidos`   Operaciones «despachadas» que quedaron sin terminar con el e-Remito ya emitido
+                 (versiones anteriores a 0.10.0): se validan con lo que tienen cargado, SIN
+                 emitir otro e-Remito (la validación respeta `cfe_emitido`). Lo despachado
+                 sigue a la tienda en el paso `cadenas`.
+3. `despachos`   Despachos de WIS que Odoo no pudo registrar («No se encontró picking»,
                  «múltiples pickings», choque de transacciones): se reprocesan desde el log de
                  webhooks con la lógica nueva. Lo ya aplicado no se repite.
-3. `cadenas`     Lo despachado que no llegó a la entrega a tienda/cliente (POLO/OUT unificados,
+4. `cadenas`     Lo despachado que no llegó a la entrega a tienda/cliente (POLO/OUT unificados,
                  OUTCROSS con caja compartida): se avanza sólo lo despachado.
-4. `recepciones` Recepciones canceladas en Odoo que WIS sigue teniendo abiertas: se anulan en WIS.
-5. `duplicados`  SOLO INFORMA las operaciones hechas que duplican una preparación de WIS (e-Remitos
+5. `recepciones` Recepciones canceladas en Odoo que WIS sigue teniendo abiertas: se anulan en WIS.
+6. `duplicados`  SOLO INFORMA las operaciones hechas que duplican una preparación de WIS (e-Remitos
                  duplicados). Revertirlas requiere decisión contable (DGI).
 """
 import json
 
 APLICAR = globals().get('APLICAR', False)
-PASOS = globals().get('PASOS', {'preparados', 'despachos', 'cadenas', 'recepciones', 'duplicados'})
+PASOS = globals().get('PASOS', {'preparados', 'remitidos', 'despachos', 'cadenas', 'recepciones', 'duplicados'})
 Picking = env['stock.picking'].sudo()
 Log = env['wis.webhook.log'].sudo()
 Notif = env['wis.notificacion'].sudo()
@@ -55,6 +59,25 @@ def paso_preparados():
             env.invalidate_all()
             mal.append((p.name, str(e)[:160]))
     RESUMEN['preparados'] = {'validados': ok, 'siguen_pendientes': mal}
+
+
+def paso_remitidos():
+    pend = Picking.search([('wms_estado', '=', 'despachado'), ('state', 'not in', ('done', 'cancel')),
+                           ('cfe_emitido', '=', True), ('codigo_unico', 'like', 'W-%')], order='id')
+    if not APLICAR:
+        RESUMEN['remitidos'] = {'se_validarian': pend.mapped('name')}
+        return
+    ok, mal = [], []
+    for p in pend:
+        try:
+            p.action_wis_reprocesar()
+            ok.append(p.name)
+            _commit()
+        except Exception as e:
+            env.cr.rollback()
+            env.invalidate_all()
+            mal.append((p.name, str(e)[:160]))
+    RESUMEN['remitidos'] = {'validados': ok, 'siguen_pendientes': mal}
 
 
 def paso_despachos():
@@ -167,7 +190,7 @@ def paso_duplicados():
     RESUMEN['duplicados'] = excesos
 
 
-for paso in ('preparados', 'despachos', 'cadenas', 'recepciones', 'duplicados'):
+for paso in ('preparados', 'remitidos', 'despachos', 'cadenas', 'recepciones', 'duplicados'):
     if paso in PASOS:
         globals()['paso_' + paso]()
 print(json.dumps({'aplicar': APLICAR, **RESUMEN}, ensure_ascii=False, indent=1, default=str))
