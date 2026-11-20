@@ -992,6 +992,10 @@ Body: {body_str[:500]}"""
                     # perdía (validación, 18-11-2026: 263 pedidos).
                     receptivo = validos.filtered(
                         lambda p: p.state not in ('done', 'cancel') and p.wms_estado == 'enviado')
+                    # Una caja desconocida en el despacho de un pedido ya completo NO crea una
+                    # operación nueva: es un reenvío (caso C, 166 pedidos en validación). La caja
+                    # nueva de verdad llega antes en la preparación, que crea la operación y la
+                    # registra (`_wis_base_operacion_posterior`).
                     if sin_preparar and receptivo:
                         # WIS despacha cajas que Odoo no tiene preparadas: se aplican primero.
                         self._wis_en_despacho = True
@@ -1140,6 +1144,61 @@ Body: {body_str[:500]}"""
             return None
         errores = despachados.sudo()._wis_avanzar_cadena(origen=origen)
         return ' | '.join(errores) if errores else None
+
+    def _wis_base_operacion_posterior(self, pedido, cajas):
+        """WIS informa cajas nuevas de un pedido que en Odoo ya está completo: todas sus operaciones
+        de WIS están hechas, ya tiene cajas registradas y ninguna de éstas lo está. Devuelve la
+        última operación hecha del pedido, de la que se copia la operación nueva, o None.
+
+        Es un error de procedimiento de WIS: lo que no estaba en el pedido tiene que ir en un
+        pedido nuevo. Pero la mercadería salió en el camión, así que se registra igual (decisión
+        de Forum, 19-11-2026). Validación, 19-11-2026: 155 notificaciones, casi siempre una caja
+        con una unidad de un producto que ya se había entregado completo.
+
+        Los pedidos sin cajas registradas (preparados antes de 0.10.0) no entran: ahí una caja
+        sin registrar puede ser un reenvío de lo ya hecho, y lo resuelve `_wis_hecho_en_el_pedido`.
+        """
+        if not cajas:
+            return None
+        if not request.env['wis.preparacion.aplicada'].sudo().search_count([('pedido', '=', pedido)]):
+            return None
+        ops = request.env['stock.picking'].sudo().search([
+            ('codigo_unico', '=', pedido), ('state', '!=', 'cancel'),
+            ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))])
+        if not ops or ops.filtered(lambda p: p.state != 'done' or p.wms_estado == 'anulado'):
+            return None
+        hechas = ops.filtered(lambda p: p.picking_type_id.metodo_preparacion_wis)
+        return hechas.sorted('id')[-1:] or None
+
+    def _wis_anotar_operacion_posterior(self, pedido, original, nueva, cajas, pedido_data):
+        """Deja a la vista, en el log y en las operaciones, que la operación nueva existe por un
+        error de procedimiento de WIS."""
+        entregas = nueva._wis_pasos_siguientes()
+        texto = _(
+            "WIS informó la caja %(cajas)s del pedido %(pedido)s cuando ese pedido ya estaba "
+            "completo en Odoo (%(original)s). Es un error de procedimiento de WIS: la mercadería "
+            "que no estaba en el pedido tiene que ir en un pedido nuevo, no agregada a uno ya "
+            "cerrado. Como salió en el camión, se registró igual en la operación %(nueva)s, con "
+            "entrega aparte %(entregas)s.",
+            cajas=', '.join(filter(None, (c.get('codigoBarras') or self._wis_clave_contenedor(c)
+                                          for c in cajas))) or '—',
+            pedido=pedido, original=original.name, nueva=nueva.name,
+            entregas=', '.join(entregas.mapped('name')) or '—')
+        self._ilog({
+            'fecha': fields.Datetime.now(),
+            'nivel': 'warning',
+            'modelo': 'stock.picking',
+            'texto': (f"confirmacionMercaderiaPreparada: caja nueva de {pedido}, que ya estaba "
+                      f"completo. Error de procedimiento de WIS; se creó {nueva.name}."),
+            'picking_id': nueva.id,
+            'resultado': 'exito',
+            'detalle': texto,
+            'payload_webhook': json.dumps({'pedido': pedido_data, 'contenedores': cajas},
+                                          ensure_ascii=False, indent=2),
+        })
+        # `_message_log`: queda en el historial sin notificar a nadie.
+        for op in (original | nueva | entregas):
+            op._message_log(body=texto)
 
     def _wis_hecho_en_el_pedido(self, picking):
         """Cantidad hecha por producto (código único) en las OTRAS operaciones integradas del
@@ -1537,14 +1596,20 @@ Body: {body_str[:500]}"""
                 })
                 continue
 
-            if picking.state in ('done', 'cancel'):
+            # Caja nueva de un pedido que ya estaba completo: va en una operación nueva del pedido,
+            # con su entrega aparte (ver `_wis_base_operacion_posterior`).
+            posterior_de = None
+            if picking.state in ('done', 'cancel') or picking.wms_estado != 'enviado':
+                posterior_de = self._wis_base_operacion_posterior(nombre_pedido, cajas_nuevas)
+
+            if picking.state in ('done', 'cancel') and not posterior_de:
                 errores.append(
                     f"Picking '{picking.name}' está en estado '{picking.state}', "
                     "no puede recibir actualizaciones."
                 )
                 continue
 
-            if picking.wms_estado in ('preparado', 'despachado', 'anulado'):
+            if picking.wms_estado in ('preparado', 'despachado', 'anulado') and not posterior_de:
                 errores.append(
                     f"Picking '{picking.name}' ya tiene wms_estado "
                     f"'{picking.wms_estado}', se omite."
@@ -1603,6 +1668,10 @@ Body: {body_str[:500]}"""
                 reenvio = None
                 try:
                     with request.env.cr.savepoint():
+                        if posterior_de:
+                            # Dentro del savepoint: si no se aplica nada, no queda la operación.
+                            picking = posterior_de._wis_operacion_posterior().with_context(
+                                wis_posterior_de=posterior_de.id)
                         # Spec 3.3 paso 2: actualizar estado y fecha.
                         picking.with_context(skip_wms_integration=True).write({
                             'wms_estado':            'preparado',
@@ -1648,6 +1717,9 @@ Body: {body_str[:500]}"""
                     reenvio = str(e)
                 except Exception as e:
                     error_preparacion = str(e)
+                if posterior_de and (reenvio or error_preparacion):
+                    # La operación nueva se deshizo con el savepoint.
+                    picking = posterior_de
 
                 if reenvio:
                     # Todo lo de la caja ya estaba hecho en otra operación del pedido: el saldo
@@ -1785,6 +1857,10 @@ Body: {body_str[:500]}"""
                             'contenedores': contenedores_prep,
                         }, ensure_ascii=False, indent=2),
                     })
+
+                if posterior_de:
+                    self._wis_anotar_operacion_posterior(
+                        nombre_pedido, posterior_de, picking, contenedores_prep, pedido_data)
 
                 self._ilog({
                     'fecha': fields.Datetime.now(),

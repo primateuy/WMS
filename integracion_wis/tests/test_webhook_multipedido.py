@@ -924,6 +924,84 @@ class TestWebhookMultipedido(WisMultipedidoCase):
         self.assertEqual(picking.wms_estado, 'despachado')
 
 
+    # ------------------------------------------------------------------
+    # 0.14.1: caja nueva de un pedido que ya estaba completo (validación, 19-11-2026: 155)
+    # ------------------------------------------------------------------
+    def _pedido_completo(self, tienda, barras, numero):
+        """Pedido de 2 de A preparado, despachado y entregado a la tienda."""
+        picking = self._preparo(tienda, [(self.producto_a, 2)])
+        entrega = self._entrega(tienda, picking)
+        caja = self._contenedor(barras, numero, picking.codigo_unico, [(self.producto_a, 2)])
+        self._preparada([picking], [caja])
+        self._despacho(picking.codigo_unico, [caja])
+        self.assertEqual(entrega.state, 'done')
+        return picking, entrega
+
+    def _operaciones(self, picking):
+        return self.env['stock.picking'].search(
+            [('codigo_unico', '=', picking.codigo_unico), ('wms_estado', '!=', 'no_integrado')])
+
+    def test_caja_nueva_de_pedido_completo_va_en_operacion_y_entrega_aparte(self):
+        tienda = self.tiendas[0]
+        picking, entrega = self._pedido_completo(tienda, 'WISCO-PC1', 301)
+        caja = self._contenedor('WISCO-PC1-MAS', 302, picking.codigo_unico,
+                                [(self.producto_a, 1), (self.producto_b, 1)])
+        self._preparada([picking], [caja])
+
+        nueva = self._operaciones(picking) - picking
+        self.assertEqual(len(nueva), 1, "una operación nueva del pedido")
+        self.assertEqual(nueva.state, 'done')
+        self.assertEqual(nueva.wms_estado, 'preparado')
+        self.assertEqual({m.product_id: m.quantity for m in nueva.move_ids},
+                         {self.producto_a: 1, self.producto_b: 1})
+        self.assertEqual(picking.wms_estado, 'despachado', "la original no se toca")
+        self.assertEqual(sum(entrega.move_ids.mapped('quantity')), 2, "la entrega original no se toca")
+
+        aparte = nueva._wis_pasos_siguientes()
+        self.assertEqual(len(aparte), 1, "una sola entrega aparte para toda la caja")
+        self.assertNotEqual(aparte, entrega)
+        self.assertEqual(aparte.location_dest_id, entrega.location_dest_id)
+        self.assertEqual(aparte.move_ids.move_orig_ids, nueva.move_ids)
+
+        aviso = self._logs(nueva, 'warning').filtered(lambda l: 'procedimiento' in (l.detalle or ''))
+        self.assertTrue(aviso, "queda anotado como error de procedimiento de WIS")
+        self.assertIn('WISCO-PC1-MAS', aviso.detalle)
+        for op in (picking, nueva, aparte):
+            self.assertTrue(any('procedimiento de WIS' in (m.body or '') for m in op.message_ids),
+                            f"queda en el historial de {op.name}")
+
+        self._despacho(picking.codigo_unico, [caja])
+        self.assertEqual(nueva.wms_estado, 'despachado')
+        self.assertEqual(aparte.state, 'done', "la tienda la recibe aparte")
+        self.assertEqual(self._ubicaciones_con_stock(
+            self.env['stock.quant.package'].search([('name', '=', 'WISCO-PC1-MAS')])), tienda['transito'])
+
+    def test_reenvio_de_la_caja_nueva_no_crea_otra_operacion(self):
+        picking, _entrega = self._pedido_completo(self.tiendas[1], 'WISCO-PC2', 303)
+        caja = self._contenedor('WISCO-PC2-MAS', 304, picking.codigo_unico, [(self.producto_a, 1)])
+        self._preparada([picking], [caja])
+        self._preparada([picking], [caja])
+        self.assertEqual(len(self._operaciones(picking) - picking), 1)
+
+    def test_caja_nueva_solo_con_producto_inexistente_no_deja_operacion(self):
+        picking, _entrega = self._pedido_completo(self.tiendas[2], 'WISCO-PC3', 305)
+        caja = self._contenedor('WISCO-PC3-MAS', 306, picking.codigo_unico, [])
+        caja['detalles'] = [{'pedido': picking.codigo_unico, 'producto': 'NO-EXISTE-PC3',
+                             'cantidadPreparada': 1}]
+        with self.assertRaisesRegex(ValueError, 'NO-EXISTE-PC3'):
+            self._preparada([picking], [caja])
+        self.assertEqual(self._operaciones(picking), picking, "no queda una operación vacía")
+
+    def test_pedido_completo_sin_cajas_registradas_no_crea_operacion(self):
+        """Antes de 0.10.0 no hay registro de cajas: una caja desconocida puede ser un reenvío."""
+        picking, _entrega = self._pedido_completo(self.tiendas[3], 'WISCO-PC4', 307)
+        self._sin_registro_de_cajas(picking)
+        with self.assertRaises(ValueError):
+            self._preparada([picking], [self._contenedor(
+                'WISCO-PC4-MAS', 308, picking.codigo_unico, [(self.producto_a, 1)])])
+        self.assertEqual(self._operaciones(picking), picking)
+
+
 @tagged('post_install', '-at_install', 'wis_notificaciones')
 class TestNotificacionesWIS(TransactionCase):
 

@@ -1027,6 +1027,11 @@ class StockPicking(models.Model):
         self.ensure_one()
         Move = self.env['stock.move'].sudo().with_context(skip_wms_integration=True)
         referencia = self.move_ids.filtered(lambda m: m.state != 'cancel').sorted('id')[:1]
+        if not referencia and self.env.context.get('wis_posterior_de'):
+            # Operación nueva de un pedido que ya estaba completo: se sigue el recorrido de la
+            # operación original del pedido.
+            original = self.browse(self.env.context['wis_posterior_de'])
+            referencia = original.move_ids.filtered(lambda m: m.state == 'done').sorted('id')[:1]
 
         def crear(picking, origen=None, desde=None):
             vals = {
@@ -1048,12 +1053,61 @@ class StockPicking(models.Model):
         nuevo = crear(self)
         actual, ref = nuevo, referencia
         while ref:
-            siguiente = ref.move_dest_ids.filtered(lambda m: m.state not in ('done', 'cancel'))[:1]
-            if not siguiente or not siguiente.picking_id:
-                break
-            actual = crear(siguiente.picking_id, origen=actual, desde=siguiente)
+            destinos = ref.move_dest_ids.filtered(lambda m: m.state != 'cancel')
+            siguiente = destinos.filtered(lambda m: m.state != 'done')[:1]
+            if siguiente and siguiente.picking_id:
+                destino = siguiente.picking_id
+            else:
+                # El paso siguiente ya está validado (la tienda ya recibió el pedido): la
+                # mercadería va en una entrega aparte, copia de ésa.
+                siguiente = destinos[:1]
+                if not siguiente or not siguiente.picking_id:
+                    break
+                destino = siguiente.picking_id._wis_entrega_aparte()
+            actual = crear(destino, origen=actual, desde=siguiente)
             ref = siguiente
         return nuevo
+
+    # Campos del despacho y la preparación que NO pasan a una operación nueva del mismo pedido.
+    _WIS_NO_COPIAR = (
+        'wms_origen', 'wms_fecha_confirmacion', 'wms_fecha_preparacion', 'wms_observaciones_preparacion',
+        'wms_fecha_despacho', 'wms_transportadora', 'wms_descripcion_camion', 'wms_nro_remito',
+        'wms_nro_seguimiento', 'wms_cantidad_bultos', 'wms_peso_total', 'wms_fecha_anulacion',
+        'wms_motivo_anulacion', 'wms_nro_preparacion', 'wms_nro_caja',
+    )
+
+    def _wis_copia_vacia(self, vals=None):
+        """Copia de esta operación sin líneas ni datos de WIS. Nunca se manda a WIS: lleva el
+        código y el estado WIS que se le pasen (o los de ésta)."""
+        self.ensure_one()
+        defaults = {'move_ids': [], 'move_line_ids': [], 'backorder_id': False, 'origin': self.origin}
+        defaults.update({f: False for f in self._WIS_NO_COPIAR if f in self._fields})
+        copia = self.with_context(skip_wms_integration=True).copy(defaults)
+        copia.with_context(skip_wms_integration=True).write(dict({
+            'codigo_unico': self.codigo_unico, 'wms_estado': self.wms_estado}, **(vals or {})))
+        return copia
+
+    def _wis_operacion_posterior(self):
+        """Operación nueva del pedido de `self` (una operación de WIS ya hecha) para una caja que
+        WIS informó cuando el pedido ya estaba completo. Queda «enviada»: lista para recibir la
+        preparación, como un saldo."""
+        return self._wis_copia_vacia({'wms_estado': 'enviado'})
+
+    def _wis_entrega_aparte(self):
+        """Entrega nueva, copia de `self` (ya validada), para la mercadería de una operación
+        posterior del pedido. Los demás productos de la misma caja llegan a ella por el recorrido
+        del primero (ver `_wis_agregar_excedente`)."""
+        return self._wis_copia_vacia()
+
+    def _wis_pasos_siguientes(self):
+        """Operaciones a las que siguen los movimientos de `self`, en todos los pasos."""
+        pasos = self.browse()
+        moves = self.move_ids.move_dest_ids
+        while moves:
+            nuevos = moves.picking_id - pasos
+            pasos |= nuevos
+            moves = moves.move_dest_ids.filtered(lambda m: m.picking_id not in pasos)
+        return pasos
 
     def _wis_es_parcial(self):
         self.ensure_one()
