@@ -14,6 +14,7 @@ crossdock juntos, cada uno con SU contenedor. Odoo no separaba los contenedores 
 
 Los handlers se llaman directo (sin HTTP): `request` se reemplaza por el entorno del test.
 """
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1000,6 +1001,79 @@ class TestWebhookMultipedido(WisMultipedidoCase):
             self._preparada([picking], [self._contenedor(
                 'WISCO-PC4-MAS', 308, picking.codigo_unico, [(self.producto_a, 1)])])
         self.assertEqual(self._operaciones(picking), picking)
+
+
+    def _preparacion_sin_aplicar(self, caja):
+        """Una preparación que WIS mandó y Odoo no llegó a aplicar (quedó con errores)."""
+        def pascal(obj):
+            if isinstance(obj, dict):
+                return {k[:1].upper() + k[1:]: pascal(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [pascal(v) for v in obj]
+            return obj
+        self.env['wis.notificacion'].sudo().create({
+            'tipo': 'confirmacionMercaderiaPreparada', 'estado': 'con_errores',
+            'payload': json.dumps({'ConfirmacionMercaderiaPreparada': {
+                'Pedidos': [], 'Contenedores': [pascal(caja)]}}),
+        })
+
+    def test_despacho_de_caja_preparada_sin_aplicar_no_es_reenvio(self):
+        """Validación, 19-11-2026: 10 pedidos. La preparación de la caja nueva no se aplicó y el
+        despacho la tomó como reenvío: la mercadería quedó sin registrar."""
+        tienda = self.tiendas[4]
+        picking, entrega = self._pedido_completo(tienda, 'WISCO-PC5', 309)
+        caja = self._contenedor('WISCO-PC5-MAS', 310, picking.codigo_unico, [(self.producto_b, 1)])
+        self._preparacion_sin_aplicar(caja)
+        self._despacho(picking.codigo_unico, [caja])
+        nueva = self._operaciones(picking) - picking
+        self.assertEqual(len(nueva), 1, "se registró en una operación nueva")
+        self.assertEqual(nueva.wms_estado, 'despachado')
+        self.assertEqual(nueva.move_ids.product_id, self.producto_b)
+        self.assertEqual(nueva._wis_pasos_siguientes().state, 'done', "la tienda la recibe aparte")
+
+    def test_despacho_de_caja_informada_y_ya_cubierta_es_reenvio(self):
+        """La misma mercadería en una caja con otro número: lo hecho ya la cubre."""
+        picking, _entrega = self._pedido_completo(self.tiendas[0], 'WISCO-PC6', 311)
+        self._preparacion_sin_aplicar(self._contenedor(
+            'WISCO-PC6', 311, picking.codigo_unico, [(self.producto_a, 2)]))
+        caja = self._contenedor('WISCO-PC6-BIS', 312, picking.codigo_unico, [(self.producto_a, 1)])
+        self._preparacion_sin_aplicar(caja)
+        # Informado: 2 + 1 = 3 de A; hecho 2. No lo cubre: es mercadería nueva.
+        self.assertTrue(self.controller._wis_cajas_preparadas_sin_aplicar(picking.codigo_unico, [caja]))
+        picking2, _e2 = self._pedido_completo(self.tiendas[1], 'WISCO-PC7', 313)
+        reenvio = self._contenedor('WISCO-PC7-BIS', 314, picking2.codigo_unico, [(self.producto_a, 2)])
+        self._preparacion_sin_aplicar(reenvio)
+        # Informado sólo la caja reenviada (la original entró por el despacho): 2; hecho 2.
+        self._despacho(picking2.codigo_unico, [reenvio])
+        self.assertEqual(self._operaciones(picking2), picking2, "es un reenvío: no se crea nada")
+
+
+    def test_caja_nueva_mezclada_aplica_solo_lo_que_falta(self):
+        """Validación, 19-11-2026: cajas nuevas que traen también productos ya hechos con otra
+        caja. Va a la operación nueva sólo lo que falta; lo demás es un reenvío."""
+        tienda = self.tiendas[2]
+        picking, _entrega = self._pedido_completo(tienda, 'WISCO-PC8', 315)
+        self._preparacion_sin_aplicar(self._contenedor(
+            'WISCO-PC8', 315, picking.codigo_unico, [(self.producto_a, 2)]))
+        caja = self._contenedor('WISCO-PC8-MIX', 316, picking.codigo_unico,
+                                [(self.producto_a, 2), (self.producto_b, 1)])
+        self._preparacion_sin_aplicar(caja)
+        # Informado: A 2 + 2 = 4 y B 1; hecho A 2 -> faltan 2 de A y 1 de B: va la caja entera.
+        self._preparada([picking], [caja])
+        nueva = self._operaciones(picking) - picking
+        self.assertEqual({m.product_id: m.quantity for m in nueva.move_ids},
+                         {self.producto_a: 2, self.producto_b: 1})
+
+        picking2, _e2 = self._pedido_completo(self.tiendas[3], 'WISCO-PC9', 317)
+        # La caja original de este pedido entró por el despacho: no está en las preparaciones.
+        mix = self._contenedor('WISCO-PC9-MIX', 318, picking2.codigo_unico,
+                               [(self.producto_a, 2), (self.producto_b, 1)])
+        self._preparacion_sin_aplicar(mix)
+        # Informado: A 2 (sólo esta caja), hecho 2 -> A ya está; falta B 1.
+        self._preparada([picking2], [mix])
+        nueva2 = self._operaciones(picking2) - picking2
+        self.assertEqual({m.product_id: m.quantity for m in nueva2.move_ids}, {self.producto_b: 1})
+        self.assertIn('reenvío', ' '.join(self._logs(nueva2, 'info').mapped('detalle')))
 
 
 @tagged('post_install', '-at_install', 'wis_notificaciones')

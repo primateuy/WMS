@@ -992,17 +992,20 @@ Body: {body_str[:500]}"""
                     # perdía (validación, 18-11-2026: 263 pedidos).
                     receptivo = validos.filtered(
                         lambda p: p.state not in ('done', 'cancel') and p.wms_estado == 'enviado')
-                    # Una caja desconocida en el despacho de un pedido ya completo NO crea una
-                    # operación nueva: es un reenvío (caso C, 166 pedidos en validación). La caja
-                    # nueva de verdad llega antes en la preparación, que crea la operación y la
-                    # registra (`_wis_base_operacion_posterior`).
-                    if sin_preparar and receptivo:
+                    # Si no queda nada abierto, una caja desconocida es un reenvío (caso C), salvo
+                    # que WIS la haya informado en una preparación que Odoo no llegó a aplicar:
+                    # ésa es mercadería nueva y va en una operación nueva del pedido
+                    # (`_wis_cajas_preparadas_sin_aplicar`).
+                    a_preparar = sin_preparar if receptivo else (
+                        self._wis_cajas_preparadas_sin_aplicar(nombre_pedido, sin_preparar)
+                        if sin_preparar else [])
+                    if a_preparar:
                         # WIS despacha cajas que Odoo no tiene preparadas: se aplican primero.
                         self._wis_en_despacho = True
                         try:
                             self._handle_mercaderia_preparada({
                                 'pedidos': [{'pedido': nombre_pedido}],
-                                'contenedores': sin_preparar,
+                                'contenedores': a_preparar,
                                 'fechaPreparacion': fecha_cierre_raw,
                             })
                         finally:
@@ -1145,6 +1148,73 @@ Body: {body_str[:500]}"""
         errores = despachados.sudo()._wis_avanzar_cadena(origen=origen)
         return ' | '.join(errores) if errores else None
 
+    def _wis_informado_en_preparaciones(self, pedido):
+        """Lo que WIS informó de `pedido` en sus preparaciones (las notificaciones guardadas),
+        por caja: {caja: {producto: cantidad}}. Cada caja cuenta una vez."""
+        informado = {}
+        Notif = request.env['wis.notificacion'].sudo()
+        for notif in Notif.search([('tipo', '=', 'confirmacionMercaderiaPreparada'),
+                                   ('payload', 'ilike', f'"{pedido}"')], order='id'):
+            try:
+                datos = self._normalize_keys(json.loads(notif.payload or '{}'))
+            except ValueError:
+                continue
+            datos = datos.get('confirmacionMercaderiaPreparada') or {}
+            for caja in self._wis_contenedores_del_pedido(datos.get('contenedores'), pedido):
+                clave = self._wis_clave_contenedor(caja)
+                if not clave or clave in informado:
+                    continue
+                informado[clave] = {}
+                for det in caja.get('detalles') or []:
+                    cod, cant = det.get('producto'), det.get('cantidadPreparada') or 0
+                    if cod and cant > 0:
+                        informado[clave][cod] = informado[clave].get(cod, 0) + cant
+        return informado
+
+    def _wis_faltante_del_pedido(self, pedido, cajas):
+        """Por producto, lo que WIS informó en las preparaciones de `pedido` y Odoo todavía no
+        tiene hecho: {producto: cantidad > 0}. None si ninguna de las `cajas` está en una
+        preparación guardada (no hay con qué comparar).
+
+        Es la medida de lo que falta registrar de un pedido ya completo: una caja nueva puede
+        traer, junto con mercadería nueva, productos que ya se hicieron con otra caja (validación,
+        19-11-2026: cajas de 13 unidades de las que faltaban 3)."""
+        informado = self._wis_informado_en_preparaciones(pedido)
+        if not any(self._wis_clave_contenedor(c) in informado for c in cajas):
+            return None
+        total = {}
+        for contenido in informado.values():
+            for cod, cant in contenido.items():
+                total[cod] = total.get(cod, 0) + cant
+        ops = request.env['stock.picking'].sudo().search([
+            ('codigo_unico', '=', pedido), ('state', '=', 'done'),
+            ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))])
+        for move in ops.move_ids.filtered(lambda m: m.state == 'done'):
+            cod = move.product_id.codigo_unico
+            if cod in total:
+                total[cod] -= move.quantity
+        return {cod: cant for cod, cant in total.items() if cant > 0}
+
+    def _wis_cajas_preparadas_sin_aplicar(self, pedido, cajas):
+        """De las `cajas` de un despacho que Odoo no tiene registradas, las que traen mercadería
+        nueva y no son sólo un reenvío: WIS las informó en una preparación y traen algún producto
+        que falta registrar (`_wis_faltante_del_pedido`). Sólo para un pedido ya completo y con
+        cajas registradas (`_wis_base_operacion_posterior`); si no, devuelve [].
+
+        Sin esto el despacho tomaba como reenvío cualquier caja desconocida de un pedido ya
+        despachado, y si llegaba antes de que se aplicara la preparación de esa caja, la
+        mercadería quedaba sin registrar (validación, 19-11-2026: 10 pedidos, 25 unidades). Lo
+        que ya está cubierto es un reenvío de verdad (362 líneas, en la misma corrida). La
+        preparación aplica después sólo lo que falta.
+        """
+        if not self._wis_base_operacion_posterior(pedido, cajas):
+            return []
+        informado = self._wis_informado_en_preparaciones(pedido)
+        faltante = self._wis_faltante_del_pedido(pedido, cajas) or {}
+        return [c for c in cajas
+                if self._wis_clave_contenedor(c) in informado
+                and any(faltante.get(d.get('producto'), 0) > 0 for d in c.get('detalles') or [])]
+
     def _wis_base_operacion_posterior(self, pedido, cajas):
         """WIS informa cajas nuevas de un pedido que en Odoo ya está completo: todas sus operaciones
         de WIS están hechas, ya tiene cajas registradas y ninguna de éstas lo está. Devuelve la
@@ -1279,6 +1349,10 @@ Body: {body_str[:500]}"""
         avisos, reenvios, errores_linea = [], [], []
         excedentes = []   # (producto, cantidad, cod)
         hecho_por_cod = self._wis_hecho_en_el_pedido(picking)
+        # Operación nueva de un pedido ya completo: va sólo lo que falta registrar de lo que WIS
+        # informó en sus preparaciones; lo demás de la caja ya estaba hecho (reenvío).
+        faltante = (self._wis_faltante_del_pedido(picking.codigo_unico, contenedores)
+                    if picking.env.context.get('wis_posterior_de') else None)
         Producto = request.env['product.product'].sudo().with_context(active_test=False)
         for cod in list(preparado_por_cod):
             cant_total = preparado_por_cod[cod]
@@ -1288,6 +1362,8 @@ Body: {body_str[:500]}"""
             if sobra <= 0:
                 continue
             ya_hecho = min(sobra, hecho_por_cod.get(cod, 0))
+            if faltante is not None:
+                ya_hecho = max(ya_hecho, sobra - faltante.get(cod, 0))
             if ya_hecho:
                 reenvios.append(_(
                     "WIS informó %(cant)s de %(cod)s y %(ya)s ya se había hecho en otra operación del "
