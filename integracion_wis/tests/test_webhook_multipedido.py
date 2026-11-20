@@ -1076,6 +1076,91 @@ class TestWebhookMultipedido(WisMultipedidoCase):
         self.assertIn('reenvío', ' '.join(self._logs(nueva2, 'info').mapped('detalle')))
 
 
+    # ------------------------------------------------------------------
+    # 0.14.3: validación, 20-11-2026. Las 25 unidades de los 10 pedidos tenían lugar en una
+    # operación abierta del pedido; no entraban por saldos repetidos, operaciones preparadas que
+    # nunca se validaron y cajas cargadas a medias.
+    # ------------------------------------------------------------------
+    def _hecho(self, picking, producto):
+        ops = self._operaciones(picking).filtered(lambda p: p.state == 'done')
+        return sum(ops.move_ids.filtered(lambda m: m.product_id == producto and m.state == 'done')
+                   .mapped('quantity'))
+
+    def _abiertas(self, picking):
+        return self._operaciones(picking).filtered(lambda p: p.state not in ('done', 'cancel'))
+
+    def test_dos_saldos_la_caja_entra_en_el_que_tiene_el_producto(self):
+        """W-P-56592: el producto estaba pendiente en el segundo saldo (POLO/PICK/25159) y la caja
+        iba al primero, donde no estaba: se tomaba por reenvío."""
+        tienda = self.tiendas[0]
+        picking = self._preparo(tienda, [(self.producto_b, 2)])
+        otro = self._picking(self.tipo, self.origen, tienda['salida'], tienda['grupo'],
+                             [(self.producto_a, 1)])
+        otro.with_context(skip_wms_integration=True).write({
+            'codigo_unico': picking.codigo_unico, 'wms_estado': 'enviado'})
+        self._preparada([picking], [self._contenedor(
+            'WISCO-DS1', 401, picking.codigo_unico, [(self.producto_a, 1)])])
+        self.assertEqual(self._hecho(picking, self.producto_a), 1, "la caja entró")
+        abiertas = self._abiertas(picking)
+        self.assertEqual(len(abiertas), 1, "queda un solo saldo")
+        self.assertEqual({m.product_id: m.product_uom_qty for m in abiertas.move_ids
+                          if m.state not in ('done', 'cancel')}, {self.producto_b: 2})
+        self.assertFalse(self._logs(picking.codigo_unico, 'error'))
+
+    def test_operacion_preparada_sin_validar_se_valida_y_la_caja_completa_el_saldo(self):
+        """W-P-41686: POLO/PICK/01561 quedó preparada con 1 de 2 (e-Remito rechazado en octubre) y
+        nadie la volvió a validar; la caja con la segunda unidad no tenía saldo donde entrar."""
+        picking = self._preparo(self.tiendas[1], [(self.producto_a, 2)])
+        with patch.object(type(self.controller), '_wis_validar_preparado',
+                          return_value='e-Remito rechazado (test)'), \
+                self.assertRaisesRegex(ValueError, 'e-Remito rechazado'):
+            self._preparada([picking], [self._contenedor(
+                'WISCO-TR1', 402, picking.codigo_unico, [(self.producto_a, 1)])])
+        self._sin_registro_de_cajas(picking)
+        self.assertEqual((picking.state, picking.wms_estado), ('assigned', 'preparado'))
+
+        self._preparada([picking], [self._contenedor(
+            'WISCO-TR2', 403, picking.codigo_unico, [(self.producto_a, 1)])])
+        self.assertEqual(picking.state, 'done', "la trabada se validó con lo que tenía")
+        self.assertEqual(self._hecho(picking, self.producto_a), 2, "y la caja nueva completó el saldo")
+        self.assertFalse(self._abiertas(picking))
+
+    def _guardar_preparacion(self, cajas):
+        def pascal(obj):
+            if isinstance(obj, dict):
+                return {k[:1].upper() + k[1:]: pascal(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [pascal(v) for v in obj]
+            return obj
+        self.env['wis.notificacion'].sudo().create({
+            'tipo': 'confirmacionMercaderiaPreparada', 'estado': 'hecho',
+            'payload': json.dumps({'ConfirmacionMercaderiaPreparada': {
+                'Pedidos': [], 'Contenedores': [pascal(c) for c in cajas]}}),
+        })
+
+    def test_caja_cargada_a_medias_aplica_solo_lo_que_falta(self):
+        """W-P-55947: la caja 40214816 se cargó con 1 de sus 8 productos. Al volver, lo que ya estaba
+        hecho no puede entrar otra vez como excedente; lo que faltaba, sí."""
+        picking = self._preparo(self.tiendas[2], [(self.producto_a, 2), (self.producto_b, 2)])
+        codigo = picking.codigo_unico
+        caja_x = self._contenedor('WISCO-MED-X', 404, codigo, [(self.producto_a, 2), (self.producto_b, 1)])
+        caja_y = self._contenedor('WISCO-MED-Y', 405, codigo, [(self.producto_b, 1)])
+        self._guardar_preparacion([caja_x, caja_y])
+        # Se cargó X sólo con A (como si B se hubiera perdido) e Y con su B.
+        self._preparada([picking], [
+            self._contenedor('WISCO-MED-X', 404, codigo, [(self.producto_a, 2)]), caja_y])
+        self.env['wis.preparacion.aplicada'].search(
+            [('pedido', '=', codigo), ('contenedor', '=', '404')]).unlink()
+        self.assertEqual((self._hecho(picking, self.producto_a), self._hecho(picking, self.producto_b)), (2, 1))
+
+        self._preparada([picking], [caja_x])
+        self.assertEqual(self._hecho(picking, self.producto_a), 2, "A ya estaba: no entra de nuevo")
+        self.assertEqual(self._hecho(picking, self.producto_b), 2, "B faltaba: entra")
+        logs = self.env['wms.integracion.log'].search([
+            ('picking_id', 'in', self._operaciones(picking).ids), ('nivel', '=', 'info')])
+        self.assertIn('ya cargada', ' '.join(filter(None, logs.mapped('detalle'))))
+
+
 @tagged('post_install', '-at_install', 'wis_notificaciones')
 class TestNotificacionesWIS(TransactionCase):
 

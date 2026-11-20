@@ -895,6 +895,140 @@ Body: {body_str[:500]}"""
         sobrantes.with_context(**sin_wis).unlink()
         return principal
 
+    def _wis_unificar_saldos_del_pedido(self, pedido):
+        """Deja UN solo saldo pendiente («enviado») por pedido, aunque vengan de operaciones
+        distintas.
+
+        `_wis_unificar_saldos` junta los saldos de UNA operación. Cuando se valida una operación
+        vieja del pedido, su saldo queda al lado del que ya existía, y la preparación siguiente
+        toma el primero por id: si el producto estaba pendiente en el otro, lo daba por reenvío.
+        Validación, 20-11-2026: W-P-55947, 55982, 55989 y 56592, cajas que no entraron porque
+        su producto estaba en el segundo saldo (POLO/PICK/25153, 25146, 25160, 25159).
+
+        Se juntan en el más viejo sólo los del mismo tipo de operación y las mismas ubicaciones.
+        """
+        Picking = request.env['stock.picking'].sudo()
+        saldos = Picking.search([
+            ('codigo_unico', '=', pedido),
+            ('state', 'not in', ('done', 'cancel')),
+            ('wms_estado', '=', 'enviado'),
+            ('picking_type_id.metodo_preparacion_wis', '=', True),
+        ], order='id')
+        grupos = {}
+        for saldo in saldos:
+            clave = (saldo.picking_type_id.id, saldo.location_id.id, saldo.location_dest_id.id)
+            grupos.setdefault(clave, Picking)
+            grupos[clave] |= saldo
+        sin_wis = {'skip_wms_integration': True}
+        for grupo in grupos.values():
+            if len(grupo) < 2:
+                continue
+            principal, sobrantes = grupo[0], grupo[1:]
+            sobrantes.move_ids.with_context(**sin_wis).write({'picking_id': principal.id})
+            sobrantes.move_line_ids.with_context(**sin_wis).write({'picking_id': principal.id})
+            nombres = ', '.join(sobrantes.mapped('name'))
+            sobrantes.with_context(**sin_wis).unlink()
+            self._ilog({
+                'fecha': fields.Datetime.now(), 'nivel': 'info', 'modelo': 'stock.picking',
+                'texto': (f"{pedido}: los saldos pendientes {nombres} se juntaron en "
+                          f"{principal.name}; queda uno solo por pedido."),
+                'picking_id': principal.id, 'resultado': 'exito',
+            })
+
+    def _wis_destrabar_pedido(self, pedido):
+        """Valida las operaciones del pedido que WIS ya preparó (o despachó) y quedaron sin validar,
+        y junta sus saldos. Devuelve la lista de motivos de las que siguen sin validarse.
+
+        Son operaciones con las cantidades de WIS cargadas que no pasaron a «Hecho» por un error
+        de ese momento (e-Remito rechazado, un deadlock) y nadie volvió a intentar: no tenían
+        cajas registradas, así que ningún reproceso las encontraba. Mientras siguen abiertas, la
+        caja que completa el pedido no tiene dónde entrar —no hay saldo «enviado»— y se tomaba
+        por reenvío. Validación, 20-11-2026: 7 pedidos (W-P-41686, 41773, 41776, 41921, 49594,
+        50318, 56226) con operaciones así desde octubre.
+
+        Validar emite el e-Remito con la fecha del día. Si la operación ya estaba despachada en
+        WIS, además avanza la entrega a la tienda.
+        """
+        Picking = request.env['stock.picking'].sudo()
+        trabadas = Picking.search([
+            ('codigo_unico', '=', pedido),
+            ('state', 'not in', ('done', 'cancel', 'draft')),
+            ('wms_estado', 'in', ('preparado', 'despachado')),
+            ('picking_type_id.metodo_preparacion_wis', '=', True),
+        ], order='id').filtered(lambda p: any(ml.quantity > 0 for ml in p.move_line_ids))
+        motivos = []
+        for op in trabadas:
+            motivo = self._wis_validar_preparado(op, op._wis_es_parcial())
+            if not motivo and op.wms_estado == 'despachado':
+                motivo = self._wis_avanzar_cadena(op)
+            self._ilog({
+                'fecha': fields.Datetime.now(),
+                'nivel': 'error' if motivo else 'info',
+                'modelo': 'stock.picking',
+                'texto': (f"{pedido}: {op.name} estaba preparada por WIS y sin validar; " + (
+                    "sigue sin poder validarse." if motivo else "se validó con lo que tenía cargado.")),
+                'picking_id': op.id,
+                'resultado': 'error' if motivo else 'exito',
+                'detalle': motivo or False,
+            })
+            if motivo:
+                motivos.append(f"{op.name}: {motivo}")
+        self._wis_unificar_saldos_del_pedido(pedido)
+        return motivos
+
+    def _wis_tope_de_cajas_ya_cargadas(self, picking, contenedores):
+        """{producto: cantidad máxima a aplicar} para los productos de las cajas que YA están
+        cargadas en otra operación del pedido (su paquete figura en ella), o {} si no hay.
+
+        Una caja cargada puede volver en un despacho con productos que esa operación no tomó
+        (validación, 20-11-2026: W-P-55947, la caja 40214816 se cargó con 1 de sus 8 productos).
+        De ella se aplica sólo lo que falta registrar del pedido: lo informado por WIS en sus
+        preparaciones, menos lo hecho y lo cargado en otras operaciones. Si no, los productos
+        que ya estaban hechos entraban de nuevo como excedente.
+
+        Una caja que nunca se cargó se aplica entera: su paquete no está en ninguna operación.
+        Con eso no hace falta que la preparación de ESA caja esté guardada; las de antes de que
+        se guardaran las notificaciones no lo están (W-P-41686: lo informado no cubre lo hecho).
+        """
+        pedido = picking.codigo_unico
+        if not pedido or not contenedores:
+            return {}
+        nombres = {c.get('codigoBarras') or str(c.get('numeroContenedor') or '') for c in contenedores}
+        nombres.discard('')
+        if not nombres:
+            return {}
+        cargadas = set(request.env['stock.move.line'].sudo().search([
+            ('picking_id.codigo_unico', '=', pedido),
+            ('picking_id', '!=', picking.id),
+            ('picking_id.picking_type_id.metodo_preparacion_wis', '=', True),
+            ('picking_id.state', '!=', 'cancel'),
+            ('result_package_id.name', 'in', list(nombres)),
+            ('quantity', '>', 0),
+        ]).mapped('result_package_id.name'))
+        if not cargadas:
+            return {}
+        falta = {}
+        for contenido in self._wis_informado_en_preparaciones(pedido).values():
+            for cod, cant in contenido.items():
+                falta[cod] = falta.get(cod, 0) + cant
+        ops = request.env['stock.picking'].sudo().search([
+            ('codigo_unico', '=', pedido), ('id', '!=', picking.id), ('state', '!=', 'cancel'),
+            ('wms_estado', 'not in', ('sin_enviar', 'no_integrado'))])
+        for move in ops.move_ids.filtered(lambda m: m.state != 'cancel'):
+            cod = move.product_id.codigo_unico
+            if cod in falta and (move.state == 'done' or move.picked):
+                falta[cod] -= move.quantity
+        nuevas, de_cargadas = {}, {}
+        for caja in contenedores:
+            nombre = caja.get('codigoBarras') or str(caja.get('numeroContenedor') or '')
+            destino = de_cargadas if nombre in cargadas else nuevas
+            for det in caja.get('detalles') or []:
+                cod, cant = det.get('producto'), det.get('cantidadPreparada') or 0
+                if cod and cant > 0:
+                    destino[cod] = destino.get(cod, 0) + cant
+        return {cod: nuevas.get(cod, 0) + min(cant, max(falta.get(cod, 0), 0))
+                for cod, cant in de_cargadas.items()}
+
     def _handle_confirmacion_pedido(self, data):
         """Spec sección 2: WIS despachó físicamente un pedido.
 
@@ -968,6 +1102,14 @@ Body: {body_str[:500]}"""
                 continue
 
             try:
+                # Operaciones que WIS ya preparó y quedaron sin validar, y saldos repetidos: sin
+                # esto la caja que completa el pedido no tiene dónde entrar (0.14.3).
+                # Validar puede crear un saldo y juntar saldos borra los que sobran.
+                self._wis_destrabar_pedido(nombre_pedido)
+                validos = (validos.exists() | Picking.search(
+                    [('codigo_unico', '=', nombre_pedido)])).filtered(
+                    lambda p: p.wms_estado not in ('sin_enviar', 'no_integrado')
+                    and p.state != 'cancel')
                 aplicadas = Aplicada.search([('pedido', '=', nombre_pedido), ('contenedor', 'in', claves)])
                 registrado = Aplicada.search_count([('pedido', '=', nombre_pedido)])
                 if not registrado:
@@ -1353,6 +1495,22 @@ Body: {body_str[:500]}"""
         # informó en sus preparaciones; lo demás de la caja ya estaba hecho (reenvío).
         faltante = (self._wis_faltante_del_pedido(picking.codigo_unico, contenedores)
                     if picking.env.context.get('wis_posterior_de') else None)
+        # Caja que ya estaba cargada en otra operación del pedido: va sólo lo que falta registrar
+        # (`_wis_tope_de_cajas_ya_cargadas`). La operación nueva ya lo resuelve con `faltante`.
+        tope = {} if faltante is not None else self._wis_tope_de_cajas_ya_cargadas(
+            picking, contenedores)
+        for cod, maximo in tope.items():
+            cant = preparado_por_cod.get(cod, 0)
+            if cant <= maximo:
+                continue
+            reenvios.append(_(
+                "WIS informó %(cant)s de %(cod)s en una caja ya cargada en otra operación del "
+                "pedido y faltaba registrar %(max)s: el resto es un reenvío",
+                cant=cant, cod=cod, max=maximo))
+            if maximo > 0:
+                preparado_por_cod[cod] = maximo
+            else:
+                del preparado_por_cod[cod]
         Producto = request.env['product.product'].sudo().with_context(active_test=False)
         for cod in list(preparado_por_cod):
             cant_total = preparado_por_cod[cod]
@@ -1617,6 +1775,10 @@ Body: {body_str[:500]}"""
                     'detalle': ', '.join(self._wis_clave_contenedor(c) for c in cajas_pedido),
                 })
                 continue
+            # Operaciones que WIS ya preparó y quedaron sin validar, y saldos repetidos (0.14.3).
+            # En el despacho ya se hizo antes de llegar acá.
+            if not getattr(self, '_wis_en_despacho', False):
+                self._wis_destrabar_pedido(nombre_pedido)
             # Spec 3.3 paso 1: buscar por codigo_unico el picking PROCESABLE, luego name.
             # Excluir 'no_integrado': operaciones internas (ej. crosspick) que comparten el código
             # del paso WIS anterior; no deben resolver los webhooks entrantes.
