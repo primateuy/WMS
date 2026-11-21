@@ -1107,9 +1107,28 @@ class TestWebhookMultipedido(WisMultipedidoCase):
                           if m.state not in ('done', 'cancel')}, {self.producto_b: 2})
         self.assertFalse(self._logs(picking.codigo_unico, 'error'))
 
+    def _operacion_trabada(self, tienda):
+        picking = self._preparo(tienda, [(self.producto_a, 2)])
+        with patch.object(type(self.controller), '_wis_validar_preparado',
+                          return_value='e-Remito rechazado (test)'), \
+                self.assertRaisesRegex(ValueError, 'e-Remito rechazado'):
+            self._preparada([picking], [self._contenedor(
+                f'WISCO-TR1-{picking.id}', 402, picking.codigo_unico, [(self.producto_a, 1)])])
+        self._sin_registro_de_cajas(picking)
+        self.assertEqual((picking.state, picking.wms_estado), ('assigned', 'preparado'))
+        return picking
+
+    def test_operacion_trabada_no_se_valida_sin_el_interruptor(self):
+        """Producción: 244 operaciones así. Validarlas emite e-Remitos con fecha de hoy: sólo con
+        integracion_wis.validar_operaciones_trabadas = 1."""
+        picking = self._operacion_trabada(self.tiendas[3])
+        self.controller._wis_destrabar_pedido(picking.codigo_unico)
+        self.assertEqual(picking.state, 'assigned', "sin el interruptor no se toca")
+
     def test_operacion_preparada_sin_validar_se_valida_y_la_caja_completa_el_saldo(self):
         """W-P-41686: POLO/PICK/01561 quedó preparada con 1 de 2 (e-Remito rechazado en octubre) y
         nadie la volvió a validar; la caja con la segunda unidad no tenía saldo donde entrar."""
+        self.env['ir.config_parameter'].sudo().set_param('integracion_wis.validar_operaciones_trabadas', '1')
         picking = self._preparo(self.tiendas[1], [(self.producto_a, 2)])
         with patch.object(type(self.controller), '_wis_validar_preparado',
                           return_value='e-Remito rechazado (test)'), \

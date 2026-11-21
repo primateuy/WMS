@@ -948,8 +948,21 @@ Body: {body_str[:500]}"""
 
         Validar emite el e-Remito con la fecha del día. Si la operación ya estaba despachada en
         WIS, además avanza la entrega a la tienda.
+
+        🔴 Apagado por defecto: sólo valida con el parámetro de sistema
+        `integracion_wis.validar_operaciones_trabadas` = `1`. En producción hay 244 operaciones
+        así (20-11-2026) y validarlas emite e-Remitos con fecha de hoy de mercadería que salió en
+        octubre: lo decide Forum. Además, en validación casi todas fallan porque su paquete tiene
+        hoy mercadería en otra ubicación (WIS reusa los códigos de caja); sin el interruptor eso
+        se reintentaba y se logueaba como error en cada notificación del pedido. Juntar los
+        saldos repetidos no depende del interruptor.
         """
         Picking = request.env['stock.picking'].sudo()
+        activo = request.env['ir.config_parameter'].sudo().get_param(
+            'integracion_wis.validar_operaciones_trabadas', '0') in ('1', 'True', 'true')
+        if not activo:
+            self._wis_unificar_saldos_del_pedido(pedido)
+            return []
         trabadas = Picking.search([
             ('codigo_unico', '=', pedido),
             ('state', 'not in', ('done', 'cancel', 'draft')),
