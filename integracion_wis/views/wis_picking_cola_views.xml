@@ -10,7 +10,7 @@
               decoration-success="estado == 'enviado'"
               decoration-danger="estado == 'error'"
               decoration-warning="estado == 'pendiente' and tipo_error in ('sin_confirmar', 'transitorio')"
-              decoration-muted="estado == 'cancelado'">
+              decoration-muted="estado == 'cancelado' or (estado == 'pendiente' and retenida)">
           <field name="create_date" string="Encolado"/>
           <field name="picking_id"/>
           <field name="codigo_unico"/>
@@ -18,6 +18,10 @@
           <field name="tipo"/>
           <field name="intentos"/>
           <field name="tipo_error" optional="show"/>
+          <field name="retenida" optional="show"/>
+          <field name="control_lineas" optional="show" widget="badge"
+                 decoration-success="control_lineas == 'ok'"
+                 decoration-danger="control_lineas == 'faltan'"/>
           <field name="proximo_intento" optional="show"/>
           <field name="fecha_envio" optional="show"/>
           <field name="log_id" optional="show"/>
@@ -57,6 +61,7 @@
                 <field name="codigo_unico"/>
                 <field name="origin"/>
                 <field name="tipo" readonly="1"/>
+                <field name="retenida" invisible="not retenida"/>
               </group>
               <group>
                 <field name="intentos"/>
@@ -67,6 +72,15 @@
                 <field name="company_id" groups="base.group_multi_company"/>
               </group>
             </group>
+            <div class="alert alert-info" role="alert"
+                 invisible="not retenida or estado != 'pendiente'">
+              Retenida: la está armando una reposición en segundo plano. Sale cuando el
+              proceso termina, con todas sus líneas. «Enviar ahora» la manda tal como está.
+            </div>
+            <group string="Faltan líneas en WIS" invisible="control_lineas != 'faltan'">
+              <field name="control_detalle" nolabel="1" widget="text"/>
+            </group>
+            <field name="control_lineas" invisible="1"/>
             <group string="Último error" invisible="not ultimo_error">
               <field name="ultimo_error" nolabel="1" widget="text"/>
             </group>
@@ -93,6 +107,11 @@
                   domain="[('tipo_error', '=', 'datos')]"/>
           <filter name="filtro_enviado" string="Enviados"
                   domain="[('estado', '=', 'enviado')]"/>
+          <separator/>
+          <filter name="filtro_retenida" string="Retenidas (reposición en curso)"
+                  domain="[('retenida', '=', True), ('estado', '=', 'pendiente')]"/>
+          <filter name="filtro_faltan_lineas" string="Faltan líneas en WIS"
+                  domain="[('control_lineas', '=', 'faltan')]"/>
           <group expand="0" string="Agrupar por">
             <filter name="group_estado" string="Estado" context="{'group_by': 'estado'}"/>
             <filter name="group_tipo_error" string="Motivo" context="{'group_by': 'tipo_error'}"/>

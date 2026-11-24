@@ -26,7 +26,22 @@ reintentos «infinitos»; en support una recepción de 1000 líneas llegó 16 ve
   - *WIS sin atender* (conexión, 502/503/504): no cuenta como intento.
   En los dos últimos casos además **se pausan los envíos a WIS** (5, 15, 60 min) y se corta
   la corrida: seguir con la siguiente operación sólo le suma carga a un WIS que no responde.
+
+🔴 **Una operación sale completa o no sale** (producción, 05 al 24-11-2026: 1.213 pedidos de
+reposición llegaron a WIS sin 7.255 de sus líneas, 43.161 unidades):
+
+* La reposición en segundo plano (REP/…) agrega líneas a la misma operación en tandas que se
+  graban por separado. La cola mandaba la operación con las líneas de las tandas ya grabadas,
+  y las de la tanda que estaba corriendo —invisibles para la transacción del envío— no le
+  llegaban nunca a WIS. Ni la guarda de `_search_picking_for_assignation_domain` lo evita: la
+  tanda buscó la operación cuando todavía estaba «en cola».
+* Por eso el que arma en tandas encola con `wis_cola_retener` y la entrada queda **retenida**
+  hasta que termina y llama a `_liberar`. «Enviar ahora» y «Reintentar» también la liberan.
+* Y por si algo más agrega líneas por otro camino: el envío guarda las líneas que mandó
+  (`lineas_enviadas`) y, pasados `ESPERA_CONTROL_LINEAS`, el cron compara contra las que tiene
+  la operación. Si faltan, queda «Faltan líneas en WIS» y un error en el log de integración.
 """
+import json
 import logging
 import threading
 import time
@@ -45,6 +60,9 @@ PRIORIDAD_NORMAL = 10
 ESPERA_REINTENTO = timedelta(minutes=15)
 # «Procesando» más vieja que esto quedó de una corrida que se cortó a mitad del envío.
 PROCESANDO_COLGADA = timedelta(minutes=15)
+# El control de líneas espera a que termine lo que pudiera estar agregando líneas en paralelo.
+ESPERA_CONTROL_LINEAS = timedelta(minutes=10)
+CONTROL_LINEAS_POR_CORRIDA = 500
 MAX_INTENTOS_POR_DEFECTO = 5
 
 
@@ -94,6 +112,20 @@ class WisPickingCola(models.Model):
         help="Identificador que WIS adjunta a sus errores no controlados. Es lo que hay "
              "que pasarle a WIS para que revise el error.")
     fecha_envio = fields.Datetime(string="Fecha de envío", readonly=True)
+    retenida = fields.Boolean(
+        string="Retenida", readonly=True, copy=False, index=True,
+        help="La está armando un proceso por tandas (reposición en segundo plano): sale "
+             "cuando el proceso termina, con todas sus líneas. «Enviar ahora» la libera.")
+    lineas_enviadas = fields.Text(
+        readonly=True, copy=False,
+        help="Movimientos y cantidades que tenía la operación al enviarse (JSON).")
+    control_lineas = fields.Selection([
+        ('ok', 'Completa'),
+        ('faltan', 'Faltan líneas en WIS'),
+    ], string="Control de líneas", readonly=True, copy=False, index=True,
+        help="Comparación, unos minutos después del envío, entre lo que se le mandó a WIS y "
+             "las líneas que tiene la operación.")
+    control_detalle = fields.Text(string="Detalle del control", readonly=True, copy=False)
     company_id = fields.Many2one(
         'res.company', related='picking_id.company_id', store=True, index=True)
 
@@ -105,11 +137,23 @@ class WisPickingCola(models.Model):
         existente = self.search([
             ('picking_id', '=', picking.id), ('estado', 'in', ('pendiente', 'procesando'))],
             limit=1)
+        retener = bool(self.env.context.get('wis_cola_retener'))
         if existente:
+            if retener and existente.estado == 'pendiente' and not existente.retenida:
+                existente.retenida = True
             return existente
-        entrada = self.create({'picking_id': picking.id, 'tipo': tipo})
+        entrada = self.create({'picking_id': picking.id, 'tipo': tipo, 'retenida': retener})
         self._disparar_cron()
         return entrada
+
+    @api.model
+    def _liberar(self, pickings):
+        """Suelta las entradas retenidas de estas operaciones: el que las armaba terminó."""
+        entradas = self.search([('picking_id', 'in', pickings.ids), ('retenida', '=', True)])
+        if entradas:
+            entradas.write({'retenida': False})
+            self._disparar_cron()
+        return entradas
 
     @api.model
     def _cancelar_de_pickings(self, pickings):
@@ -202,6 +246,8 @@ class WisPickingCola(models.Model):
 
         config = self.env['integracion_wis.integracion_wis']._get_config()
         codigo = picking.codigo_unico or picking._wis_codigo_esperado(self.tipo)
+        # Lo que va a salir, visto con la misma foto de la base que usa el envío.
+        lineas = self._wis_foto_lineas(picking)
         try:
             with self.env.cr.savepoint():
                 response = picking.with_context(
@@ -230,6 +276,8 @@ class WisPickingCola(models.Model):
         self.write({
             'estado': 'enviado', 'fecha_envio': fields.Datetime.now(), 'ultimo_error': False,
             'tipo_error': False, 'proximo_intento': False, 'log_id': False,
+            'lineas_enviadas': json.dumps(lineas), 'control_lineas': False,
+            'control_detalle': False,
         })
         picking._wis_registrar_envio(picking.codigo_unico, self.tipo)
         config._wis_levantar_pausa()
@@ -300,10 +348,67 @@ class WisPickingCola(models.Model):
         })
 
     @api.model
+    def _wis_foto_lineas(self, picking):
+        """{id del movimiento: cantidad} de lo que la operación tiene para mandar."""
+        return {str(m.id): m.product_uom_qty
+                for m in picking.move_ids.filtered(lambda m: m.state != 'cancel')}
+
+    @api.model
+    def _controlar_lineas(self, limite=CONTROL_LINEAS_POR_CORRIDA):
+        """Compara lo enviado contra lo que la operación tiene hoy. Nunca lanza."""
+        entradas = self.search([
+            ('estado', '=', 'enviado'), ('control_lineas', '=', False),
+            ('lineas_enviadas', '!=', False),
+            ('fecha_envio', '<=', fields.Datetime.now() - ESPERA_CONTROL_LINEAS),
+        ], order='fecha_envio, id', limit=limite)
+        for entrada in entradas:
+            try:
+                entrada._controlar_lineas_una()
+            except Exception as e:  # un control que falla no traba la cola
+                _logger.warning("[WIS] Control de líneas de %s falló: %s",
+                                entrada.picking_id.name, e)
+        return entradas
+
+    def _controlar_lineas_una(self):
+        self.ensure_one()
+        picking = self.picking_id
+        enviadas = json.loads(self.lineas_enviadas or '{}')
+        actuales = picking.move_ids.filtered(lambda m: m.state != 'cancel')
+        nuevas = actuales.filtered(lambda m: str(m.id) not in enviadas)
+        crecieron = actuales.filtered(
+            lambda m: str(m.id) in enviadas
+            and m.product_uom_qty > enviadas[str(m.id)] + 1e-6)
+        if not (nuevas or crecieron):
+            self.write({'control_lineas': 'ok'})
+            return True
+        renglones = [_("%(prod)s: %(cant)s (no se envió)", prod=m.product_id.display_name,
+                       cant=m.product_uom_qty) for m in nuevas]
+        renglones += [_("%(prod)s: %(cant)s (se enviaron %(env)s)",
+                        prod=m.product_id.display_name, cant=m.product_uom_qty,
+                        env=enviadas[str(m.id)]) for m in crecieron]
+        detalle = "\n".join(renglones)
+        self.write({'control_lineas': 'faltan', 'control_detalle': detalle})
+        texto = _("%(picking)s: la operación tiene %(n)s línea(s) que WIS no recibió.",
+                  picking=picking.name, n=len(nuevas | crecieron))
+        self.env['wms.integracion.log'].sudo().create({
+            'fecha': fields.Datetime.now(),
+            'nivel': 'error',
+            'modelo': 'stock.picking',
+            'proceso': 'envio',
+            'texto': texto,
+            'detalle': detalle,
+            'picking_id': picking.id,
+            'resultado': 'error',
+            'codigo_unico': picking.codigo_unico,
+        })
+        _logger.error("[WIS] %s\n%s", texto, detalle)
+        return False
+
+    @api.model
     def _siguiente(self, excluir):
         ahora = fields.Datetime.now()
         return self.search([
-            ('estado', '=', 'pendiente'), ('id', 'not in', excluir),
+            ('estado', '=', 'pendiente'), ('id', 'not in', excluir), ('retenida', '=', False),
             '|', ('proximo_intento', '=', False), ('proximo_intento', '<=', ahora),
         ], order='prioridad, id', limit=1)
 
@@ -315,6 +420,7 @@ class WisPickingCola(models.Model):
             return True
         config = Config._get_config()
         self._recuperar_colgadas()
+        self._controlar_lineas()
         if not _en_test():
             self.env.cr.commit()
         if config._wis_en_pausa():
@@ -355,7 +461,9 @@ class WisPickingCola(models.Model):
             lambda e: (e.estado in ('error', 'cancelado') or e.estado == 'pendiente')
             and e.picking_id.state != 'cancel')
         for entrada in entradas:
-            vals = {'estado': 'pendiente', 'proximo_intento': False, 'prioridad': prioridad}
+            # Pedida a mano: sale aunque la esté reteniendo un proceso por tandas.
+            vals = {'estado': 'pendiente', 'proximo_intento': False, 'prioridad': prioridad,
+                    'retenida': False}
             if entrada.estado != 'pendiente':
                 vals['intentos'] = 0
             entrada.write(vals)

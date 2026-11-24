@@ -3,8 +3,11 @@
 
 No golpean la red: `enviarWS` se reemplaza por un doble.
 """
+import json
+from datetime import timedelta
 from unittest.mock import patch
 
+from odoo import fields
 from odoo.tests.common import TransactionCase, tagged
 
 
@@ -217,3 +220,92 @@ class TestColaPickingsWIS(TransactionCase):
             'picking_id': en_cola.id, 'tipo': 'REP', 'estado': 'procesando'})
         move = self._movimiento_nuevo(en_cola)
         self.assertNotEqual(move.picking_id, en_cola)
+
+    # ------------------------------------------------------------------
+    # Retención (armado por tandas) y control de líneas enviadas
+    # ------------------------------------------------------------------
+    def _entrada(self, picking):
+        return self.env['wis.picking.cola'].search([('picking_id', '=', picking.id)])
+
+    def _retenido(self):
+        picking = self._nuevo_picking()
+        picking.with_context(wis_encolar_envios=True, wis_cola_retener=True).action_confirm()
+        return picking
+
+    def test_retenida_no_sale_hasta_liberarla(self):
+        """Producción, 24-11: la reposición sumaba líneas en tandas y la cola mandaba la
+        operación a mitad de armado. Retenida, no sale; liberada, sale."""
+        picking = self._retenido()
+        entrada = self._entrada(picking)
+        self.assertTrue(entrada.retenida)
+        with self._parchear_envio(return_value={'numeroInterfaz': 1}) as enviar:
+            self.env['wis.picking.cola']._cron_procesar()
+        enviar.assert_not_called()
+        self.assertEqual(entrada.estado, 'pendiente')
+
+        self.env['wis.picking.cola']._liberar(picking)
+        self.assertFalse(entrada.retenida)
+        with self._parchear_envio(return_value={'numeroInterfaz': 1}) as enviar:
+            self.env['wis.picking.cola']._cron_procesar()
+        enviar.assert_called_once()
+        self.assertEqual(entrada.estado, 'enviado')
+
+    def test_enviar_ahora_libera_la_retenida(self):
+        picking = self._retenido()
+        entrada = self._entrada(picking)
+        entrada.action_enviar_ahora()
+        self.assertFalse(entrada.retenida)
+        with self._parchear_envio(return_value={'numeroInterfaz': 1}) as enviar:
+            self.env['wis.picking.cola']._cron_procesar()
+        enviar.assert_called_once()
+
+    def test_sin_el_contexto_no_se_retiene(self):
+        self.assertFalse(self._entrada(self._encolado()).retenida)
+
+    def _enviado_y_vencido(self):
+        picking = self._encolado()
+        with self._parchear_envio(return_value={'numeroInterfaz': 1}):
+            self.env['wis.picking.cola']._cron_procesar()
+        entrada = self._entrada(picking)
+        self.assertEqual(entrada.estado, 'enviado')
+        self.assertEqual(json.loads(entrada.lineas_enviadas),
+                         {str(picking.move_ids.id): 7.0})
+        entrada.fecha_envio = fields.Datetime.now() - timedelta(minutes=11)
+        return picking, entrada
+
+    def test_control_completa(self):
+        _picking, entrada = self._enviado_y_vencido()
+        self.env['wis.picking.cola']._controlar_lineas()
+        self.assertEqual(entrada.control_lineas, 'ok')
+
+    def test_control_detecta_linea_que_wis_no_recibio(self):
+        """La alarma: una línea que llegó a la operación después de la foto del envío."""
+        picking, entrada = self._enviado_y_vencido()
+        producto = self.env['product.product'].create({
+            'name': 'Línea tardía cola WIS', 'type': 'product'})
+        self.env['stock.move'].with_context(skip_wms_integration=True).create({
+            'name': 'tardía', 'product_id': producto.id, 'product_uom_qty': 4,
+            'product_uom': producto.uom_id.id, 'picking_id': picking.id,
+            'location_id': picking.location_id.id, 'location_dest_id': picking.location_dest_id.id,
+        })
+        self.env['wis.picking.cola']._controlar_lineas()
+        self.assertEqual(entrada.control_lineas, 'faltan')
+        self.assertIn('Línea tardía cola WIS', entrada.control_detalle)
+        log = self.env['wms.integracion.log'].search(
+            [('picking_id', '=', picking.id), ('nivel', '=', 'error'), ('proceso', '=', 'envio')])
+        self.assertTrue(log)
+        self.assertIn('WIS no recibió', log[0].texto)
+
+    def test_control_detecta_cantidad_que_crecio(self):
+        picking, entrada = self._enviado_y_vencido()
+        picking.move_ids.with_context(skip_wms_integration=True).write({'product_uom_qty': 9})
+        self.env['wis.picking.cola']._controlar_lineas()
+        self.assertEqual(entrada.control_lineas, 'faltan')
+        self.assertIn('se enviaron 7', entrada.control_detalle)
+
+    def test_control_espera_unos_minutos(self):
+        picking = self._encolado()
+        with self._parchear_envio(return_value={'numeroInterfaz': 1}):
+            self.env['wis.picking.cola']._cron_procesar()
+        self.env['wis.picking.cola']._controlar_lineas()
+        self.assertFalse(self._entrada(picking).control_lineas)
