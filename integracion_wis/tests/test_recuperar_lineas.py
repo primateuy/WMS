@@ -93,6 +93,55 @@ class TestRecuperarLineas(WisMultipedidoCase):
         self.assertEqual(sin_revisar, pedido)
 
     # ------------------------------------------------------------------
+    # Grupos del relevamiento (0.14.8)
+    # ------------------------------------------------------------------
+    def _saldo_de(self, pedido, cantidades):
+        saldo = self._preparo(self.tiendas[0], cantidades)
+        saldo.with_context(skip_wms_integration=True).write({
+            'codigo_unico': pedido.codigo_unico, 'backorder_id': pedido.id})
+        return saldo
+
+    def test_clasifica_los_tres_grupos(self):
+        pedido = self._pedido(self.tiendas[0], [self.producto_a, self.producto_b], [self.producto_a])
+        saldo = self._saldo_de(pedido, [(self.producto_a, 3), (self.producto_c, 3)])
+        viejo = self._preparo(self.tiendas[1], [(self.producto_a, 3)])  # sin envío registrado
+        grupos, sin_revisar = (pedido | saldo | viejo)._wis_clasificar_lineas()
+        self.assertEqual(grupos['no_enviadas'],
+                         self._moves(pedido, self.producto_b) | self._moves(saldo, self.producto_c))
+        self.assertEqual(grupos['no_preparadas'], self._moves(saldo, self.producto_a),
+                         "viajó con el código y quedó en el saldo: WIS no la preparó")
+        self.assertEqual(grupos['sin_registro'], viejo.move_ids)
+        self.assertFalse(sin_revisar)
+
+    def test_pedido_abierto_enviado_no_es_de_ningun_grupo(self):
+        """Lo que viajó y sigue en el pedido abierto es lo que WIS tiene (grupo 1)."""
+        pedido = self._pedido(self.tiendas[0], [self.producto_a], [self.producto_a])
+        grupos, _sin_revisar = pedido._wis_clasificar_lineas()
+        self.assertFalse(grupos['no_enviadas'] | grupos['no_preparadas'] | grupos['sin_registro'])
+
+    def test_preparado_o_despachado_no_se_toca(self):
+        """Ésas emiten e-Remito al validarse: van con la regularización, no acá."""
+        viejo = self._preparo(self.tiendas[0], [(self.producto_a, 3)])
+        for estado in ('preparado', 'despachado'):
+            viejo.with_context(skip_wms_integration=True).write({'wms_estado': estado})
+            grupos, _sin_revisar = viejo._wis_clasificar_lineas()
+            self.assertFalse(grupos['sin_registro'], estado)
+
+    def test_cada_grupo_arma_sus_pedidos(self):
+        pedido = self._pedido(self.tiendas[0], [self.producto_a, self.producto_b], [self.producto_a])
+        saldo = self._saldo_de(pedido, [(self.producto_a, 3)])
+        (pedido | saldo).with_context(skip_wms_integration=True).write({'origin': 'REP/00099'})
+        grupos, _sin_revisar = (pedido | saldo)._wis_clasificar_lineas()
+        nueva_3 = self.Picking._wis_recuperar_lineas(grupos['no_enviadas'])
+        nueva_2 = self.Picking._wis_recuperar_lineas(grupos['no_preparadas'], grupo='no_preparadas')
+        self.assertNotEqual(nueva_2, nueva_3)
+        self.assertEqual(nueva_3.origin, 'REP/00099 (recuperación WIS)')
+        self.assertEqual(nueva_2.origin, 'REP/00099 (WIS no preparó)')
+        self.assertEqual(nueva_2.wms_estado, 'sin_enviar')
+        self.assertTrue(nueva_2.wis_envio_retenido)
+        self.assertIn('WIS recibió y no preparó', saldo.message_ids[:1].body)
+
+    # ------------------------------------------------------------------
     # Recuperación
     # ------------------------------------------------------------------
     def _con_comunicacion(self):

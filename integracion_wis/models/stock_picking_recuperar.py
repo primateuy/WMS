@@ -27,6 +27,20 @@ La falla está corregida en la cola (0.14.5). Esto recupera lo que ya quedó as�
   cuando WIS despache el pedido nuevo (`_wis_avanzar_cadena` sigue a los movimientos, no al
   código).
 
+**0.14.8: los otros dos grupos del relevamiento** (24-11-2026), con el mismo mecanismo —pedido
+nuevo por sucursal, sin enviar, y Forum decide—; cada grupo arma sus propios pedidos:
+
+* ``no_enviadas``: lo de arriba (grupo 3, 133.033 u.).
+* ``no_preparadas``: líneas de un saldo que SÍ viajaron con el código y WIS no preparó
+  (grupo 2, 51.701 u.): WIS cerró el pedido sin ellas. Antes de mandarlas otra vez, Polo Oeste
+  tiene que confirmar que el pedido está cerrado en WIS, o se duplica la demanda.
+* ``sin_registro``: operaciones enviadas con un código que no tiene envío registrado —se mandó
+  antes del registro del 05-11, o es un saldo de un pedido de esa época— (grupo 4, 28.073 u.).
+  No se puede saber qué recibió WIS.
+
+Sólo se toman operaciones «enviadas»: las que WIS ya preparó o despachó emiten e-Remito al
+validarse y quedan para la regularización, que va aparte.
+
 El grupo de abastecimiento de la operación lo toma Odoo de sus movimientos (`group_id` es
 related). Una operación con envío manual no suma líneas de otras reposiciones
 (`_search_picking_for_assignation_domain`).
@@ -40,6 +54,13 @@ from odoo import _, api, models
 _logger = logging.getLogger(__name__)
 
 ENDPOINT_PEDIDO = 'Pedido/Create'
+
+# Grupo del relevamiento → (texto del origen, por qué las líneas pasan al pedido nuevo).
+GRUPOS = {
+    'no_enviadas': ("recuperación WIS", "WIS nunca recibió"),
+    'no_preparadas': ("WIS no preparó", "WIS recibió y no preparó"),
+    'sin_registro': ("sin registro WIS", "se mandaron a WIS sin registro del envío"),
+}
 
 
 class StockPicking(models.Model):
@@ -80,31 +101,43 @@ class StockPicking(models.Model):
                     if d.get('codigoProducto'))
         return enviados
 
-    def _wis_lineas_no_enviadas(self):
-        """`self`: operaciones a revisar. Devuelve (movimientos pendientes que WIS nunca
-        recibió, operaciones que no se pudieron revisar)."""
+    def _wis_clasificar_lineas(self):
+        """`self`: operaciones a revisar. Devuelve {grupo: movimientos pendientes} con los grupos
+        de `GRUPOS`, y en ``sin_revisar`` las operaciones que viajaron con cajas."""
         Move = self.env['stock.move']
+        grupos = {g: Move for g in GRUPOS}
+        sin_revisar = self.env['stock.picking']
         candidatas = self.filtered(
             lambda p: p.codigo_unico and p.wms_estado == 'enviado'
             and p.state not in ('done', 'cancel') and p.picking_type_id.integracion_wms)
         enviados = self._wis_productos_enviados(set(candidatas.mapped('codigo_unico')))
-        no_enviadas = Move
-        sin_revisar = self.env['stock.picking']
         for picking in candidatas:
-            productos = enviados.get(picking.codigo_unico)
+            pendientes = picking.move_ids.filtered(
+                lambda m: m.state not in ('done', 'cancel') and m.product_id.codigo_unico)
+            if picking.codigo_unico not in enviados:
+                grupos['sin_registro'] |= pendientes
+                continue
+            productos = enviados[picking.codigo_unico]
             if productos is None:
                 sin_revisar |= picking
                 continue
-            no_enviadas |= picking.move_ids.filtered(
-                lambda m: m.state not in ('done', 'cancel')
-                and m.product_id.codigo_unico and m.product_id.codigo_unico not in productos)
-        return no_enviadas, sin_revisar
+            no_viajaron = pendientes.filtered(lambda m: m.product_id.codigo_unico not in productos)
+            grupos['no_enviadas'] |= no_viajaron
+            if picking.backorder_id:
+                grupos['no_preparadas'] |= pendientes - no_viajaron
+        return grupos, sin_revisar
+
+    def _wis_lineas_no_enviadas(self):
+        """`self`: operaciones a revisar. Devuelve (movimientos pendientes que WIS nunca
+        recibió, operaciones que no se pudieron revisar: sin envío registrado o con cajas)."""
+        grupos, sin_revisar = self._wis_clasificar_lineas()
+        return grupos['no_enviadas'], sin_revisar | grupos['sin_registro'].picking_id
 
     # ------------------------------------------------------------------
     # Recuperación
     # ------------------------------------------------------------------
     @api.model
-    def _wis_recuperar_lineas(self, moves, max_lineas=0):
+    def _wis_recuperar_lineas(self, moves, max_lineas=0, grupo='no_enviadas'):
         """Pasa `moves` a operaciones nuevas —una por tipo, origen, destino y contacto (en la
         reposición, una por sucursal)— que quedan sin enviar a WIS. Con `max_lineas`, parte
         cada operación en otras de ese tamaño como máximo. Devuelve las operaciones nuevas."""
@@ -118,11 +151,12 @@ class StockPicking(models.Model):
             lineas = grupos[clave].sorted('id')
             tamano = max_lineas if max_lineas and max_lineas > 0 else len(lineas)
             for inicio in range(0, len(lineas), tamano):
-                nuevas |= self._wis_recuperar_lote(lineas[inicio:inicio + tamano])
+                nuevas |= self._wis_recuperar_lote(lineas[inicio:inicio + tamano], grupo)
         return nuevas
 
     @api.model
-    def _wis_recuperar_lote(self, moves):
+    def _wis_recuperar_lote(self, moves, grupo='no_enviadas'):
+        rotulo, motivo = GRUPOS[grupo]
         Picking = self.with_context(skip_wms_integration=True)
         origenes = moves.picking_id
         modelo = origenes.sorted('id')[:1]
@@ -134,8 +168,8 @@ class StockPicking(models.Model):
             'partner_id': modelo.partner_id.id,
             'company_id': modelo.company_id.id,
             'move_type': modelo.move_type,
-            'origin': (_("%s (recuperación WIS)") % ", ".join(procesos))[:250] if procesos
-            else _("Recuperación WIS"),
+            'origin': ("%s (%s)" % (", ".join(procesos), rotulo))[:250] if procesos
+            else rotulo[:1].upper() + rotulo[1:],
             'wms_estado': 'sin_enviar',
             'wis_envio_retenido': True,
         })
@@ -147,18 +181,19 @@ class StockPicking(models.Model):
 
         for origen, cantidad in por_origen.items():
             origen.message_post(
-                body=_("%(n)s línea(s) que WIS nunca recibió con %(cod)s pasaron a %(nueva)s, "
-                       "que queda sin enviar a WIS hasta que se decida si se manda o se cancela.",
-                       n=cantidad, cod=origen.codigo_unico, nueva=nueva.name),
+                body=_("%(n)s línea(s) que %(motivo)s con %(cod)s pasaron a %(nueva)s, que queda "
+                       "sin enviar a WIS hasta que se decida si se manda o se cancela.",
+                       n=cantidad, motivo=motivo, cod=origen.codigo_unico, nueva=nueva.name),
                 subtype_xmlid='mail.mt_note')
         nueva.message_post(
-            body=_("Líneas que WIS nunca recibió, recuperadas de: %s. No sale a WIS sola: "
+            body=_("Líneas que %(motivo)s, recuperadas de: %(origenes)s. No sale a WIS sola: "
                    "«Integrar con WMS» la manda como pedido nuevo; «Cancelar» la cancela junto "
-                   "con la entrega a la tienda.")
-            % ", ".join("%s (%s)" % (o.name, o.codigo_unico) for o in origenes),
+                   "con la entrega a la tienda.",
+                   motivo=motivo,
+                   origenes=", ".join("%s (%s)" % (o.name, o.codigo_unico) for o in origenes)),
             subtype_xmlid='mail.mt_note')
-        _logger.info("[WIS] recuperar | %s líneas de %s operaciones pasan a %s (sin enviar)",
-                     len(moves), len(origenes), nueva.name)
+        _logger.info("[WIS] recuperar | %s | %s líneas de %s operaciones pasan a %s (sin enviar)",
+                     grupo, len(moves), len(origenes), nueva.name)
         return nueva
 
 
