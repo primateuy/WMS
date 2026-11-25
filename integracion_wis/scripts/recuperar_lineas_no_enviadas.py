@@ -26,6 +26,9 @@ Variables (todas opcionales, se definen antes del exec):
     DESDE, HASTA   'AAAA-MM-DD': sólo líneas creadas en ese período.
     SOLO_REP       sólo operaciones de la reposición en segundo plano. Por defecto True para
                    'no_enviadas' y False para los otros dos (el grupo 4 no tiene ninguna).
+    TIPO_PEDIDO    'REP' (por defecto): sólo operaciones de tipos con ese tipo de pedido WIS
+                   (en producción, «Preparo de Pedidos»). Vacío: todos los tipos integrados
+                   que salen como pedido (crossdock, web, mayoristas...).
     MAX_LINEAS     tope de líneas por pedido nuevo (0: sin tope).
     DECISION_CSV   el listado devuelto por Forum: sólo se recuperan las filas con
                    `reenviar` = si/sí/x/1. Sin archivo: todas las del filtro.
@@ -42,6 +45,7 @@ SUCURSALES = globals().get('SUCURSALES', [])
 DESDE = globals().get('DESDE')
 HASTA = globals().get('HASTA')
 SOLO_REP = globals().get('SOLO_REP', GRUPO == 'no_enviadas')
+TIPO_PEDIDO = globals().get('TIPO_PEDIDO', 'REP')
 MAX_LINEAS = globals().get('MAX_LINEAS', 0)
 DECISION_CSV = globals().get('DECISION_CSV')
 LISTADO_CSV = globals().get('LISTADO_CSV', '/tmp/recuperar_lineas_wis_%s.csv' % GRUPO)
@@ -51,7 +55,7 @@ Picking = env['stock.picking'].sudo()
 Location = env['stock.location'].sudo()
 GRUPOS = ('no_enviadas', 'no_preparadas', 'sin_registro')
 assert GRUPO in GRUPOS, "GRUPO tiene que ser uno de %s" % (GRUPOS,)
-RESUMEN = {'grupo': GRUPO, 'aplicar': APLICAR}
+RESUMEN = {'grupo': GRUPO, 'tipo_pedido': TIPO_PEDIDO, 'aplicar': APLICAR}
 
 
 def _sucursales():
@@ -81,6 +85,8 @@ dominio = [('wms_estado', '=', 'enviado'), ('state', 'not in', ('done', 'cancel'
            ('codigo_unico', '!=', False), ('picking_type_id.integracion_wms', '=', True)]
 if SOLO_REP:
     dominio.append(('origin', '=like', 'REP/%'))
+if TIPO_PEDIDO:
+    dominio.append(('picking_type_id.tipo_pedido_wis', '=', TIPO_PEDIDO))
 operaciones = Picking.search(dominio, order='id')
 grupos, sin_revisar = operaciones._wis_clasificar_lineas()
 moves = grupos[GRUPO]
@@ -130,8 +136,8 @@ if APLICAR:
         try:
             nuevas = Picking._wis_recuperar_lineas(ms, max_lineas=MAX_LINEAS, grupo=GRUPO)
             env.cr.commit()
-            hechas[nombre] = ["%s (%s, %s líneas)" % (n.name, n.codigo_unico, len(n.move_ids))
-                              for n in nuevas]
+            hechas[nombre] = ["%s (%s, %s líneas)" % (n.name, n.codigo_unico or 'sin enviar',
+                                                       len(n.move_ids)) for n in nuevas]
         except Exception as e:
             env.cr.rollback()
             env.invalidate_all()

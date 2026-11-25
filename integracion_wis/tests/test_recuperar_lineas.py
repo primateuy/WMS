@@ -127,6 +127,22 @@ class TestRecuperarLineas(WisMultipedidoCase):
             grupos, _sin_revisar = viejo._wis_clasificar_lineas()
             self.assertFalse(grupos['sin_registro'], estado)
 
+    def test_las_recepciones_no_se_clasifican(self):
+        """Una recepción no viaja como `/Pedido/Create`: sin esto caería siempre en «sin registro»."""
+        viejo = self._preparo(self.tiendas[0], [(self.producto_a, 3)])
+        self.addCleanup(setattr, self.tipo, 'code', self.tipo.code)
+        self.tipo.code = 'incoming'
+        grupos, _sin_revisar = viejo._wis_clasificar_lineas()
+        self.assertFalse(grupos['sin_registro'])
+
+    def test_el_origen_largo_no_pierde_el_rotulo(self):
+        procesos = ['OP/%07d' % i for i in range(60)]
+        origen = self.Picking._wis_origen_recuperado(procesos, 'sin registro WIS')
+        self.assertLessEqual(len(origen), 250)
+        self.assertTrue(origen.endswith('… (sin registro WIS)'))
+        self.assertEqual(self.Picking._wis_origen_recuperado(['REP/00041'], 'WIS no preparó'),
+                         'REP/00041 (WIS no preparó)')
+
     def test_cada_grupo_arma_sus_pedidos(self):
         pedido = self._pedido(self.tiendas[0], [self.producto_a, self.producto_b], [self.producto_a])
         saldo = self._saldo_de(pedido, [(self.producto_a, 3)])

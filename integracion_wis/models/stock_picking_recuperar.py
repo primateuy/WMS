@@ -107,9 +107,11 @@ class StockPicking(models.Model):
         Move = self.env['stock.move']
         grupos = {g: Move for g in GRUPOS}
         sin_revisar = self.env['stock.picking']
+        # Las recepciones no viajan como `/Pedido/Create`: nunca se pueden comparar con eso.
         candidatas = self.filtered(
             lambda p: p.codigo_unico and p.wms_estado == 'enviado'
-            and p.state not in ('done', 'cancel') and p.picking_type_id.integracion_wms)
+            and p.state not in ('done', 'cancel') and p.picking_type_id.integracion_wms
+            and p.picking_type_id.code != 'incoming')
         enviados = self._wis_productos_enviados(set(candidatas.mapped('codigo_unico')))
         for picking in candidatas:
             pendientes = picking.move_ids.filtered(
@@ -155,6 +157,18 @@ class StockPicking(models.Model):
         return nuevas
 
     @api.model
+    def _wis_origen_recuperado(self, procesos, rotulo, largo=250):
+        """«REP/00041, REP/00042 (rótulo)»: si no entra, se cortan los procesos, nunca el rótulo
+        —es lo que dice de dónde salió la operación—."""
+        if not procesos:
+            return rotulo[:1].upper() + rotulo[1:]
+        sufijo = " (%s)" % rotulo
+        texto = ", ".join(procesos)
+        if len(texto) + len(sufijo) > largo:
+            texto = texto[:largo - len(sufijo) - 1].rstrip(", ") + "…"
+        return texto + sufijo
+
+    @api.model
     def _wis_recuperar_lote(self, moves, grupo='no_enviadas'):
         rotulo, motivo = GRUPOS[grupo]
         Picking = self.with_context(skip_wms_integration=True)
@@ -168,8 +182,7 @@ class StockPicking(models.Model):
             'partner_id': modelo.partner_id.id,
             'company_id': modelo.company_id.id,
             'move_type': modelo.move_type,
-            'origin': ("%s (%s)" % (", ".join(procesos), rotulo))[:250] if procesos
-            else rotulo[:1].upper() + rotulo[1:],
+            'origin': self._wis_origen_recuperado(procesos, rotulo),
             'wms_estado': 'sin_enviar',
             'wis_envio_retenido': True,
         })
