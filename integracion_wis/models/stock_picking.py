@@ -39,8 +39,15 @@ class StockPicking(models.Model):
         index=True,
     )
 
+    wis_envio_retenido = fields.Boolean(
+        string="Envío a WIS manual",
+        copy=False,
+        help="La operación no sale a WIS por ningún disparo automático: sólo con «Integrar con "
+             "WMS». La usan las operaciones con líneas que WIS nunca recibió, para que Forum "
+             "decida si se mandan, se cancelan o se borran.",
+    )
     wis_integracion_manual = fields.Boolean(
-        related='picking_type_id.integracion_manual_wis',
+        compute='_compute_wis_integracion_manual',
         string="Integración Manual WMS",
     )
 
@@ -292,7 +299,7 @@ class StockPicking(models.Model):
         # Integración manual: este tipo NO se envía por disparo automático. Sólo desde
         # la acción manual (wis_envio_manual) o desde la cola (wis_envio_desde_cola, que
         # para estos tipos sólo puede existir si la acción manual lo encoló).
-        if (self.picking_type_id.integracion_manual_wis
+        if (self.wis_integracion_manual
                 and not self.env.context.get('wis_envio_manual')
                 and not self.env.context.get('wis_envio_desde_cola')):
             _logger.info("[WIS] enviarWS | %s: integración manual, no se envía por disparo automático", self.name)
@@ -489,7 +496,7 @@ class StockPicking(models.Model):
         # que el que llama tampoco envíe: el picking queda 'sin_enviar' con el botón "Integrar
         # con WMS". Es el embudo de los 4 puntos de envío (create / _enviar_wis_si_corresponde
         # / write-state / _action_done), así que cubre todos los disparos automáticos.
-        if (self.picking_type_id.integracion_manual_wis
+        if (self.wis_integracion_manual
                 and not self.env.context.get('wis_envio_manual')):
             _logger.info("[WIS] %s | picking=%s: integración manual, no se encola por disparo automático",
                          hook_name, self.name)
@@ -646,7 +653,7 @@ class StockPicking(models.Model):
             # sólo la acción manual (wis_envio_manual). Sin esto, un disparo con
             # `wis_encolar_envios` dejaba el picking en_cola y el cron lo mandaba igual,
             # pese al modo manual (ocultar el campo wms_estado no alcanzaba).
-            if (record.picking_type_id.integracion_manual_wis
+            if (record.wis_integracion_manual
                     and not self.env.context.get('wis_envio_manual')):
                 _logger.info(
                     "[WIS] %s | picking=%s: integración manual, no se envía ni encola por disparo automático",
@@ -694,6 +701,13 @@ class StockPicking(models.Model):
     # ------------------------------------------------------------------
     # Integración manual (envío disparado por acción, no por estado)
     # ------------------------------------------------------------------
+    @api.depends('picking_type_id.integracion_manual_wis', 'wis_envio_retenido')
+    def _compute_wis_integracion_manual(self):
+        """Manual por el tipo de operación o por la operación misma (`wis_envio_retenido`)."""
+        for picking in self:
+            picking.wis_integracion_manual = bool(
+                picking.picking_type_id.integracion_manual_wis or picking.wis_envio_retenido)
+
     def action_integrar_wms_manual(self):
         """Integra manualmente: ENCOLA las operaciones seleccionadas (no espera).
 
@@ -1781,6 +1795,8 @@ class StockMove(models.Model):
             # Cada envío la trababa minutos y los usuarios quedaban esperando: tres caídas.
             # Las «en cola» también tienen código y siguen recibiendo: salen como estén.
             domain += ['|', ('codigo_unico', '=', False), ('wms_estado', '!=', 'sin_enviar')]
+            # Una operación con envío manual espera que alguien decida: no suma líneas nuevas.
+            domain += [('wis_envio_retenido', '=', False)]
         if tipo.adquiere_codigo_unico_wms:
             domain += ['!', ('move_ids.move_orig_ids.picking_id.wms_estado', 'in',
                              WMS_ESTADOS_EN_WIS)]

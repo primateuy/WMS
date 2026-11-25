@@ -77,6 +77,8 @@
                                 <field name="wms_estado"/>
                                 <field name="wms_origen"/>
                                 <field name="wms_fecha_confirmacion" readonly="1"/>
+                                <field name="wis_envio_retenido" readonly="1"
+                                       invisible="not wis_envio_retenido"/>
                             </group>
                             <group>
                                 <field name="wms_referencia" readonly="1"/>

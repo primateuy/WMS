@@ -2,9 +2,11 @@
 """Recupera las líneas que WIS nunca recibió (relevamiento de producción, 24-11-2026).
 
 Ver `models/stock_picking_recuperar.py`: las líneas se mueven a un pedido nuevo por sucursal,
-con su propio código W-P, y salen a WIS por la cola. No se borran ni se duplican.
+que queda SIN ENVIAR a WIS hasta que Forum decida con cada uno: «Integrar con WMS» lo manda
+(con su propio código W-P), «Cancelar» lo cancela junto con la entrega a la tienda, y una vez
+cancelado se puede borrar. No se borran ni se duplican líneas.
 
-Se corre con `odoo-bin shell` DESPUÉS de actualizar integracion_wis a 0.14.6. Sin `APLICAR`
+Se corre con `odoo-bin shell` DESPUÉS de actualizar integracion_wis a 0.14.7. Sin `APLICAR`
 sólo informa y deja el listado en CSV; no cambia nada:
 
     echo "APLICAR = False; exec(open('.../recuperar_lineas_no_enviadas.py').read())" \\
@@ -12,7 +14,8 @@ sólo informa y deja el listado en CSV; no cambia nada:
 
 Variables (todas opcionales, se definen antes del exec):
 
-    APLICAR        False: sólo informa. True: recupera, grabando sucursal por sucursal.
+    APLICAR        False: sólo informa. True: arma los pedidos sin enviar, grabando sucursal
+                   por sucursal. No manda nada a WIS.
     SUCURSALES     ids o nombres de la ubicación destino (la salida de cada sucursal).
                    Vacío: todas. Para la prueba con una sola sucursal.
     DESDE, HASTA   'AAAA-MM-DD': sólo líneas creadas en ese período.

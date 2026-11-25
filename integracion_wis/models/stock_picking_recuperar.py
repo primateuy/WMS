@@ -7,22 +7,29 @@ Odoo, con el código W-P del pedido, pero WIS no las tuvo nunca: 28.177 líneas,
 unidades. Cuando WIS preparaba el pedido, Odoo pasaba esas líneas a un saldo que conserva el
 mismo código, así que también hay que buscarlas en los saldos.
 
-La falla está corregida en la cola (0.14.5). Esto recupera lo que ya quedó así:
+La falla está corregida en la cola (0.14.5). Esto recupera lo que ya quedó así (0.14.7):
 
 * **Detectar.** Una línea pendiente nunca viajó si su producto no está en ningún
   `/Pedido/Create` exitoso del código W-P de su operación (`wis.envio.log`). Si no hay envío
   registrado (anterior al registro, 05-11) o el pedido viajó con cajas (`lpns`, el detalle no
   está en `detalles`), no se puede saber y la operación no se toca.
-* **Recuperar.** Las líneas se MUEVEN a una operación nueva —no se borran ni se duplican— y
-  esa operación sale a WIS por la cola con su propio código (`W-P-<id nuevo>`): WIS no acepta
-  modificar un pedido ya liberado para picking. Como los movimientos son los mismos, la
-  entrega a la tienda sigue encadenada y avanza cuando WIS despache el pedido nuevo
-  (`_wis_avanzar_cadena` sigue a los movimientos, no al código).
+* **Recuperar.** Las líneas se MUEVEN a una operación nueva por sucursal —no se borran ni se
+  duplican— que queda **sin enviar a WIS** y con envío manual (`wis_envio_retenido`): no sale
+  sola por ningún disparo automático. Forum decide con cada una:
+
+  - mandarla con «Integrar con WMS»: toma su propio código (`W-P-<id nuevo>`) y sale por la
+    cola. WIS no acepta modificar un pedido ya liberado para picking, por eso es otro pedido;
+  - cancelarla: se cancela también la entrega a la tienda de esas líneas, que si no quedaría
+    esperando mercadería que no va a llegar;
+  - borrarla, una vez cancelada.
+
+  Como los movimientos son los mismos, la entrega a la tienda sigue encadenada y avanza
+  cuando WIS despache el pedido nuevo (`_wis_avanzar_cadena` sigue a los movimientos, no al
+  código).
 
 El grupo de abastecimiento de la operación lo toma Odoo de sus movimientos (`group_id` es
-related). No hace falta más: una vez enviada queda `enviado` y
-`_search_picking_for_assignation_domain` no le deja sumar líneas, y los grupos de las
-reposiciones viejas ya no generan movimientos nuevos.
+related). Una operación con envío manual no suma líneas de otras reposiciones
+(`_search_picking_for_assignation_domain`).
 """
 import json
 import logging
@@ -99,7 +106,7 @@ class StockPicking(models.Model):
     @api.model
     def _wis_recuperar_lineas(self, moves, max_lineas=0):
         """Pasa `moves` a operaciones nuevas —una por tipo, origen, destino y contacto (en la
-        reposición, una por sucursal)— y las pone en la cola de WIS. Con `max_lineas`, parte
+        reposición, una por sucursal)— que quedan sin enviar a WIS. Con `max_lineas`, parte
         cada operación en otras de ese tamaño como máximo. Devuelve las operaciones nuevas."""
         grupos = defaultdict(lambda: self.env['stock.move'])
         for move in moves.filtered(lambda m: m.state not in ('done', 'cancel') and m.picking_id):
@@ -129,6 +136,8 @@ class StockPicking(models.Model):
             'move_type': modelo.move_type,
             'origin': (_("%s (recuperación WIS)") % ", ".join(procesos))[:250] if procesos
             else _("Recuperación WIS"),
+            'wms_estado': 'sin_enviar',
+            'wis_envio_retenido': True,
         })
         por_origen = {o: len(moves.filtered(lambda m, o=o: m.picking_id == o)) for o in origenes}
         moves = moves.with_context(skip_wms_integration=True)
@@ -136,24 +145,49 @@ class StockPicking(models.Model):
         moves.write({'picking_id': nueva.id})
         nueva._wis_complete_document_type()
 
-        tipo = nueva.picking_type_id.tipo_pedido_wis or 'NORM'
-        nueva.with_context(skip_wms_integration=True).write({
-            'codigo_unico': nueva._wis_codigo_esperado(tipo),
-            'wms_estado': 'en_cola',
-        })
-        self.env['wis.picking.cola'].sudo()._encolar(nueva, tipo)
-
         for origen, cantidad in por_origen.items():
             origen.message_post(
-                body=_("%(n)s línea(s) que WIS nunca recibió con %(cod)s pasaron a %(nueva)s "
-                       "(%(nuevo_cod)s), que sale a WIS como pedido nuevo.",
-                       n=cantidad, cod=origen.codigo_unico, nueva=nueva.name,
-                       nuevo_cod=nueva.codigo_unico),
+                body=_("%(n)s línea(s) que WIS nunca recibió con %(cod)s pasaron a %(nueva)s, "
+                       "que queda sin enviar a WIS hasta que se decida si se manda o se cancela.",
+                       n=cantidad, cod=origen.codigo_unico, nueva=nueva.name),
                 subtype_xmlid='mail.mt_note')
         nueva.message_post(
-            body=_("Líneas que WIS nunca recibió, recuperadas de: %s.")
+            body=_("Líneas que WIS nunca recibió, recuperadas de: %s. No sale a WIS sola: "
+                   "«Integrar con WMS» la manda como pedido nuevo; «Cancelar» la cancela junto "
+                   "con la entrega a la tienda.")
             % ", ".join("%s (%s)" % (o.name, o.codigo_unico) for o in origenes),
             subtype_xmlid='mail.mt_note')
-        _logger.info("[WIS] recuperar | %s líneas de %s operaciones pasan a %s (%s)",
-                     len(moves), len(origenes), nueva.name, nueva.codigo_unico)
+        _logger.info("[WIS] recuperar | %s líneas de %s operaciones pasan a %s (sin enviar)",
+                     len(moves), len(origenes), nueva.name)
         return nueva
+
+
+class StockMove(models.Model):
+    _inherit = 'stock.move'
+
+    def _action_cancel(self):
+        """Cancelar una operación recuperada cancela también el resto de la cadena de esas
+        líneas: en producción, «Intercambio - Envíos» y la recepción de la tienda. Odoo, al
+        cancelar una línea sin `propagate_cancel`, deja la siguiente esperando mercadería que no
+        va a llegar, y sigue contando como pendiente. Una línea de la cadena se cancela sólo
+        cuando todo lo que la abastecía quedó cancelado."""
+        recuperadas = self.filtered(
+            lambda m: m.picking_id.wis_envio_retenido and m.state not in ('done', 'cancel'))
+        siguientes = recuperadas.move_dest_ids.filtered(lambda m: m.state not in ('done', 'cancel'))
+        res = super()._action_cancel()
+        canceladas = self.env['stock.move']
+        while siguientes:
+            a_cancelar = siguientes.filtered(
+                lambda m: m.state not in ('done', 'cancel')
+                and all(o.state == 'cancel' for o in m.move_orig_ids))
+            if not a_cancelar:
+                break
+            siguientes = a_cancelar.move_dest_ids.filtered(
+                lambda m: m.state not in ('done', 'cancel'))
+            a_cancelar._action_cancel()
+            canceladas |= a_cancelar
+        if canceladas:
+            _logger.info("[WIS] recuperar | cancelación de %s: %s línea(s) de la cadena a la "
+                         "tienda canceladas", ", ".join(recuperadas.picking_id.mapped('name')),
+                         len(canceladas))
+        return res
