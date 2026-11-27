@@ -30,6 +30,40 @@ class WisWebhookLog(models.Model):
     # Tipos que no se guardan como notificación: no modifican nada en Odoo.
     TIPOS_SIN_REPROCESO = ('test', 'consultaStock', 'ENTRADA_DEBUG', 'desconocido')
 
+    # `codigo_unico` lleva índice btree, y PostgreSQL rechaza una fila de índice de más de
+    # 2704 bytes. Un camión de ~250 pedidos junta más que eso y el INSERT abortaba toda la
+    # petición: entre el 02 y el 20-11-2026 se perdieron así 12 webhooks a los que WIS vio
+    # con HTTP 200. Se guardan los primeros códigos y cuántos quedaron afuera.
+    LARGO_MAXIMO_CODIGO = 1000
+
+    @classmethod
+    def _recortar_codigo(cls, codigo):
+        if not codigo or len(codigo.encode('utf-8')) <= cls.LARGO_MAXIMO_CODIGO:
+            return codigo
+        codigos = [c.strip() for c in codigo.split(',') if c.strip()]
+        guardados = []
+        for i, c in enumerate(codigos):
+            resto = len(codigos) - i - 1
+            candidato = ', '.join(guardados + [c]) + (f' (+{resto} más)' if resto else '')
+            if len(candidato.encode('utf-8')) > cls.LARGO_MAXIMO_CODIGO:
+                break
+            guardados.append(c)
+        if not guardados:
+            return codigo.encode('utf-8')[:cls.LARGO_MAXIMO_CODIGO - 20].decode('utf-8', 'ignore') + ' (recortado)'
+        return ', '.join(guardados) + f' (+{len(codigos) - len(guardados)} más)'
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get('codigo_unico'):
+                vals['codigo_unico'] = self._recortar_codigo(vals['codigo_unico'])
+        return super().create(vals_list)
+
+    def write(self, vals):
+        if vals.get('codigo_unico'):
+            vals = dict(vals, codigo_unico=self._recortar_codigo(vals['codigo_unico']))
+        return super().write(vals)
+
     def _notificacion_para_reprocesar(self):
         """La notificación de este webhook; si es un log anterior a las notificaciones, la arma
         con el JSON guardado en el log."""

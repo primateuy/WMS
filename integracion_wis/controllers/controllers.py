@@ -6,9 +6,11 @@ import base64
 import logging
 import threading
 import time
-from odoo import http, fields, SUPERUSER_ID, _
+from werkzeug.exceptions import HTTPException, abort
+
+from odoo import api, http, fields, SUPERUSER_ID, _
 from odoo.exceptions import UserError
-from odoo.http import request
+from odoo.http import Response, request
 from markupsafe import Markup
 _logger = logging.getLogger(__name__)
 
@@ -31,26 +33,7 @@ class WebhookWIS(http.Controller):
         body = request.httprequest.get_data()
         
         # ===== LOG INMEDIATO AL LLEGAR =====
-        try:
-            body_str = body.decode('utf-8') if body else 'BODY VACÍO'
-            headers_dict = dict(request.httprequest.headers)
-            debug_msg = f"""WEBHOOK RECIBIDO:
-IP: {request.httprequest.remote_addr}
-Método: {request.httprequest.method}
-Headers: {str(headers_dict)[:500]}
-Body: {body_str[:500]}"""
-            
-            request.env['wis.webhook.log'].sudo().create({
-                'fecha': fields.Date.today(),
-                'hora': time.strftime('%H:%M:%S'),
-                'codigo_unico': self._extraer_codigo_wis(body_str),
-                'request': debug_msg,
-                'respuesta': 'Webhook recibido',
-                'tipo': 'ENTRADA_DEBUG',
-                'estado': 'exito'
-            })
-        except Exception as e:
-            _logger.error(f"Error en log inicial: {str(e)}")
+        self._log_entrada(body)
 
         # if not self._verify_signature(body, signature):
         #     return {'status': 401, 'detail': 'Firma inválida'}
@@ -59,8 +42,68 @@ Body: {body_str[:500]}"""
             payload = json.loads(body)
         except Exception as e:
             response = {'status': 400, 'detail': 'JSON inválido'}
-            self._create_log(body.decode('utf-8') if body else '', response, 'desconocido', 'error', 0)
-            return response
+            self._log_aparte({
+                'fecha': fields.Date.today(),
+                'hora': time.strftime('%H:%M:%S'),
+                'request': body.decode('utf-8', 'replace') if body else '',
+                'respuesta': json.dumps(response, ensure_ascii=False),
+                'tipo': 'desconocido',
+                'estado': 'error',
+            })
+            self._responder_error(response)
+
+        try:
+            return self._callback_payload(payload)
+        except HTTPException:
+            raise
+        except Exception as e:
+            # Lo que no quedó registrado no puede contestarse con 200: WIS lo daría por
+            # procesado y no queda nada en Odoo para reprocesar (12 webhooks perdidos así en
+            # noviembre de 2026). La transacción se deshace y WIS recibe un HTTP 500.
+            _logger.exception("Webhook WIS no registrado: %s", e)
+            request.env.cr.rollback()
+            self._responder_error({'status': 500, 'detail': f'No se registró en Odoo: {e}'})
+
+    def _log_entrada(self, body):
+        """Registro de llegada en una transacción propia: queda aunque la petición falle
+        después, que es justo cuando hace falta saber qué llegó."""
+        try:
+            body_str = body.decode('utf-8') if body else 'BODY VACÍO'
+            headers_dict = dict(request.httprequest.headers)
+            debug_msg = f"""WEBHOOK RECIBIDO:
+IP: {request.httprequest.remote_addr}
+Método: {request.httprequest.method}
+Headers: {str(headers_dict)[:500]}
+Body: {body_str[:500]}"""
+            vals = {
+                'fecha': fields.Date.today(),
+                'hora': time.strftime('%H:%M:%S'),
+                'codigo_unico': self._extraer_codigo_wis(body_str),
+                'request': debug_msg,
+                'respuesta': 'Webhook recibido',
+                'tipo': 'ENTRADA_DEBUG',
+                'estado': 'exito'
+            }
+            self._log_aparte(vals)
+        except Exception as e:
+            _logger.error("Error en log inicial: %s", e)
+
+    @staticmethod
+    def _log_aparte(vals):
+        """Un `wis.webhook.log` en una transacción propia, que se confirma ya: no se pierde si
+        la petición se deshace después."""
+        with request.env.registry.cursor() as cr:
+            api.Environment(cr, SUPERUSER_ID, {})['wis.webhook.log'].create(vals)
+
+    @staticmethod
+    def _responder_error(response):
+        """Corta la petición con el código HTTP de verdad. En una ruta `type='json'` Odoo
+        contesta 200 a todo (también a una excepción) y WIS mira el código HTTP."""
+        status = response.get('status') or 500
+        abort(Response(json.dumps(response, ensure_ascii=False), status=status,
+                       content_type='application/json'))
+
+    def _callback_payload(self, payload):
 
         # Webhooks externos: WIS no autentica como usuario Odoo, por lo que el endpoint
         # corre con auth='public' → request.env.user es el Public User, sin permisos
@@ -312,16 +355,19 @@ Body: {body_str[:500]}"""
             else:
                 respuesta_str = json.dumps({'message': str(respuesta)}, indent=4, ensure_ascii=False)
 
-            request.env['wis.webhook.log'].sudo().create({
-                'fecha': fields.Date.today(),
-                'hora': time.strftime('%H:%M:%S'),
-                'numero_interfaz_ejecucion': numero_interfaz or 0,
-                'codigo_unico': self._extraer_codigo_wis(data, respuesta),
-                'request': request_str,
-                'respuesta': respuesta_str,
-                'tipo': tipo,
-                'estado': estado
-            })
+            # En un savepoint: si el log falla, la petición sigue viva (antes la dejaba
+            # abortada y todo lo que venía después fallaba en cadena).
+            with request.env.cr.savepoint():
+                request.env['wis.webhook.log'].sudo().create({
+                    'fecha': fields.Date.today(),
+                    'hora': time.strftime('%H:%M:%S'),
+                    'numero_interfaz_ejecucion': numero_interfaz or 0,
+                    'codigo_unico': self._extraer_codigo_wis(data, respuesta),
+                    'request': request_str,
+                    'respuesta': respuesta_str,
+                    'tipo': tipo,
+                    'estado': estado
+                })
         except Exception as e:
             _logger.exception("Error guardando log de webhook WIS: %s", str(e))
 
