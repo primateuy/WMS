@@ -50,6 +50,24 @@ _logger = logging.getLogger(__name__)
 # Notificaciones que se procesan pedido por pedido.
 TIPOS_POR_PEDIDO = ('confirmacionMercaderiaPreparada', 'confirmacionPedido')
 PROCESANDO_COLGADA = timedelta(minutes=30)
+# Margen sobre el corte de Odoo para dar por colgada una notificación «procesando»: la corrida
+# confirma después de cada pedido, así que una viva nunca pasa tanto sin escribir.
+MARGEN_COLGADA = 120
+
+
+def _procesando_colgada():
+    """Cuánto sin escribir para que una notificación «procesando» se dé por colgada.
+
+    Una corrida que Odoo mató deja la notificación «procesando». Con un tope fijo de 30 min,
+    en la prueba de volumen del 27-11-2026 quedó parada media hora; ahora se retoma al pasar
+    el corte de Odoo más un margen (≈ 12 min con los 600 s de producción). Sin corte
+    configurado se mantienen los 30 min.
+    """
+    from .models import corte_odoo
+    corte = corte_odoo()
+    if not corte or corte <= 0:
+        return PROCESANDO_COLGADA
+    return min(PROCESANDO_COLGADA, timedelta(seconds=corte + MARGEN_COLGADA))
 # Sin las marcas de `wis.notificacion.aplicado` se aplicarían de nuevo: el resto se protege
 # solo (picking ya validado, contenedor ya aplicado).
 TIPOS_SIN_GUARDA_PROPIA = ('ajustes', 'pedidosAnulados')
@@ -235,7 +253,7 @@ class WisNotificacion(models.Model):
     @api.model
     def _cron_procesar(self):
         colgadas = self.search([('estado', '=', 'procesando'),
-                                ('write_date', '<', fields.Datetime.now() - PROCESANDO_COLGADA)])
+                                ('write_date', '<', fields.Datetime.now() - _procesando_colgada())])
         colgadas.write({'estado': 'pendiente'})
         if not _en_test():
             self.env.cr.commit()
@@ -295,13 +313,19 @@ class WisNotificacion(models.Model):
     def _procesar_por_pedido(self, ctrl, payload, limite):
         errores = json.loads(self.errores or '[]')
         pendientes = json.loads(self.pendientes or '[]')
+        # El pedido más lento de esta corrida: no se empieza otro si no queda el doble de ese
+        # tiempo. Bajo carga un pedido tardó minutos y Odoo cortó la corrida a mitad de uno
+        # (prueba de volumen del 27-11-2026).
+        mas_lento = 0.0
         while pendientes and self.fase == 'pedidos':
-            if _sin_tiempo(limite):
+            if _sin_tiempo(limite - 2 * mas_lento):
                 self.write({'estado': 'pendiente', 'pendientes': json.dumps(pendientes),
                             'errores': json.dumps(errores, ensure_ascii=False)})
                 return False
             pedido = pendientes.pop(0)
+            inicio_pedido = time.time()
             error = ctrl._wis_ejecutar_handler(self.tipo, payload, pedido=pedido)
+            mas_lento = max(mas_lento, time.time() - inicio_pedido)
             if _es_corte_de_cpu(error):
                 # No es un error del pedido: se acabó la CPU de la corrida. El handler ya
                 # deshizo lo suyo; el pedido vuelve a la fila y sigue la corrida siguiente.
