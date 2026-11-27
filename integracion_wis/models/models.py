@@ -409,8 +409,37 @@ class IntegracionWIS(models.Model):
         fallback al comportamiento anterior para no romper instalaciones donde
         la única configuración existente pertenece a otra compañía.
         """
-        config = self.search([('company_id', '=', self.env.company.id)], limit=1)
-        return config or self.search([], limit=1)
+        config_id = self._wis_config_id_compania(self.env.company.id)
+        return self.browse(config_id) if config_id else self.search([], limit=1)
+
+    @api.model
+    @tools.ormcache('company_id')
+    def _wis_config_id_compania(self, company_id):
+        """Id de la configuración de la compañía, en caché.
+
+        Se consulta muchas veces por operación (cada write y validación de un picking pregunta si
+        la comunicación está activa): 17 búsquedas por boleta del PDV (prueba de volumen del
+        27-11-2026). Los campos se siguen leyendo de la base; sólo se guarda el id, y la caché
+        se limpia al crear, cambiar de compañía o borrar una configuración.
+        """
+        return self.sudo().search([('company_id', '=', company_id)], limit=1).id
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        registros = super().create(vals_list)
+        self.env.registry.clear_cache()
+        return registros
+
+    def write(self, vals):
+        res = super().write(vals)
+        if 'company_id' in vals:
+            self.env.registry.clear_cache()
+        return res
+
+    def unlink(self):
+        res = super().unlink()
+        self.env.registry.clear_cache()
+        return res
 
     @api.model
     def _comunicacion_habilitada(self):

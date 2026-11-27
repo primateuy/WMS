@@ -15,3 +15,4 @@ from . import test_notificacion_entregas
 from . import test_conciliacion_productos
 from . import test_recuperar_lineas
 from . import test_webhook_camion_grande
+from . import test_config_cache
